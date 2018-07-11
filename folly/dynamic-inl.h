@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2011-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,17 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #pragma once
 
 #include <functional>
 
-#include <boost/iterator/iterator_adaptor.hpp>
-#include <boost/iterator/iterator_facade.hpp>
-
+#include <folly/CPortability.h>
 #include <folly/Conv.h>
 #include <folly/Format.h>
 #include <folly/Likely.h>
+#include <folly/detail/Iterators.h>
 
 //////////////////////////////////////////////////////////////////////
 
@@ -76,12 +74,22 @@ struct hash<::folly::dynamic> {
 
 namespace folly {
 
-struct TypeError : std::runtime_error {
+struct FOLLY_EXPORT TypeError : std::runtime_error {
   explicit TypeError(const std::string& expected, dynamic::Type actual);
   explicit TypeError(
       const std::string& expected,
       dynamic::Type actual1,
       dynamic::Type actual2);
+  // TODO: noexcept calculation required through gcc-v4.9; remove once upgrading
+  // to gcc-v5.
+  TypeError(const TypeError&) noexcept(
+      std::is_nothrow_copy_constructible<std::runtime_error>::value);
+  TypeError& operator=(const TypeError&) noexcept(
+      std::is_nothrow_copy_assignable<std::runtime_error>::value);
+  TypeError(TypeError&&) noexcept(
+      std::is_nothrow_move_constructible<std::runtime_error>::value);
+  TypeError& operator=(TypeError&&) noexcept(
+      std::is_nothrow_move_assignable<std::runtime_error>::value);
   ~TypeError() override;
 };
 
@@ -188,79 +196,91 @@ inline dynamic::ObjectMaker dynamic::object(dynamic a, dynamic b) {
 
 //////////////////////////////////////////////////////////////////////
 
-struct dynamic::item_iterator : boost::iterator_adaptor<
+struct dynamic::item_iterator : detail::IteratorAdaptor<
                                     dynamic::item_iterator,
-                                    dynamic::ObjectImpl::iterator> {
-  /* implicit */ item_iterator(base_type b) : iterator_adaptor_(b) {}
+                                    dynamic::ObjectImpl::iterator,
+                                    std::pair<dynamic const, dynamic>> {
+  using Super = detail::IteratorAdaptor<
+      dynamic::item_iterator,
+      dynamic::ObjectImpl::iterator,
+      std::pair<dynamic const, dynamic>>;
+  /* implicit */ item_iterator(dynamic::ObjectImpl::iterator b) : Super(b) {}
 
   using object_type = dynamic::ObjectImpl;
-
- private:
-  friend class boost::iterator_core_access;
 };
 
-struct dynamic::value_iterator : boost::iterator_adaptor<
+struct dynamic::value_iterator : detail::IteratorAdaptor<
                                      dynamic::value_iterator,
                                      dynamic::ObjectImpl::iterator,
                                      dynamic> {
-  /* implicit */ value_iterator(base_type b) : iterator_adaptor_(b) {}
+  using Super = detail::IteratorAdaptor<
+      dynamic::value_iterator,
+      dynamic::ObjectImpl::iterator,
+      dynamic>;
+  /* implicit */ value_iterator(dynamic::ObjectImpl::iterator b) : Super(b) {}
 
   using object_type = dynamic::ObjectImpl;
 
- private:
   dynamic& dereference() const {
-    return base_reference()->second;
+    return base()->second;
   }
-  friend class boost::iterator_core_access;
 };
 
 struct dynamic::const_item_iterator
-  : boost::iterator_adaptor<dynamic::const_item_iterator,
-                            dynamic::ObjectImpl::const_iterator> {
-  /* implicit */ const_item_iterator(base_type b) : iterator_adaptor_(b) { }
-  /* implicit */ const_item_iterator(item_iterator i)
-      : iterator_adaptor_(i.base()) {}
-  /* implicit */ const_item_iterator(dynamic::ObjectImpl::iterator i)
-      : iterator_adaptor_(i) {}
+    : detail::IteratorAdaptor<
+          dynamic::const_item_iterator,
+          dynamic::ObjectImpl::const_iterator,
+          std::pair<dynamic const, dynamic> const> {
+  using Super = detail::IteratorAdaptor<
+      dynamic::const_item_iterator,
+      dynamic::ObjectImpl::const_iterator,
+      std::pair<dynamic const, dynamic> const>;
+  /* implicit */ const_item_iterator(dynamic::ObjectImpl::const_iterator b)
+      : Super(b) {}
+  /* implicit */ const_item_iterator(const_item_iterator const& i)
+      : Super(i.base()) {}
+  /* implicit */ const_item_iterator(item_iterator i) : Super(i.base()) {}
 
   using object_type = dynamic::ObjectImpl const;
-
- private:
-  friend class boost::iterator_core_access;
 };
 
-struct dynamic::const_key_iterator
-  : boost::iterator_adaptor<dynamic::const_key_iterator,
-                            dynamic::ObjectImpl::const_iterator,
-                            dynamic const> {
-  /* implicit */ const_key_iterator(base_type b) : iterator_adaptor_(b) { }
+struct dynamic::const_key_iterator : detail::IteratorAdaptor<
+                                         dynamic::const_key_iterator,
+                                         dynamic::ObjectImpl::const_iterator,
+                                         dynamic const> {
+  using Super = detail::IteratorAdaptor<
+      dynamic::const_key_iterator,
+      dynamic::ObjectImpl::const_iterator,
+      dynamic const>;
+  /* implicit */ const_key_iterator(dynamic::ObjectImpl::const_iterator b)
+      : Super(b) {}
 
   using object_type = dynamic::ObjectImpl const;
 
- private:
   dynamic const& dereference() const {
-    return base_reference()->first;
+    return base()->first;
   }
-  friend class boost::iterator_core_access;
 };
 
-struct dynamic::const_value_iterator
-  : boost::iterator_adaptor<dynamic::const_value_iterator,
-                            dynamic::ObjectImpl::const_iterator,
-                            dynamic const> {
-  /* implicit */ const_value_iterator(base_type b) : iterator_adaptor_(b) { }
-  /* implicit */ const_value_iterator(value_iterator i)
-      : iterator_adaptor_(i.base()) {}
+struct dynamic::const_value_iterator : detail::IteratorAdaptor<
+                                           dynamic::const_value_iterator,
+                                           dynamic::ObjectImpl::const_iterator,
+                                           dynamic const> {
+  using Super = detail::IteratorAdaptor<
+      dynamic::const_value_iterator,
+      dynamic::ObjectImpl::const_iterator,
+      dynamic const>;
+  /* implicit */ const_value_iterator(dynamic::ObjectImpl::const_iterator b)
+      : Super(b) {}
+  /* implicit */ const_value_iterator(value_iterator i) : Super(i.base()) {}
   /* implicit */ const_value_iterator(dynamic::ObjectImpl::iterator i)
-      : iterator_adaptor_(i) {}
+      : Super(i) {}
 
   using object_type = dynamic::ObjectImpl const;
 
- private:
   dynamic const& dereference() const {
-    return base_reference()->second;
+    return base()->second;
   }
-  friend class boost::iterator_core_access;
 };
 
 //////////////////////////////////////////////////////////////////////
@@ -341,6 +361,9 @@ template <>
 struct dynamic::NumericTypeHelper<double> {
   using type = double;
 };
+
+inline dynamic::dynamic(std::vector<bool>::reference b)
+    : dynamic(static_cast<bool>(b)) {}
 
 template <
     class T,
@@ -586,6 +609,11 @@ inline dynamic* dynamic::get_ptr(dynamic const& idx) & {
   return const_cast<dynamic*>(const_cast<dynamic const*>(this)->get_ptr(idx));
 }
 
+inline dynamic* dynamic::get_ptr(json_pointer const& jsonPtr) & {
+  return const_cast<dynamic*>(
+      const_cast<dynamic const*>(this)->get_ptr(jsonPtr));
+}
+
 inline dynamic& dynamic::at(dynamic const& idx) & {
   return const_cast<dynamic&>(const_cast<dynamic const*>(this)->at(idx));
 }
@@ -637,6 +665,29 @@ inline void dynamic::update_missing(const dynamic& mergeObj1) {
   for (const auto& pair : mergeObj1.items()) {
     if ((*this).find(pair.first) == (*this).items().end()) {
       (*this)[pair.first] = pair.second;
+    }
+  }
+}
+
+inline void dynamic::merge_patch(const dynamic& patch) {
+  auto& self = *this;
+  if (!patch.isObject()) {
+    self = patch;
+    return;
+  }
+  // if we are not an object, erase all contents, reset to object
+  if (!isObject()) {
+    self = object;
+  }
+  for (const auto& pair : patch.items()) {
+    if (pair.second.isNull()) {
+      // if name could be found in current object, remove it
+      auto it = self.find(pair.first);
+      if (it != self.items().end()) {
+        self.erase(it);
+      }
+    } else {
+      self[pair.first].merge_patch(pair.second);
     }
   }
 }

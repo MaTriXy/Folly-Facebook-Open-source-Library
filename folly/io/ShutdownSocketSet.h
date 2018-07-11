@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -39,10 +39,6 @@ class ShutdownSocketSet : private boost::noncopyable {
    */
   explicit ShutdownSocketSet(int maxFd = 1 << 18);
 
-  // Singleton instance used by all thrift servers.
-  // May return nullptr on startup/shutdown.
-  static std::shared_ptr<ShutdownSocketSet> getInstance();
-
   /**
    * Add an already open socket to the list of sockets managed by
    * ShutdownSocketSet. You MUST close the socket by calling
@@ -74,7 +70,7 @@ class ShutdownSocketSet : private boost::noncopyable {
    * read() and write() operations to the socket will fail. During normal
    * operation, just call ::shutdown() on the socket.
    */
-  void shutdown(int fd, bool abortive=false);
+  void shutdown(int fd, bool abortive = false);
 
   /**
    * Immediate shutdown of all connections. This is a hard-hitting hammer;
@@ -96,7 +92,7 @@ class ShutdownSocketSet : private boost::noncopyable {
    *
    * This is async-signal-safe and ignores errors.
    */
-  void shutdownAll(bool abortive=false);
+  void shutdownAll(bool abortive = false);
 
  private:
   void doShutdown(int fd, bool abortive);

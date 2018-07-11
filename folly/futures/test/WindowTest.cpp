@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2015-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -82,6 +82,96 @@ TEST(Window, basic) {
       }).get();
     EXPECT_EQ(6, res);
   }
+  {
+    // string -> return SemiFuture<int>
+    auto res = reduce(
+                   window(
+                       std::vector<std::string>{"1", "2", "3"},
+                       [](std::string s) {
+                         return makeSemiFuture<int>(folly::to<int>(s));
+                       },
+                       2),
+                   0,
+                   [](int sum, const Try<int>& b) { return sum + *b; })
+                   .get();
+    EXPECT_EQ(6, res);
+  }
+  {
+    SCOPED_TRACE("repeat same fn");
+    auto res = reduce(
+      window(
+        5UL,
+        [](size_t iteration) {
+          return folly::makeFuture(iteration); },
+        2),
+        0UL,
+        [](size_t sum, const Try<size_t>& b) {
+          return sum + b.value();
+        }).get();
+    EXPECT_EQ(0 + 1 + 2 + 3 + 4, res);
+  }
+}
+
+TEST(Window, exception) {
+  std::vector<int> ints = {1, 2, 3, 4};
+  std::vector<Promise<int>> ps(4);
+
+  auto res = reduce(
+      window(
+          ints,
+          [&ps](int i) {
+            if (i > 2) {
+              throw std::runtime_error("exception should not kill process");
+            }
+            return ps[i].getFuture();
+          },
+          2),
+      0,
+      [](int sum, const Try<int>& b) {
+        sum += b.hasException<std::exception>() ? 1 : 0;
+        return sum;
+      });
+
+  for (auto& p : ps) {
+    p.setValue(0);
+  }
+
+  // Should have received 2 exceptions.
+  EXPECT_EQ(2, std::move(res).get());
+}
+
+TEST(Window, stackOverflow) {
+  // Number of futures to spawn.
+  constexpr size_t m = 1000;
+  // Size of each block of input and output.
+  constexpr size_t n = 1000;
+
+  std::vector<std::array<int, n>> ints;
+  int64_t expectedSum = 0;
+  for (size_t i = 0; i < m; i++) {
+    std::array<int, n> next{};
+    next[i % n] = i;
+    ints.emplace_back(next);
+    expectedSum += i;
+  }
+
+  // Try to overflow window's executor.
+  auto res = reduce(
+      window(
+          ints,
+          [](std::array<int, n> i) {
+            return folly::Future<std::array<int, n>>(i);
+          },
+          1),
+      static_cast<int64_t>(0),
+      [](int64_t sum, const Try<std::array<int, n>>& b) {
+        for (int a : b.value()) {
+          sum += a;
+        }
+        return sum;
+      });
+
+  EXPECT_EQ(std::move(res).get(), expectedSum);
 }
 
 TEST(Window, parallel) {
@@ -200,7 +290,7 @@ TEST(WindowExecutor, basic) {
         0,
         [](int sum, const Try<int>& b) { return sum + *b; });
     executor_->waitFor(res);
-    EXPECT_EQ(expect, res.get());
+    EXPECT_EQ(expect, std::move(res).get());
   };
   {
     SCOPED_TRACE("2 in-flight at a time");
@@ -231,7 +321,7 @@ TEST(WindowExecutor, basic) {
           return sum + 1;
         });
     executor.waitFor(res);
-    EXPECT_EQ(3, res.get());
+    EXPECT_EQ(3, std::move(res).get());
   }
   {
     // string -> return Future<int>
@@ -244,7 +334,7 @@ TEST(WindowExecutor, basic) {
         0,
         [](int sum, const Try<int>& b) { return sum + *b; });
     executor.waitFor(res);
-    EXPECT_EQ(6, res.get());
+    EXPECT_EQ(6, std::move(res).get());
   }
 }
 

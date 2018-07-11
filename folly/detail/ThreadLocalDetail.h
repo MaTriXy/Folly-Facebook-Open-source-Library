@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2011-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,13 +28,14 @@
 
 #include <folly/Exception.h>
 #include <folly/Function.h>
-#include <folly/MicroSpinLock.h>
 #include <folly/Portability.h>
 #include <folly/ScopeGuard.h>
 #include <folly/SharedMutex.h>
 #include <folly/container/Foreach.h>
+#include <folly/detail/AtFork.h>
 #include <folly/memory/Malloc.h>
 #include <folly/portability/PThread.h>
+#include <folly/synchronization/MicroSpinLock.h>
 
 #include <folly/detail/StaticSingletonManager.h>
 
@@ -56,6 +57,59 @@ enum class TLPDestructionMode { THIS_THREAD, ALL_THREADS };
 struct AccessModeStrict {};
 
 namespace threadlocal_detail {
+
+constexpr uint32_t kEntryIDInvalid = std::numeric_limits<uint32_t>::max();
+
+struct ThreadEntry;
+/* This represents a node in doubly linked list where all the nodes
+ * are part of an ElementWrapper struct that has the same id.
+ * we cannot use prev and next as ThreadEntryNode pointers since the
+ * ThreadEntry::elements can be reallocated and the pointers will change
+ * in this case. So we keep a pointer to the parent ThreadEntry struct
+ * one for the prev and next and also the id.
+ * We will traverse and update the list only when holding the
+ * StaticMetaBase::lock_
+ */
+struct ThreadEntryNode {
+  uint32_t id;
+  ThreadEntry* parent;
+  ThreadEntry* prev;
+  ThreadEntry* next;
+
+  void initIfZero(bool locked);
+
+  void init(ThreadEntry* entry, uint32_t newId) {
+    id = newId;
+    parent = prev = next = entry;
+  }
+
+  void initZero(ThreadEntry* entry, uint32_t newId) {
+    id = newId;
+    parent = entry;
+    prev = next = nullptr;
+  }
+
+  // if the list this node is part of is empty
+  FOLLY_ALWAYS_INLINE bool empty() const {
+    return (next == parent);
+  }
+
+  FOLLY_ALWAYS_INLINE bool zero() const {
+    return (!prev);
+  }
+
+  FOLLY_ALWAYS_INLINE ThreadEntry* getThreadEntry() {
+    return parent;
+  }
+
+  FOLLY_ALWAYS_INLINE ThreadEntryNode* getPrev();
+
+  FOLLY_ALWAYS_INLINE ThreadEntryNode* getNext();
+
+  void push_back(ThreadEntry* head);
+
+  void eraseZero();
+};
 
 /**
  * POD wrapper around an element (a void*) and an associated deleter.
@@ -92,6 +146,7 @@ struct ElementWrapper {
     DCHECK(deleter1 == nullptr);
 
     if (p) {
+      node.initIfZero(true /*locked*/);
       ptr = p;
       deleter1 = [](void* pt, TLPDestructionMode) {
         delete static_cast<Ptr>(pt);
@@ -111,6 +166,7 @@ struct ElementWrapper {
     DCHECK(ptr == nullptr);
     DCHECK(deleter2 == nullptr);
     if (p) {
+      node.initIfZero(true /*locked*/);
       ptr = p;
       auto d2 = d; // gcc-4.8 doesn't decay types correctly in lambda captures
       deleter2 = new std::function<DeleterFunType>(
@@ -137,9 +193,11 @@ struct ElementWrapper {
     std::function<DeleterFunType>* deleter2;
   };
   bool ownsDeleter;
+  ThreadEntryNode node;
 };
 
 struct StaticMetaBase;
+struct ThreadEntryList;
 
 /**
  * Per-thread entry.  Each thread using a StaticMeta object has one.
@@ -152,12 +210,26 @@ struct ThreadEntry {
   size_t elementsCapacity{0};
   ThreadEntry* next{nullptr};
   ThreadEntry* prev{nullptr};
+  ThreadEntryList* list{nullptr};
+  ThreadEntry* listNext{nullptr};
   StaticMetaBase* meta{nullptr};
+  bool removed_{false};
 };
 
-constexpr uint32_t kEntryIDInvalid = std::numeric_limits<uint32_t>::max();
+struct ThreadEntryList {
+  ThreadEntry* head{nullptr};
+  size_t count{0};
+};
 
 struct PthreadKeyUnregisterTester;
+
+FOLLY_ALWAYS_INLINE ThreadEntryNode* ThreadEntryNode::getPrev() {
+  return &prev->elements[id].node;
+}
+
+FOLLY_ALWAYS_INLINE ThreadEntryNode* ThreadEntryNode::getNext() {
+  return &next->elements[id].node;
+}
 
 /**
  * We want to disable onThreadExit call at the end of shutdown, we don't care
@@ -278,6 +350,8 @@ struct StaticMetaBase {
     t->next = t->prev = t;
   }
 
+  FOLLY_EXPORT static ThreadEntryList* getThreadEntryList();
+
   static void onThreadExit(void* ptr);
 
   uint32_t allocate(EntryID* ent);
@@ -290,13 +364,23 @@ struct StaticMetaBase {
    */
   void reserve(EntryID* id);
 
-  ElementWrapper& get(EntryID* ent);
+  ElementWrapper& getElement(EntryID* ent);
 
-  static void initAtFork();
-  static void registerAtFork(
-      folly::Function<void()> prepare,
-      folly::Function<void()> parent,
-      folly::Function<void()> child);
+  // reserve an id in the head_ ThreadEntry->elements
+  // array if not already there
+  void reserveHeadUnlocked(uint32_t id);
+
+  // push back an entry in the doubly linked list
+  // that corresponds to idx id
+  void pushBackLocked(ThreadEntry* t, uint32_t id);
+  void pushBackUnlocked(ThreadEntry* t, uint32_t id);
+
+  // static helper method to reallocate the ThreadEntry::elements
+  // returns != nullptr if the ThreadEntry::elements was reallocated
+  // nullptr if the ThreadEntry::elements was just extended
+  // and throws stdd:bad_alloc if memory cannot be allocated
+  static ElementWrapper*
+  reallocate(ThreadEntry* threadEntry, uint32_t idval, size_t& newCapacity);
 
   uint32_t nextId_;
   std::vector<uint32_t> freeIds_;
@@ -321,7 +405,8 @@ struct StaticMeta : StaticMetaBase {
       : StaticMetaBase(
             &StaticMeta::getThreadEntrySlow,
             std::is_same<AccessMode, AccessModeStrict>::value) {
-    registerAtFork(
+    detail::AtFork::registerHandler(
+        this,
         /*prepare*/ &StaticMeta::preFork,
         /*parent*/ &StaticMeta::onForkParent,
         /*child*/ &StaticMeta::onForkChild);
@@ -335,31 +420,67 @@ struct StaticMeta : StaticMetaBase {
     return *instance;
   }
 
-  ElementWrapper& get(EntryID* ent) {
-    ThreadEntry* threadEntry = getThreadEntry();
+  FOLLY_ALWAYS_INLINE static ElementWrapper& get(EntryID* ent) {
     uint32_t id = ent->getOrInvalid();
-    // if id is invalid, it is equal to uint32_t's max value.
-    // x <= max value is always true
-    if (UNLIKELY(threadEntry->elementsCapacity <= id)) {
-      reserve(ent);
-      id = ent->getOrInvalid();
-      assert(threadEntry->elementsCapacity > id);
+#ifdef FOLLY_TLD_USE_FOLLY_TLS
+    static FOLLY_TLS ThreadEntry* threadEntry{};
+    static FOLLY_TLS size_t capacity{};
+    // Eliminate as many branches and as much extra code as possible in the
+    // cached fast path, leaving only one branch here and one indirection below.
+    if (UNLIKELY(capacity <= id)) {
+      getSlowReserveAndCache(ent, id, threadEntry, capacity);
     }
+#else
+    ThreadEntry* threadEntry{};
+    size_t capacity{};
+    getSlowReserveAndCache(ent, id, threadEntry, capacity);
+#endif
     return threadEntry->elements[id];
   }
 
-  static ThreadEntry* getThreadEntrySlow() {
+  static void getSlowReserveAndCache(
+      EntryID* ent,
+      uint32_t& id,
+      ThreadEntry*& threadEntry,
+      size_t& capacity) {
+    auto& inst = instance();
+    threadEntry = inst.threadEntry_();
+    if (UNLIKELY(threadEntry->elementsCapacity <= id)) {
+      inst.reserve(ent);
+      id = ent->getOrInvalid();
+    }
+    capacity = threadEntry->elementsCapacity;
+    assert(capacity > id);
+  }
+
+  FOLLY_EXPORT FOLLY_NOINLINE static ThreadEntry* getThreadEntrySlow() {
     auto& meta = instance();
     auto key = meta.pthreadKey_;
     ThreadEntry* threadEntry =
       static_cast<ThreadEntry*>(pthread_getspecific(key));
     if (!threadEntry) {
+      ThreadEntryList* threadEntryList = StaticMeta::getThreadEntryList();
 #ifdef FOLLY_TLD_USE_FOLLY_TLS
       static FOLLY_TLS ThreadEntry threadEntrySingleton;
       threadEntry = &threadEntrySingleton;
 #else
       threadEntry = new ThreadEntry();
 #endif
+      // if the ThreadEntry already exists
+      // but pthread_getspecific returns NULL
+      // do not add the same entry twice to the list
+      // since this would create a loop in the list
+      if (!threadEntry->list) {
+        threadEntry->list = threadEntryList;
+        threadEntry->listNext = threadEntryList->head;
+        threadEntryList->head = threadEntry;
+      }
+
+      // if we're adding a thread entry
+      // we need to increment the list count
+      // even if the entry is reused
+      threadEntryList->count++;
+
       threadEntry->meta = &meta;
       int ret = pthread_setspecific(key, threadEntry);
       checkPosixError(ret, "pthread_setspecific failed");
@@ -367,20 +488,8 @@ struct StaticMeta : StaticMetaBase {
     return threadEntry;
   }
 
-  inline static ThreadEntry* getThreadEntry() {
-#ifdef FOLLY_TLD_USE_FOLLY_TLS
-    static FOLLY_TLS ThreadEntry* threadEntryCache{nullptr};
-    if (UNLIKELY(threadEntryCache == nullptr)) {
-      threadEntryCache = instance().threadEntry_();
-    }
-    return threadEntryCache;
-#else
-    return instance().threadEntry_();
-#endif
-  }
-
-  static void preFork() {
-    instance().lock_.lock();  // Make sure it's created
+  static bool preFork() {
+    return instance().lock_.try_lock(); // Make sure it's created
   }
 
   static void onForkParent() {
@@ -389,8 +498,23 @@ struct StaticMeta : StaticMetaBase {
 
   static void onForkChild() {
     // only the current thread survives
-    instance().head_.next = instance().head_.prev = &instance().head_;
-    ThreadEntry* threadEntry = getThreadEntry();
+    auto& head = instance().head_;
+    // init the head list
+    head.next = head.prev = &head;
+    // init the circular lists
+    for (size_t i = 0u; i < head.elementsCapacity; ++i) {
+      head.elements[i].node.init(&head, static_cast<uint32_t>(i));
+    }
+    // init the thread entry
+    ThreadEntry* threadEntry = instance().threadEntry_();
+    for (size_t i = 0u; i < threadEntry->elementsCapacity; ++i) {
+      if (!threadEntry->elements[i].node.zero()) {
+        threadEntry->elements[i].node.initZero(
+            threadEntry, static_cast<uint32_t>(i));
+        threadEntry->elements[i].node.initIfZero(false /*locked*/);
+      }
+    }
+
     // If this thread was in the list before the fork, add it back.
     if (threadEntry->elementsCapacity != 0) {
       instance().push_back(threadEntry);
@@ -398,6 +522,5 @@ struct StaticMeta : StaticMetaBase {
     instance().lock_.unlock();
   }
 };
-
 } // namespace threadlocal_detail
 } // namespace folly

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2013-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,7 +33,6 @@
 #include <folly/ScopeGuard.h>
 #include <folly/experimental/symbolizer/ElfCache.h>
 #include <folly/experimental/symbolizer/Symbolizer.h>
-#include <folly/portability/PThread.h>
 #include <folly/portability/SysSyscall.h>
 #include <folly/portability/Unistd.h>
 
@@ -101,6 +100,7 @@ struct {
     {SIGABRT, "SIGABRT", {}},
     {SIGBUS, "SIGBUS", {}},
     {SIGTERM, "SIGTERM", {}},
+    {SIGQUIT, "SIGQUIT", {}},
     {0, nullptr, {}},
 };
 
@@ -128,7 +128,7 @@ void callPreviousSignalHandler(int signum) {
 // in our signal handler at a time.
 //
 // Leak it so we don't have to worry about destruction order
-StackTracePrinter* gStackTracePrinter = new StackTracePrinter();
+SafeStackTracePrinter* gStackTracePrinter = new SafeStackTracePrinter();
 
 void printDec(uint64_t val) {
   char buf[20];
@@ -242,7 +242,7 @@ const char* sigbus_reason(int si_code) {
     case BUS_OBJERR:
       return "object-specific hardware error";
 
-    // MCEERR_AR and MCEERR_AO: in sigaction(2) but not in headers.
+      // MCEERR_AR and MCEERR_AO: in sigaction(2) but not in headers.
 
     default:
       return nullptr;
@@ -256,7 +256,7 @@ const char* sigtrap_reason(int si_code) {
     case TRAP_TRACE:
       return "process trace trap";
 
-    // TRAP_BRANCH and TRAP_HWBKPT: in sigaction(2) but not in headers.
+      // TRAP_BRANCH and TRAP_HWBKPT: in sigaction(2) but not in headers.
 
     default:
       return nullptr;

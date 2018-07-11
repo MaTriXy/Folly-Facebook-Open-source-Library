@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2015-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,8 +25,8 @@ namespace folly {
  * Helper class that redirects write() and writev() calls to writeChain().
  */
 template <class T>
-class WriteChainAsyncTransportWrapper :
-  public DecoratedAsyncTransportWrapper<T> {
+class WriteChainAsyncTransportWrapper
+    : public DecoratedAsyncTransportWrapper<T> {
  public:
   using DecoratedAsyncTransportWrapper<T>::DecoratedAsyncTransportWrapper;
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2011-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +49,8 @@
  *            OneAtATimeIntSet;
  *
  * Important differences from std::set and std::map:
- *   - insert() and erase() invalidate iterators and references
+ *   - insert() and erase() invalidate iterators and references.
+       erase(iterator) returns an iterator pointing to the next valid element.
  *   - insert() and erase() are O(N)
  *   - our iterators model RandomAccessIterator
  *   - sorted_vector_map::value_type is pair<K,V>, not pair<const K,V>.
@@ -60,6 +61,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cassert>
 #include <initializer_list>
 #include <iterator>
 #include <stdexcept>
@@ -70,7 +72,8 @@
 #include <boost/operators.hpp>
 
 #include <folly/Traits.h>
-#include <folly/portability/BitsFunctexcept.h>
+#include <folly/Utility.h>
+#include <folly/lang/Exception.h>
 
 namespace folly {
 
@@ -182,16 +185,23 @@ void bulk_insert(
   }
   if (middle != cont.begin() && !cmp(*(middle - 1), *middle)) {
     std::inplace_merge(cont.begin(), middle, cont.end(), cmp);
-    cont.erase(
-        std::unique(
-            cont.begin(),
-            cont.end(),
-            [&](typename OurContainer::value_type const& a,
-                typename OurContainer::value_type const& b) {
-              return !cmp(a, b) && !cmp(b, a);
-            }),
-        cont.end());
   }
+  cont.erase(
+      std::unique(
+          cont.begin(),
+          cont.end(),
+          [&](typename OurContainer::value_type const& a,
+              typename OurContainer::value_type const& b) {
+            return !cmp(a, b) && !cmp(b, a);
+          }),
+      cont.end());
+}
+
+template <typename Container, typename Compare>
+Container&& as_sorted(Container&& container, Compare const& comp) {
+  using namespace std;
+  std::sort(begin(container), end(container), comp);
+  return static_cast<Container&&>(container);
 }
 } // namespace detail
 
@@ -199,7 +209,7 @@ void bulk_insert(
 
 /**
  * A sorted_vector_set is a container similar to std::set<>, but
- * implemented as as a sorted array with std::vector<>.
+ * implemented as a sorted array with std::vector<>.
  *
  * @param class T               Data type to store
  * @param class Compare         Comparison function that imposes a
@@ -287,8 +297,26 @@ class sorted_vector_set
   explicit sorted_vector_set(
       Container&& container,
       const Compare& comp = Compare())
+      : sorted_vector_set(
+            presorted,
+            detail::as_sorted(std::move(container), comp),
+            comp) {}
+
+  // Construct a sorted_vector_set by stealing the storage of a prefilled
+  // container. The container must be sorted, as presorted_t hints. Supports
+  // bulk construction of sorted_vector_set with zero allocations, not counting
+  // those performed by the caller. (The iterator range constructor performs at
+  // least one allocation).
+  //
+  // Note that `sorted_vector_set(presorted_t, const Container& container)` is
+  // not provided, since the purpose of this constructor is to avoid an extra
+  // copy.
+  sorted_vector_set(
+      presorted_t,
+      Container&& container,
+      const Compare& comp = Compare())
       : m_(comp, container.get_allocator()) {
-    std::sort(container.begin(), container.end(), value_comp());
+    assert(std::is_sorted(container.begin(), container.end(), value_comp()));
     m_.cont_.swap(container);
   }
 
@@ -350,12 +378,12 @@ class sorted_vector_set
     return 1;
   }
 
-  void erase(iterator it) {
-    m_.cont_.erase(it);
+  iterator erase(iterator it) {
+    return m_.cont_.erase(it);
   }
 
-  void erase(iterator first, iterator last) {
-    m_.cont_.erase(first, last);
+  iterator erase(iterator first, iterator last) {
+    return m_.cont_.erase(first, last);
   }
 
   iterator find(const key_type& key) {
@@ -539,7 +567,7 @@ class sorted_vector_map
  public:
   typedef Key                                       key_type;
   typedef Value                                     mapped_type;
-  typedef std::pair<key_type,mapped_type>           value_type;
+  typedef typename Container::value_type            value_type;
   typedef Compare                                   key_compare;
 
   struct value_compare : private Compare {
@@ -598,8 +626,26 @@ class sorted_vector_map
   explicit sorted_vector_map(
       Container&& container,
       const Compare& comp = Compare())
+      : sorted_vector_map(
+            presorted,
+            detail::as_sorted(std::move(container), value_compare(comp)),
+            comp) {}
+
+  // Construct a sorted_vector_map by stealing the storage of a prefilled
+  // container. The container must be sorted, as presorted_t hints. S supports
+  // bulk construction of sorted_vector_map with zero allocations, not counting
+  // those performed by the caller. (The iterator range constructor performs at
+  // least one allocation).
+  //
+  // Note that `sorted_vector_map(presorted_t, const Container& container)` is
+  // not provided, since the purpose of this constructor is to avoid an extra
+  // copy.
+  sorted_vector_map(
+      presorted_t,
+      Container&& container,
+      const Compare& comp = Compare())
       : m_(value_compare(comp), container.get_allocator()) {
-    std::sort(container.begin(), container.end(), value_comp());
+    assert(std::is_sorted(container.begin(), container.end(), value_comp()));
     m_.cont_.swap(container);
   }
 
@@ -661,12 +707,12 @@ class sorted_vector_map
     return 1;
   }
 
-  void erase(iterator it) {
-    m_.cont_.erase(it);
+  iterator erase(iterator it) {
+    return m_.cont_.erase(it);
   }
 
-  void erase(iterator first, iterator last) {
-    m_.cont_.erase(first, last);
+  iterator erase(iterator first, iterator last) {
+    return m_.cont_.erase(first, last);
   }
 
   iterator find(const key_type& key) {
@@ -692,7 +738,7 @@ class sorted_vector_map
     if (it != end()) {
       return it->second;
     }
-    std::__throw_out_of_range("sorted_vector_map::at");
+    throw_exception<std::out_of_range>("sorted_vector_map::at");
   }
 
   const mapped_type& at(const key_type& key) const {
@@ -700,7 +746,7 @@ class sorted_vector_map
     if (it != end()) {
       return it->second;
     }
-    std::__throw_out_of_range("sorted_vector_map::at");
+    throw_exception<std::out_of_range>("sorted_vector_map::at");
   }
 
   size_type count(const key_type& key) const {

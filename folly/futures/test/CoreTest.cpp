@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2015-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,13 +25,11 @@ TEST(Core, size) {
   struct Gold {
     typename std::aligned_storage<lambdaBufSize>::type lambdaBuf_;
     folly::Optional<Try<Unit>> result_;
-    std::function<void(Try<Unit>&&)> callback_;
-    futures::detail::FSM<futures::detail::State> fsm_;
+    folly::Function<void(Try<Unit>&&)> callback_;
+    std::atomic<futures::detail::State> state_;
     std::atomic<unsigned char> attached_;
-    std::atomic<bool> active_;
     std::atomic<bool> interruptHandlerSet_;
-    folly::MicroSpinLock interruptLock_;
-    folly::MicroSpinLock executorLock_;
+    futures::detail::SpinLock interruptLock_;
     int8_t priority_;
     Executor* executor_;
     std::shared_ptr<RequestContext> context_;

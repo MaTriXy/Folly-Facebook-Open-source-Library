@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-#include <folly/Baton.h>
 #include <folly/futures/Future.h>
 #include <folly/futures/Promise.h>
 #include <folly/portability/GTest.h>
+#include <folly/synchronization/Baton.h>
 
 using namespace folly;
 
@@ -73,12 +73,20 @@ TEST(Interrupt, secondInterruptNoop) {
   EXPECT_EQ(1, count);
 }
 
-TEST(Interrupt, withinTimedOut) {
+TEST(Interrupt, futureWithinTimedOut) {
   Promise<int> p;
   Baton<> done;
   p.setInterruptHandler([&](const exception_wrapper& /* e */) { done.post(); });
   p.getFuture().within(std::chrono::milliseconds(1));
   // Give it 100ms to time out and call the interrupt handler
-  auto t = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
-  EXPECT_TRUE(done.timed_wait(t));
+  EXPECT_TRUE(done.try_wait_for(std::chrono::milliseconds(100)));
+}
+
+TEST(Interrupt, semiFutureWithinTimedOut) {
+  Promise<int> p;
+  Baton<> done;
+  p.setInterruptHandler([&](const exception_wrapper& /* e */) { done.post(); });
+  p.getSemiFuture().within(std::chrono::milliseconds(1));
+  // Give it 100ms to time out and call the interrupt handler
+  EXPECT_TRUE(done.try_wait_for(std::chrono::milliseconds(100)));
 }

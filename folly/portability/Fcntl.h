@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2016-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@
 
 #ifdef _WIN32
 #include <sys/types.h>
+
+#include <folly/portability/Windows.h>
 
 // I have no idea what the normal values for these are,
 // and really don't care what they are. They're only used

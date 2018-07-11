@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-present Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,11 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
-
-#include <folly/Synchronized.h>
 
 namespace folly {
 
@@ -45,6 +45,12 @@ class RequestData {
   // instance overrides the hasCallback method to return true otherwise
   // the callback will not be executed
   virtual void onUnset() {}
+
+  // Create a child RequestData of this one, or return nullptr (in which case
+  // this RequestData will not exist in the child RequestContext)
+  virtual std::unique_ptr<RequestData> createChild() {
+    return nullptr;
+  }
 };
 
 // If you do not call create() to create a unique request context,
@@ -52,6 +58,8 @@ class RequestData {
 // copied between threads.
 class RequestContext {
  public:
+  RequestContext();
+  ~RequestContext();
   // Create a unique request context for this request.
   // It will be passed between queues / threads (where implemented),
   // so it should be valid for the lifetime of the request.
@@ -98,6 +106,8 @@ class RequestContext {
   void onSet();
   void onUnset();
 
+  std::shared_ptr<RequestContext> createChild();
+
   // The following API is used to pass the context through queues / threads.
   // saveContext is called to get a shared_ptr to the context, and
   // setContext is used to reset it on the other side of the queue.
@@ -123,11 +133,9 @@ class RequestContext {
       std::unique_ptr<RequestData>& data,
       bool strict);
 
-  struct State {
-    std::map<std::string, std::unique_ptr<RequestData>> requestData_;
-    std::set<RequestData*> callbackData_;
-  };
-  folly::Synchronized<State> state_;
+  struct State;
+  std::atomic<State*> state_;
+  std::mutex m_;
 };
 
 class RequestContextScopeGuard {
@@ -155,4 +163,24 @@ class RequestContextScopeGuard {
     RequestContext::setContext(std::move(prev_));
   }
 };
+
+class RootRequestContextGuard : public RequestContextScopeGuard {
+ public:
+  RootRequestContextGuard() : RequestContextScopeGuard() {}
+};
+
+class NestedRequestContextGuard : public RequestContextScopeGuard {
+ public:
+  NestedRequestContextGuard() : RequestContextScopeGuard(createNested()) {}
+
+ private:
+  static std::shared_ptr<RequestContext> createNested() {
+    RequestContext* curr = RequestContext::get();
+    if (curr) {
+      return curr->createChild();
+    }
+    return std::make_shared<RequestContext>();
+  }
+};
+
 } // namespace folly

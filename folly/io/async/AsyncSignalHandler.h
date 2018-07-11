@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2011-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -105,8 +105,8 @@ class AsyncSignalHandler {
   typedef std::map<int, struct event> SignalEventMap;
 
   // Forbidden copy constructor and assignment operator
-  AsyncSignalHandler(AsyncSignalHandler const &);
-  AsyncSignalHandler& operator=(AsyncSignalHandler const &);
+  AsyncSignalHandler(AsyncSignalHandler const&);
+  AsyncSignalHandler& operator=(AsyncSignalHandler const&);
 
   static void libeventCallback(libevent_fd_t signum, short events, void* arg);
 

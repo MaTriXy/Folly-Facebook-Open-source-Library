@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2016-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
-#include <folly/Memory.h>
 #include <folly/io/async/DestructorCheck.h>
+#include <folly/Memory.h>
 #include <folly/portability/GTest.h>
 
 using namespace folly;
 using namespace testing;
 
-class Derived : public DestructorCheck { };
+class Derived : public DestructorCheck {};
 
 TEST(DestructorCheckTest, WithoutGuard) {
   Derived d;

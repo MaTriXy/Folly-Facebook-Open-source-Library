@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2017-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,16 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #pragma once
-#include <folly/Baton.h>
-#include <folly/Executor.h>
+#include <folly/DefaultKeepAliveExecutor.h>
 #include <folly/Memory.h>
-#include <folly/RWSpinLock.h>
+#include <folly/SharedMutex.h>
 #include <folly/executors/GlobalThreadPoolList.h>
 #include <folly/executors/task_queue/LifoSemMPMCQueue.h>
 #include <folly/executors/thread_factory/NamedThreadFactory.h>
 #include <folly/io/async/Request.h>
+#include <folly/portability/GFlags.h>
+#include <folly/synchronization/Baton.h>
 
 #include <algorithm>
 #include <mutex>
@@ -32,10 +32,31 @@
 
 namespace folly {
 
-class ThreadPoolExecutor : public virtual folly::Executor {
+/* Base class for implementing threadpool based executors.
+ *
+ * Dynamic thread behavior:
+ *
+ * ThreadPoolExecutors may vary their actual running number of threads
+ * between minThreads_ and maxThreads_, tracked by activeThreads_.
+ * The actual implementation of joining an idle thread is left to the
+ * ThreadPoolExecutors' subclass (typically by LifoSem try_take_for
+ * timing out).  Idle threads should be removed from threadList_, and
+ * threadsToJoin incremented, and activeThreads_ decremented.
+ *
+ * On task add(), if an executor can garantee there is an active
+ * thread that will handle the task, then nothing needs to be done.
+ * If not, then ensureActiveThreads() should be called to possibly
+ * start another pool thread, up to maxThreads_.
+ *
+ * ensureJoined() is called on add(), such that we can join idle
+ * threads that were destroyed (which can't be joined from
+ * themselves).
+ */
+class ThreadPoolExecutor : public DefaultKeepAliveExecutor {
  public:
   explicit ThreadPoolExecutor(
-      size_t numThreads,
+      size_t maxThreads,
+      size_t minThreads,
       std::shared_ptr<ThreadFactory> threadFactory,
       bool isWaitForAll = false);
 
@@ -64,6 +85,12 @@ class ThreadPoolExecutor : public virtual folly::Executor {
   void stop();
   void join();
 
+  /**
+   * Execute f against all ThreadPoolExecutors, primarily for retrieving and
+   * exporting stats.
+   */
+  static void withAll(FunctionRef<void(ThreadPoolExecutor&)> f);
+
   struct PoolStats {
     PoolStats()
         : threadCount(0),
@@ -78,7 +105,8 @@ class ThreadPoolExecutor : public virtual folly::Executor {
   };
 
   PoolStats getPoolStats();
-  uint64_t getPendingTaskCount();
+  size_t getPendingTaskCount();
+  std::string getName();
 
   struct TaskStats {
     TaskStats() : expired(false), waitTime(0), runTime(0) {}
@@ -121,6 +149,10 @@ class ThreadPoolExecutor : public virtual folly::Executor {
   void addObserver(std::shared_ptr<Observer>);
   void removeObserver(std::shared_ptr<Observer>);
 
+  void setThreadDeathTimeout(std::chrono::milliseconds timeout) {
+    threadTimeout_ = timeout;
+  }
+
  protected:
   // Prerequisite: threadListLock_ writelocked
   void addThreads(size_t n);
@@ -129,7 +161,8 @@ class ThreadPoolExecutor : public virtual folly::Executor {
 
   struct TaskStatsCallbackRegistry;
 
-  struct FOLLY_ALIGN_TO_AVOID_FALSE_SHARING Thread : public ThreadHandle {
+  struct alignas(hardware_destructive_interference_size) Thread
+      : public ThreadHandle {
     explicit Thread(ThreadPoolExecutor* pool)
         : id(nextId++),
           handle(),
@@ -185,8 +218,8 @@ class ThreadPoolExecutor : public virtual folly::Executor {
     return std::make_shared<Thread>(this);
   }
 
-  // Prerequisite: threadListLock_ readlocked
-  virtual uint64_t getPendingTaskCountImpl(const RWSpinLock::ReadHolder&) = 0;
+  // Prerequisite: threadListLock_ readlocked or writelocked
+  virtual size_t getPendingTaskCountImpl() = 0;
 
   class ThreadList {
    public:
@@ -234,9 +267,11 @@ class ThreadPoolExecutor : public virtual folly::Executor {
 
   class StoppedThreadQueue : public BlockingQueue<ThreadPtr> {
    public:
-    void add(ThreadPtr item) override;
+    BlockingQueueAddResult add(ThreadPtr item) override;
     ThreadPtr take() override;
     size_t size() override;
+    folly::Optional<ThreadPtr> try_take_for(
+        std::chrono::milliseconds /*timeout */) override;
 
    private:
     folly::LifoSem sem_;
@@ -248,9 +283,9 @@ class ThreadPoolExecutor : public virtual folly::Executor {
   const bool isWaitForAll_; // whether to wait till event base loop exits
 
   ThreadList threadList_;
-  folly::RWSpinLock threadListLock_;
+  SharedMutex threadListLock_;
   StoppedThreadQueue stoppedThreads_;
-  std::atomic<bool> isJoin_; // whether the current downsizing is a join
+  std::atomic<bool> isJoin_{false}; // whether the current downsizing is a join
 
   struct TaskStatsCallbackRegistry {
     folly::ThreadLocal<bool> inCallback;
@@ -259,6 +294,29 @@ class ThreadPoolExecutor : public virtual folly::Executor {
   std::shared_ptr<TaskStatsCallbackRegistry> taskStatsCallbacks_;
   std::vector<std::shared_ptr<Observer>> observers_;
   folly::ThreadPoolListHook threadPoolHook_;
+
+  // Dynamic thread sizing functions and variables
+  void ensureActiveThreads();
+  void ensureJoined();
+  bool minActive();
+  bool tryTimeoutThread();
+
+  // These are only modified while holding threadListLock_, but
+  // are read without holding the lock.
+  std::atomic<size_t> maxThreads_{0};
+  std::atomic<size_t> minThreads_{0};
+  std::atomic<size_t> activeThreads_{0};
+
+  std::atomic<size_t> threadsToJoin_{0};
+  std::chrono::milliseconds threadTimeout_{0};
+
+  void joinKeepAliveOnce() {
+    if (!std::exchange(keepAliveJoined_, true)) {
+      joinKeepAlive();
+    }
+  }
+
+  bool keepAliveJoined_{false};
 };
 
 } // namespace folly

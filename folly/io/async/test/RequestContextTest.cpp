@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-present Facebook, Inc.
+ * Copyright 2013-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -47,10 +47,8 @@ class TestData : public RequestData {
 TEST(RequestContext, SimpleTest) {
   EventBase base;
 
-
   // There should always be a default context with get()
   EXPECT_TRUE(RequestContext::get() != nullptr);
-
 
   // but not with saveContext()
   EXPECT_EQ(RequestContext::saveContext(), nullptr);
@@ -62,20 +60,19 @@ TEST(RequestContext, SimpleTest) {
   EXPECT_EQ(nullptr, RequestContext::get()->getContextData("test"));
 
   RequestContext::get()->setContextData("test", std::make_unique<TestData>(10));
-  base.runInEventBaseThread([&](){
-      EXPECT_TRUE(RequestContext::get() != nullptr);
-      auto data = dynamic_cast<TestData*>(
-        RequestContext::get()->getContextData("test"))->data_;
-      EXPECT_EQ(10, data);
-      base.terminateLoopSoon();
-    });
-  auto th = std::thread([&](){
-      base.loopForever();
+  base.runInEventBaseThread([&]() {
+    EXPECT_TRUE(RequestContext::get() != nullptr);
+    auto data =
+        dynamic_cast<TestData*>(RequestContext::get()->getContextData("test"))
+            ->data_;
+    EXPECT_EQ(10, data);
+    base.terminateLoopSoon();
   });
+  auto th = std::thread([&]() { base.loopForever(); });
   th.join();
   EXPECT_TRUE(RequestContext::get() != nullptr);
-  auto a = dynamic_cast<TestData*>(
-    RequestContext::get()->getContextData("test"));
+  auto a =
+      dynamic_cast<TestData*>(RequestContext::get()->getContextData("test"));
   auto data = a->data_;
   EXPECT_EQ(10, data);
 
@@ -90,15 +87,17 @@ TEST(RequestContext, setIfAbsentTest) {
   RequestContext::get()->setContextData("test", std::make_unique<TestData>(10));
   EXPECT_FALSE(RequestContext::get()->setContextDataIfAbsent(
       "test", std::make_unique<TestData>(20)));
-  EXPECT_EQ(10,
-            dynamic_cast<TestData*>(
-                RequestContext::get()->getContextData("test"))->data_);
+  EXPECT_EQ(
+      10,
+      dynamic_cast<TestData*>(RequestContext::get()->getContextData("test"))
+          ->data_);
 
   EXPECT_TRUE(RequestContext::get()->setContextDataIfAbsent(
       "test2", std::make_unique<TestData>(20)));
-  EXPECT_EQ(20,
-            dynamic_cast<TestData*>(
-                RequestContext::get()->getContextData("test2"))->data_);
+  EXPECT_EQ(
+      20,
+      dynamic_cast<TestData*>(RequestContext::get()->getContextData("test2"))
+          ->data_);
 
   RequestContext::setContext(std::shared_ptr<RequestContext>());
   EXPECT_TRUE(nullptr != RequestContext::get());
@@ -110,26 +109,30 @@ TEST(RequestContext, testSetUnset) {
   ctx1->setContextData("test", std::make_unique<TestData>(10));
   auto testData1 = dynamic_cast<TestData*>(ctx1->getContextData("test"));
 
+  // onSet called in setContextData
+  EXPECT_EQ(1, testData1->set_);
+
   // Override RequestContext
   RequestContext::create();
   auto ctx2 = RequestContext::saveContext();
   ctx2->setContextData("test", std::make_unique<TestData>(20));
   auto testData2 = dynamic_cast<TestData*>(ctx2->getContextData("test"));
 
+  // onSet called in setContextData
+  EXPECT_EQ(1, testData2->set_);
+
   // Check ctx1->onUnset was called
-  EXPECT_EQ(0, testData1->set_);
   EXPECT_EQ(1, testData1->unset_);
 
   RequestContext::setContext(ctx1);
-  EXPECT_EQ(1, testData1->set_);
+  EXPECT_EQ(2, testData1->set_);
   EXPECT_EQ(1, testData1->unset_);
-  EXPECT_EQ(0, testData2->set_);
   EXPECT_EQ(1, testData2->unset_);
 
   RequestContext::setContext(ctx2);
-  EXPECT_EQ(1, testData1->set_);
+  EXPECT_EQ(2, testData1->set_);
   EXPECT_EQ(2, testData1->unset_);
-  EXPECT_EQ(1, testData2->set_);
+  EXPECT_EQ(2, testData2->set_);
   EXPECT_EQ(1, testData2->unset_);
 }
 
@@ -153,4 +156,49 @@ TEST(RequestContext, deadlockTest) {
   RequestContext::get()->setContextData(
       "test", std::make_unique<DeadlockTestData>("test2"));
   RequestContext::get()->clearContextData("test");
+}
+
+TEST(RequestContext, Nested) {
+  class NestableRequestData : public RequestData {
+   public:
+    explicit NestableRequestData() {}
+    explicit NestableRequestData(int val) : val_(val) {}
+
+    bool hasCallback() override {
+      return false;
+    }
+
+    std::unique_ptr<RequestData> createChild() override {
+      return std::make_unique<NestableRequestData>(val_ + 1);
+    }
+
+    int val_{0};
+
+    static NestableRequestData* get() {
+      return static_cast<NestableRequestData*>(
+          RequestContext::get()->getContextData("nestable"));
+    }
+  };
+
+  RootRequestContextGuard root;
+  RequestContext::get()->setContextData(
+      "nestable", make_unique<NestableRequestData>());
+  RequestContext::get()->setContextData(
+      "unnestable", make_unique<TestData>(42));
+  EXPECT_EQ(NestableRequestData::get()->val_, 0);
+  EXPECT_NE(RequestContext::get()->getContextData("unnestable"), nullptr);
+  EXPECT_NE(NestableRequestData::get(), nullptr);
+  {
+    NestedRequestContextGuard nested1;
+    EXPECT_EQ(NestableRequestData::get()->val_, 1);
+    EXPECT_EQ(RequestContext::get()->getContextData("unnestable"), nullptr);
+    NestedRequestContextGuard nested2;
+    EXPECT_EQ(NestableRequestData::get()->val_, 2);
+    RootRequestContextGuard newRoot;
+    EXPECT_EQ(NestableRequestData::get(), nullptr);
+  }
+  {
+    NestedRequestContextGuard nested1;
+    EXPECT_EQ(NestableRequestData::get()->val_, 1);
+  }
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2016-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,8 +48,8 @@ bool OpenSSLUtils::getTLSMasterKey(
     return true;
   }
 #else
-  (SSL_SESSION*)session;
-  (MutableByteRange) keyOut;
+  (void)session;
+  (void)keyOut;
 #endif
   return false;
 }
@@ -65,15 +65,16 @@ bool OpenSSLUtils::getTLSClientRandom(
     return true;
   }
 #else
-  (SSL*)ssl;
-  (MutableByteRange) randomOut;
+  (void)ssl;
+  (void)randomOut;
 #endif
   return false;
 }
 
-bool OpenSSLUtils::getPeerAddressFromX509StoreCtx(X509_STORE_CTX* ctx,
-                                                  sockaddr_storage* addrStorage,
-                                                  socklen_t* addrLen) {
+bool OpenSSLUtils::getPeerAddressFromX509StoreCtx(
+    X509_STORE_CTX* ctx,
+    sockaddr_storage* addrStorage,
+    socklen_t* addrLen) {
   // Grab the ssl idx and then the ssl object so that we can get the peer
   // name to compare against the ips in the subjectAltName
   auto sslIdx = SSL_get_ex_data_X509_STORE_CTX_idx();
@@ -93,9 +94,10 @@ bool OpenSSLUtils::getPeerAddressFromX509StoreCtx(X509_STORE_CTX* ctx,
   return true;
 }
 
-bool OpenSSLUtils::validatePeerCertNames(X509* cert,
-                                         const sockaddr* addr,
-                                         socklen_t /* addrLen */) {
+bool OpenSSLUtils::validatePeerCertNames(
+    X509* cert,
+    const sockaddr* addr,
+    socklen_t /* addrLen */) {
   // Try to extract the names within the SAN extension from the certificate
   auto altNames = reinterpret_cast<STACK_OF(GENERAL_NAME)*>(
       X509_get_ext_d2i(cert, NID_subject_alt_name, nullptr, nullptr));
@@ -319,30 +321,30 @@ namespace {
 static int boringssl_bio_fd_non_fatal_error(int err) {
   if (
 #ifdef EWOULDBLOCK
-    err == EWOULDBLOCK ||
+      err == EWOULDBLOCK ||
 #endif
 #ifdef WSAEWOULDBLOCK
-    err == WSAEWOULDBLOCK ||
+      err == WSAEWOULDBLOCK ||
 #endif
 #ifdef ENOTCONN
-    err == ENOTCONN ||
+      err == ENOTCONN ||
 #endif
 #ifdef EINTR
-    err == EINTR ||
+      err == EINTR ||
 #endif
 #ifdef EAGAIN
-    err == EAGAIN ||
+      err == EAGAIN ||
 #endif
 #ifdef EPROTO
-    err == EPROTO ||
+      err == EPROTO ||
 #endif
 #ifdef EINPROGRESS
-    err == EINPROGRESS ||
+      err == EINPROGRESS ||
 #endif
 #ifdef EALREADY
-    err == EALREADY ||
+      err == EALREADY ||
 #endif
-    0) {
+      0) {
     return 1;
   }
   return 0;

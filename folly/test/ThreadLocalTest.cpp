@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2011-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -37,11 +37,11 @@
 
 #include <glog/logging.h>
 
-#include <folly/Baton.h>
 #include <folly/Memory.h>
 #include <folly/experimental/io/FsUtil.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/Unistd.h>
+#include <folly/synchronization/Baton.h>
 #include <folly/system/ThreadId.h>
 
 using namespace folly;
@@ -308,14 +308,23 @@ class SimpleThreadCachedInt {
 };
 
 TEST(ThreadLocalPtr, AccessAllThreadsCounter) {
-  const int kNumThreads = 10;
-  SimpleThreadCachedInt stci;
+  const int kNumThreads = 256;
+  SimpleThreadCachedInt stci[kNumThreads + 1];
   std::atomic<bool> run(true);
-  std::atomic<int> totalAtomic(0);
+  std::atomic<int> totalAtomic;
+  ;
   std::vector<std::thread> threads;
+  // thread i will increment all the thread locals
+  // in the range 0..i
   for (int i = 0; i < kNumThreads; ++i) {
-    threads.push_back(std::thread([&]() {
-      stci.add(1);
+    threads.push_back(std::thread([i, // i needs to be captured by value
+                                   &stci,
+                                   &run,
+                                   &totalAtomic]() {
+      for (int j = 0; j <= i; j++) {
+        stci[j].add(1);
+      }
+
       totalAtomic.fetch_add(1);
       while (run.load()) {
         usleep(100);
@@ -323,7 +332,9 @@ TEST(ThreadLocalPtr, AccessAllThreadsCounter) {
     }));
   }
   while (totalAtomic.load() != kNumThreads) { usleep(100); }
-  EXPECT_EQ(kNumThreads, stci.read());
+  for (int i = 0; i <= kNumThreads; i++) {
+    EXPECT_EQ(kNumThreads - i, stci[i].read());
+  }
   run.store(false);
   for (auto& t : threads) {
     t.join();
@@ -578,17 +589,25 @@ TEST(ThreadLocal, Fork2) {
   }
 }
 
-// Elide this test when using any sanitizer. Otherwise, the dlopen'ed code
-// would end up running without e.g., ASAN-initialized data structures and
-// failing right away.
-#if !defined FOLLY_SANITIZE_ADDRESS && !defined UNDEFINED_SANITIZER && \
-    !defined FOLLY_SANITIZE_THREAD
+// Disable the SharedLibrary test when using any sanitizer. Otherwise, the
+// dlopen'ed code would end up running without e.g., ASAN-initialized data
+// structures and failing right away.
+//
+// We also cannot run this test unless folly was compiled with PIC support,
+// since we cannot build thread_local_test_lib.so without PIC.
+#if defined FOLLY_SANITIZE_ADDRESS || defined FOLLY_SANITIZE_THREAD || \
+    !defined FOLLY_SUPPORT_SHARED_LIBRARY
+#define SHARED_LIBRARY_TEST_NAME DISABLED_SharedLibrary
+#else
+#define SHARED_LIBRARY_TEST_NAME SharedLibrary
+#endif
 
-TEST(ThreadLocal, SharedLibrary) {
+TEST(ThreadLocal, SHARED_LIBRARY_TEST_NAME) {
   auto exe = fs::executable_path();
   auto lib = exe.parent_path() / "thread_local_test_lib.so";
   auto handle = dlopen(lib.string().c_str(), RTLD_LAZY);
-  EXPECT_NE(nullptr, handle);
+  ASSERT_NE(nullptr, handle)
+      << "unable to load " << lib.string() << ": " << dlerror();
 
   typedef void (*useA_t)();
   dlerror();
@@ -596,6 +615,7 @@ TEST(ThreadLocal, SharedLibrary) {
 
   const char *dlsym_error = dlerror();
   EXPECT_EQ(nullptr, dlsym_error);
+  ASSERT_NE(nullptr, useA);
 
   useA();
 
@@ -625,7 +645,6 @@ TEST(ThreadLocal, SharedLibrary) {
   t2.join();
 }
 
-#endif
 #endif
 
 namespace folly { namespace threadlocal_detail {

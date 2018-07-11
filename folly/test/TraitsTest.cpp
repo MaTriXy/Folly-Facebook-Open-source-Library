@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2012-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -48,7 +48,6 @@ TEST(Traits, has_member_type) {
 struct T1 {}; // old-style IsRelocatable, below
 struct T2 {}; // old-style IsRelocatable, below
 struct T3 { typedef std::true_type IsRelocatable; };
-struct T4 { typedef std::true_type IsTriviallyCopyable; };
 struct T5 : T3 {};
 
 struct F1 {};
@@ -93,14 +92,7 @@ TEST(Traits, unset) {
   EXPECT_TRUE(IsRelocatable<F4>::value);
 }
 
-TEST(Traits, bitprop) {
-  EXPECT_TRUE(IsTriviallyCopyable<T4>::value);
-  EXPECT_TRUE(IsRelocatable<T4>::value);
-}
-
 TEST(Traits, bitAndInit) {
-  EXPECT_TRUE (IsTriviallyCopyable<int>::value);
-  EXPECT_FALSE(IsTriviallyCopyable<vector<int>>::value);
   EXPECT_TRUE (IsZeroInitializable<int>::value);
   EXPECT_FALSE(IsZeroInitializable<vector<int>>::value);
 }
@@ -263,5 +255,74 @@ TEST(Traits, type_t) {
           value));
   EXPECT_FALSE(
       (::std::is_constructible<::container<std::string>, some_tag, float>::
+           value));
+}
+
+TEST(Traits, remove_cvref) {
+  using folly::remove_cvref;
+  using folly::remove_cvref_t;
+
+  // test all possible c-ref qualifiers without volatile
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int&&>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int&&>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int&>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int&>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int const>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int const>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int const&>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int const&>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int const&&>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int const&&>::type, int>::value));
+
+  // test all possible c-ref qualifiers with volatile
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int volatile>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int volatile>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int volatile&&>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int volatile&&>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int volatile&>, int>::value));
+  EXPECT_TRUE((std::is_same<remove_cvref<int volatile&>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int volatile const>, int>::value));
+  EXPECT_TRUE(
+      (std::is_same<remove_cvref<int volatile const>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int volatile const&>, int>::value));
+  EXPECT_TRUE(
+      (std::is_same<remove_cvref<int volatile const&>::type, int>::value));
+
+  EXPECT_TRUE((std::is_same<remove_cvref_t<int volatile const&&>, int>::value));
+  EXPECT_TRUE(
+      (std::is_same<remove_cvref<int volatile const&&>::type, int>::value));
+}
+
+TEST(Traits, like) {
+  EXPECT_TRUE((std::is_same<like_t<int, char>, char>::value));
+  EXPECT_TRUE((std::is_same<like_t<int const, char>, char const>::value));
+  EXPECT_TRUE((std::is_same<like_t<int volatile, char>, char volatile>::value));
+  EXPECT_TRUE(
+      (std::is_same<like_t<int const volatile, char>, char const volatile>::
+           value));
+  EXPECT_TRUE((std::is_same<like_t<int&, char>, char&>::value));
+  EXPECT_TRUE((std::is_same<like_t<int const&, char>, char const&>::value));
+  EXPECT_TRUE(
+      (std::is_same<like_t<int volatile&, char>, char volatile&>::value));
+  EXPECT_TRUE(
+      (std::is_same<like_t<int const volatile&, char>, char const volatile&>::
+           value));
+  EXPECT_TRUE((std::is_same<like_t<int&&, char>, char&&>::value));
+  EXPECT_TRUE((std::is_same<like_t<int const&&, char>, char const&&>::value));
+  EXPECT_TRUE(
+      (std::is_same<like_t<int volatile&&, char>, char volatile&&>::value));
+  EXPECT_TRUE(
+      (std::is_same<like_t<int const volatile&&, char>, char const volatile&&>::
            value));
 }

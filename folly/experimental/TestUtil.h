@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2012-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,7 +52,6 @@ class TemporaryFile {
 
   // Movable, but not copyable
   TemporaryFile(TemporaryFile&& other) noexcept {
-    reset();
     assign(other);
   }
 
@@ -135,8 +134,8 @@ class ChangeToTempDir {
   const fs::path& path() const { return dir_.path(); }
 
  private:
-  fs::path initialPath_;
   TemporaryDirectory dir_;
+  fs::path orig_;
 };
 
 namespace detail {

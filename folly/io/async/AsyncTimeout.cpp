@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-present Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,32 +26,27 @@ namespace folly {
 
 AsyncTimeout::AsyncTimeout(TimeoutManager* timeoutManager)
     : timeoutManager_(timeoutManager) {
-
   folly_event_set(
       &event_, -1, EV_TIMEOUT, &AsyncTimeout::libeventCallback, this);
   event_.ev_base = nullptr;
   timeoutManager_->attachTimeoutManager(
-      this,
-      TimeoutManager::InternalEnum::NORMAL);
+      this, TimeoutManager::InternalEnum::NORMAL);
 }
 
-AsyncTimeout::AsyncTimeout(EventBase* eventBase)
-    : timeoutManager_(eventBase) {
-
+AsyncTimeout::AsyncTimeout(EventBase* eventBase) : timeoutManager_(eventBase) {
   folly_event_set(
       &event_, -1, EV_TIMEOUT, &AsyncTimeout::libeventCallback, this);
   event_.ev_base = nullptr;
   if (eventBase) {
     timeoutManager_->attachTimeoutManager(
-      this,
-      TimeoutManager::InternalEnum::NORMAL);
+        this, TimeoutManager::InternalEnum::NORMAL);
   }
 }
 
-AsyncTimeout::AsyncTimeout(TimeoutManager* timeoutManager,
-                             InternalEnum internal)
+AsyncTimeout::AsyncTimeout(
+    TimeoutManager* timeoutManager,
+    InternalEnum internal)
     : timeoutManager_(timeoutManager) {
-
   folly_event_set(
       &event_, -1, EV_TIMEOUT, &AsyncTimeout::libeventCallback, this);
   event_.ev_base = nullptr;
@@ -60,14 +55,13 @@ AsyncTimeout::AsyncTimeout(TimeoutManager* timeoutManager,
 
 AsyncTimeout::AsyncTimeout(EventBase* eventBase, InternalEnum internal)
     : timeoutManager_(eventBase) {
-
   folly_event_set(
       &event_, -1, EV_TIMEOUT, &AsyncTimeout::libeventCallback, this);
   event_.ev_base = nullptr;
   timeoutManager_->attachTimeoutManager(this, internal);
 }
 
-AsyncTimeout::AsyncTimeout(): timeoutManager_(nullptr) {
+AsyncTimeout::AsyncTimeout() : timeoutManager_(nullptr) {
   folly_event_set(
       &event_, -1, EV_TIMEOUT, &AsyncTimeout::libeventCallback, this);
   event_.ev_base = nullptr;
@@ -90,6 +84,7 @@ bool AsyncTimeout::scheduleTimeout(uint32_t milliseconds) {
 void AsyncTimeout::cancelTimeout() {
   if (isScheduled()) {
     timeoutManager_->cancelTimeout(this);
+    context_.reset();
   }
 }
 

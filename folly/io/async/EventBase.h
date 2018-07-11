@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 #pragma once
 
 #include <atomic>
@@ -32,7 +31,6 @@
 #include <utility>
 
 #include <boost/intrusive/list.hpp>
-#include <boost/utility.hpp>
 #include <glog/logging.h>
 
 #include <folly/Executor.h>
@@ -40,6 +38,9 @@
 #include <folly/Portability.h>
 #include <folly/ScopeGuard.h>
 #include <folly/executors/DrivableExecutor.h>
+#include <folly/executors/IOExecutor.h>
+#include <folly/executors/ScheduledExecutor.h>
+#include <folly/executors/SequencedExecutor.h>
 #include <folly/experimental/ExecutionObserver.h>
 #include <folly/io/async/AsyncTimeout.h>
 #include <folly/io/async/HHWheelTimer.h>
@@ -72,8 +73,7 @@ class EventBaseObserver {
 
   virtual uint32_t getSampleRate() const = 0;
 
-  virtual void loopSample(
-    int64_t busyTime, int64_t idleTime) = 0;
+  virtual void loopSample(int64_t busyTime, int64_t idleTime) = 0;
 };
 
 // Helper class that sets and retrieves the EventBase associated with a given
@@ -127,7 +127,10 @@ class VirtualEventBase;
  */
 class EventBase : private boost::noncopyable,
                   public TimeoutManager,
-                  public DrivableExecutor {
+                  public DrivableExecutor,
+                  public IOExecutor,
+                  public SequencedExecutor,
+                  public ScheduledExecutor {
  public:
   using Func = folly::Function<void()>;
 
@@ -150,6 +153,7 @@ class EventBase : private boost::noncopyable,
 
     virtual void runLoopCallback() noexcept = 0;
     void cancelLoopCallback() {
+      context_.reset();
       unlink();
     }
 
@@ -158,9 +162,9 @@ class EventBase : private boost::noncopyable,
     }
 
    private:
-    typedef boost::intrusive::list<
-      LoopCallback,
-      boost::intrusive::constant_time_size<false> > List;
+    typedef boost::intrusive::
+        list<LoopCallback, boost::intrusive::constant_time_size<false>>
+            List;
 
     // EventBase needs access to LoopCallbackList (and therefore to hook_)
     friend class EventBase;
@@ -201,13 +205,20 @@ class EventBase : private boost::noncopyable,
   /**
    * Create a new EventBase object.
    *
+   * Same as EventBase(true), which constructs an EventBase that measures time.
+   */
+  EventBase() : EventBase(true) {}
+
+  /**
+   * Create a new EventBase object.
+   *
    * @param enableTimeMeasurement Informs whether this event base should measure
    *                              time. Disabling it would likely improve
    *                              performance, but will disable some features
    *                              that relies on time-measurement, including:
    *                              observer, max latency and avg loop time.
    */
-  explicit EventBase(bool enableTimeMeasurement = true);
+  explicit EventBase(bool enableTimeMeasurement);
 
   /**
    * Create a new EventBase object that will use the specified libevent
@@ -241,6 +252,12 @@ class EventBase : private boost::noncopyable,
    * occurs waiting for events, false will be returned.
    */
   bool loop();
+
+  /**
+   * Same as loop(), but doesn't wait for all keep-alive tokens to be released.
+   */
+  [[deprecated("This should only be used in legacy unit tests")]] bool
+  loopIgnoreKeepAlive();
 
   /**
    * Wait for some events to become active, run them, then return.
@@ -465,7 +482,7 @@ class EventBase : private boost::noncopyable,
   }
 
   /**
-    * check if the event base loop is running.
+   * check if the event base loop is running.
    */
   bool isRunning() const {
     return loopThread_.load(std::memory_order_relaxed) != std::thread::id();
@@ -517,7 +534,9 @@ class EventBase : private boost::noncopyable,
   // Avoid using these functions if possible.  These functions are not
   // guaranteed to always be present if we ever provide alternative EventBase
   // implementations that do not use libevent internally.
-  event_base* getLibeventBase() const { return evb_; }
+  event_base* getLibeventBase() const {
+    return evb_;
+  }
   static const char* getLibeventVersion();
   static const char* getLibeventMethod();
 
@@ -534,9 +553,7 @@ class EventBase : private boost::noncopyable,
   class SmoothLoopTime {
    public:
     explicit SmoothLoopTime(std::chrono::microseconds timeInterval)
-        : expCoeff_(-1.0 / timeInterval.count()),
-          value_(0.0),
-          oldBusyLeftover_(0) {
+        : expCoeff_(-1.0 / timeInterval.count()), value_(0.0) {
       VLOG(11) << "expCoeff_ " << expCoeff_ << " " << __PRETTY_FUNCTION__;
     }
 
@@ -544,11 +561,14 @@ class EventBase : private boost::noncopyable,
     void reset(double value = 0.0);
 
     void addSample(
-        std::chrono::microseconds idle,
+        std::chrono::microseconds total,
         std::chrono::microseconds busy);
 
     double get() const {
-      return value_;
+      // Add the outstanding buffered times linearly, to avoid
+      // expensive exponentiation
+      auto lcoeff = buffer_time_.count() * -expCoeff_;
+      return value_ * (1.0 - lcoeff) + lcoeff * busy_buffer_.count();
     }
 
     void dampen(double factor) {
@@ -558,7 +578,10 @@ class EventBase : private boost::noncopyable,
    private:
     double expCoeff_;
     double value_;
-    std::chrono::microseconds oldBusyLeftover_;
+    std::chrono::microseconds buffer_time_{0};
+    std::chrono::microseconds busy_buffer_{0};
+    std::size_t buffer_cnt_{0};
+    static constexpr std::chrono::milliseconds buffer_interval_{10};
   };
 
   void setObserver(const std::shared_ptr<EventBaseObserver>& observer) {
@@ -613,13 +636,8 @@ class EventBase : private boost::noncopyable,
     loopOnce();
   }
 
-  /// Returns you a handle which make loop() behave like loopForever() until
-  /// destroyed. loop() will return to its original behavior only when all
-  /// loop keep-alives are released.
-  KeepAlive getKeepAliveToken() override {
-    keepAliveAcquire();
-    return makeKeepAlive();
-  }
+  // Implements the ScheduledExecutor interface
+  void scheduleAt(Func&& fn, TimePoint const& timeout) override;
 
   // TimeoutManager
   void attachTimeoutManager(
@@ -646,18 +664,22 @@ class EventBase : private boost::noncopyable,
   // don't need to manage the life time of the VirtualEventBase used.
   folly::VirtualEventBase& getVirtualEventBase();
 
+  /// Implements the IOExecutor interface
+  EventBase* getEventBase() override;
+
  protected:
-  void keepAliveAcquire() override {
+  bool keepAliveAcquire() override {
     if (inRunningEventBaseThread()) {
       loopKeepAliveCount_++;
     } else {
       loopKeepAliveCountAtomic_.fetch_add(1, std::memory_order_relaxed);
     }
+    return true;
   }
 
   void keepAliveRelease() override {
     if (!inRunningEventBaseThread()) {
-      return add([=] { keepAliveRelease(); });
+      return add([this] { loopKeepAliveCount_--; });
     }
     loopKeepAliveCount_--;
   }
@@ -676,7 +698,7 @@ class EventBase : private boost::noncopyable,
   typedef LoopCallback::List LoopCallbackList;
   class FunctionRunner;
 
-  bool loopBody(int flags = 0);
+  bool loopBody(int flags = 0, bool ignoreKeepAlive = false);
 
   // executes any callbacks queued by runInLoop(); returns false if none found
   bool runLoopCallbacks();
@@ -735,8 +757,8 @@ class EventBase : private boost::noncopyable,
   const bool enableTimeMeasurement_;
 
   // Wrap-around loop counter to detect beginning of each loop
-  uint64_t nextLoopCnt_;
-  uint64_t latestLoopCnt_;
+  std::size_t nextLoopCnt_;
+  std::size_t latestLoopCnt_;
   std::chrono::steady_clock::time_point startWork_;
   // Prevent undefined behavior from invoking event_base_loop() reentrantly.
   // This is needed since many projects use libevent-1.4, which lacks commit
@@ -759,8 +781,9 @@ class EventBase : private boost::noncopyable,
 
   // see EventBaseLocal
   friend class detail::EventBaseLocalBase;
-  template <typename T> friend class EventBaseLocal;
-  std::unordered_map<uint64_t, std::shared_ptr<void>> localStorage_;
+  template <typename T>
+  friend class EventBaseLocal;
+  std::unordered_map<std::size_t, std::shared_ptr<void>> localStorage_;
   std::unordered_set<detail::EventBaseLocalBaseBase*> localStorageToDtor_;
 
   folly::once_flag virtualEventBaseInitFlag_;

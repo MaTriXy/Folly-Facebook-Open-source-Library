@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2017-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@
 
 #include <folly/Conv.h>
 #include <folly/Expected.h>
+#include <folly/portability/SysTypes.h>
 
 namespace folly {
 namespace detail {
@@ -187,6 +188,36 @@ static Expected<std::pair<time_t, long>, ConversionCode> durationToPosixTime(
   return std::pair<time_t, long>{sec, subsec};
 }
 
+/*
+ * Helper classes for picking an intermediate duration type to use
+ * when doing conversions to/from durations where neither the numerator nor
+ * denominator are 1.
+ */
+template <typename T, bool IsFloatingPoint, bool IsSigned>
+struct IntermediateTimeRep {};
+template <typename T, bool IsSigned>
+struct IntermediateTimeRep<T, true, IsSigned> {
+  using type = T;
+};
+template <typename T>
+struct IntermediateTimeRep<T, false, true> {
+  using type = intmax_t;
+};
+template <typename T>
+struct IntermediateTimeRep<T, false, false> {
+  using type = uintmax_t;
+};
+// For IntermediateDuration we always use 1 as the numerator, and the original
+// Period denominator.  This ensures that we do not lose precision when
+// performing the conversion.
+template <typename Rep, typename Period>
+using IntermediateDuration = std::chrono::duration<
+    typename IntermediateTimeRep<
+        Rep,
+        std::is_floating_point<Rep>::value,
+        std::is_signed<Rep>::value>::type,
+    std::ratio<1, Period::den>>;
+
 /**
  * Convert a std::chrono::duration to a pair of (seconds, subseconds)
  *
@@ -201,18 +232,28 @@ Expected<std::pair<time_t, long>, ConversionCode> durationToPosixTime(
   static_assert(
       SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
-  // TODO: We need to implement an overflow-checking tryTo() function for
-  // duration-to-duration casts for the code above to work.
-  //
-  // For now this is unimplemented, and we just have a static_assert that
-  // will always fail if someone tries to instantiate this.  Unusual duration
-  // types should be extremely rare, and I'm not aware of any code at the
-  // moment that actually needs this.
-  static_assert(
-      Period::num == 1,
-      "conversion from unusual duration types is not implemented yet");
-  (void)duration;
-  return makeUnexpected(ConversionCode::SUCCESS);
+  // Perform this conversion by first converting to a duration where the
+  // numerator is 1, then convert to the output type.
+  using IntermediateType = IntermediateDuration<Rep, Period>;
+  using IntermediateRep = typename IntermediateType::rep;
+
+  // Check to see if we would have overflow converting to the intermediate
+  // type.
+  constexpr auto maxInput =
+      std::numeric_limits<IntermediateRep>::max() / Period::num;
+  if (duration.count() > maxInput) {
+    return makeUnexpected(ConversionCode::POSITIVE_OVERFLOW);
+  }
+  constexpr auto minInput =
+      std::numeric_limits<IntermediateRep>::min() / Period::num;
+  if (duration.count() < minInput) {
+    return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
+  }
+  auto intermediate =
+      IntermediateType{static_cast<IntermediateRep>(duration.count()) *
+                       static_cast<IntermediateRep>(Period::num)};
+
+  return durationToPosixTime<SubsecondRatio>(intermediate);
 }
 
 /**
@@ -243,8 +284,7 @@ struct CheckOverflowToDuration {
       constexpr auto maxCount = std::numeric_limits<typename Tgt::rep>::max();
       constexpr auto maxSeconds = maxCount / Tgt::period::den;
 
-      auto unsignedSeconds =
-          static_cast<typename std::make_unsigned<Seconds>::type>(seconds);
+      auto unsignedSeconds = to_unsigned(seconds);
       if (LIKELY(unsignedSeconds < maxSeconds)) {
         return ConversionCode::SUCCESS;
       }
@@ -257,8 +297,7 @@ struct CheckOverflowToDuration {
         if (subseconds <= 0) {
           return ConversionCode::SUCCESS;
         }
-        if (static_cast<typename std::make_unsigned<Subseconds>::type>(
-                subseconds) <= maxSubseconds) {
+        if (to_unsigned(subseconds) <= maxSubseconds) {
           return ConversionCode::SUCCESS;
         }
       }
@@ -267,8 +306,7 @@ struct CheckOverflowToDuration {
       return ConversionCode::NEGATIVE_OVERFLOW;
     } else {
       constexpr auto minCount =
-          static_cast<typename std::make_signed<typename Tgt::rep>::type>(
-              std::numeric_limits<typename Tgt::rep>::lowest());
+          to_signed(std::numeric_limits<typename Tgt::rep>::lowest());
       constexpr auto minSeconds = (minCount / Tgt::period::den);
       if (LIKELY(seconds >= minSeconds)) {
         return ConversionCode::SUCCESS;
@@ -323,8 +361,8 @@ struct CheckOverflowToDuration<true> {
 };
 
 /**
- * Helper class to convert a POSIX-style pair of (seconds, subseconds)
- * to a std::chrono::duration type.
+ * Convert a timeval or a timespec to a std::chrono::duration with second
+ * granularity.
  *
  * The SubsecondRatio template parameter specifies what type of subseconds to
  * return.  This must have a numerator of 1.
@@ -332,155 +370,156 @@ struct CheckOverflowToDuration<true> {
  * The input must be in normalized form: the subseconds field must be greater
  * than or equal to 0, and less than SubsecondRatio::den (i.e., less than 1
  * second).
- *
- * This default implementation is only used for unusual std::chrono::duration
- * types where neither the numerator nor denominator are 1.
  */
-template <typename Tgt>
-struct PosixTimeToDuration {
-  template <typename SubsecondRatio, typename Seconds, typename Subseconds>
-  static Expected<Tgt, ConversionCode> cast(
-      Seconds seconds,
-      Subseconds subseconds);
-};
+template <
+    typename SubsecondRatio,
+    typename Seconds,
+    typename Subseconds,
+    typename Rep>
+auto posixTimeToDuration(
+    Seconds seconds,
+    Subseconds subseconds,
+    std::chrono::duration<Rep, std::ratio<1, 1>> dummy)
+    -> Expected<decltype(dummy), ConversionCode> {
+  using Tgt = decltype(dummy);
+  static_assert(Tgt::period::num == 1, "special case expecting num==1");
+  static_assert(Tgt::period::den == 1, "special case expecting den==1");
+  static_assert(
+      SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
-/**
- * Convert a timeval or a timespec to a std::chrono::duration with second
- * granularity.
- */
-template <typename Rep>
-struct PosixTimeToDuration<std::chrono::duration<Rep, std::ratio<1, 1>>> {
-  using Tgt = std::chrono::duration<Rep, std::ratio<1, 1>>;
-
-  template <typename SubsecondRatio, typename Seconds, typename Subseconds>
-  static Expected<Tgt, ConversionCode> cast(
-      Seconds seconds,
-      Subseconds subseconds) {
-    static_assert(Tgt::period::num == 1, "special case expecting num==1");
-    static_assert(Tgt::period::den == 1, "special case expecting den==1");
-    static_assert(
-        SubsecondRatio::num == 1, "subsecond numerator should always be 1");
-
-    auto outputSeconds = tryTo<typename Tgt::rep>(seconds);
-    if (outputSeconds.hasError()) {
-      return makeUnexpected(outputSeconds.error());
-    }
-
-    if (std::is_floating_point<typename Tgt::rep>::value) {
-      return Tgt{typename Tgt::rep(seconds) +
-                 (typename Tgt::rep(subseconds) / SubsecondRatio::den)};
-    }
-
-    // If the value is negative, we have to round up a non-zero subseconds value
-    if (UNLIKELY(outputSeconds.value() < 0) && subseconds > 0) {
-      if (UNLIKELY(
-              outputSeconds.value() ==
-              std::numeric_limits<typename Tgt::rep>::lowest())) {
-        return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
-      }
-      return Tgt{outputSeconds.value() + 1};
-    }
-
-    return Tgt{outputSeconds.value()};
+  auto outputSeconds = tryTo<typename Tgt::rep>(seconds);
+  if (outputSeconds.hasError()) {
+    return makeUnexpected(outputSeconds.error());
   }
-};
+
+  if (std::is_floating_point<typename Tgt::rep>::value) {
+    return Tgt{typename Tgt::rep(seconds) +
+               (typename Tgt::rep(subseconds) / SubsecondRatio::den)};
+  }
+
+  // If the value is negative, we have to round up a non-zero subseconds value
+  if (UNLIKELY(outputSeconds.value() < 0) && subseconds > 0) {
+    if (UNLIKELY(
+            outputSeconds.value() ==
+            std::numeric_limits<typename Tgt::rep>::lowest())) {
+      return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
+    }
+    return Tgt{outputSeconds.value() + 1};
+  }
+
+  return Tgt{outputSeconds.value()};
+}
 
 /**
  * Convert a timeval or a timespec to a std::chrono::duration with subsecond
  * granularity
  */
-template <typename Rep, std::intmax_t Denominator>
-struct PosixTimeToDuration<
-    std::chrono::duration<Rep, std::ratio<1, Denominator>>> {
-  using Tgt = std::chrono::duration<Rep, std::ratio<1, Denominator>>;
+template <
+    typename SubsecondRatio,
+    typename Seconds,
+    typename Subseconds,
+    typename Rep,
+    std::intmax_t Denominator>
+auto posixTimeToDuration(
+    Seconds seconds,
+    Subseconds subseconds,
+    std::chrono::duration<Rep, std::ratio<1, Denominator>> dummy)
+    -> Expected<decltype(dummy), ConversionCode> {
+  using Tgt = decltype(dummy);
+  static_assert(Tgt::period::num == 1, "special case expecting num==1");
+  static_assert(Tgt::period::den != 1, "special case expecting den!=1");
+  static_assert(
+      SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
-  template <typename SubsecondRatio, typename Seconds, typename Subseconds>
-  static Expected<Tgt, ConversionCode> cast(
-      Seconds seconds,
-      Subseconds subseconds) {
-    static_assert(Tgt::period::num == 1, "special case expecting num==1");
-    static_assert(Tgt::period::den != 1, "special case expecting den!=1");
-    static_assert(
-        SubsecondRatio::num == 1, "subsecond numerator should always be 1");
-
-    auto errorCode = detail::CheckOverflowToDuration<
-        std::is_floating_point<typename Tgt::rep>::value>::
-        template check<Tgt, SubsecondRatio>(seconds, subseconds);
-    if (errorCode != ConversionCode::SUCCESS) {
-      return makeUnexpected(errorCode);
-    }
-
-    if (LIKELY(seconds >= 0)) {
-      return std::chrono::duration_cast<Tgt>(
-                 std::chrono::duration<typename Tgt::rep>{seconds}) +
-          std::chrono::duration_cast<Tgt>(
-                 std::chrono::duration<typename Tgt::rep, SubsecondRatio>{
-                     subseconds});
-    } else {
-      // For negative numbers we have to round subseconds up towards zero, even
-      // though it is a positive value, since the overall value is negative.
-      return std::chrono::duration_cast<Tgt>(
-                 std::chrono::duration<typename Tgt::rep>{seconds + 1}) -
-          std::chrono::duration_cast<Tgt>(
-                 std::chrono::duration<typename Tgt::rep, SubsecondRatio>{
-                     SubsecondRatio::den - subseconds});
-    }
+  auto errorCode = detail::CheckOverflowToDuration<
+      std::is_floating_point<typename Tgt::rep>::value>::
+      template check<Tgt, SubsecondRatio>(seconds, subseconds);
+  if (errorCode != ConversionCode::SUCCESS) {
+    return makeUnexpected(errorCode);
   }
-};
+
+  if (LIKELY(seconds >= 0)) {
+    return std::chrono::duration_cast<Tgt>(
+               std::chrono::duration<typename Tgt::rep>{seconds}) +
+        std::chrono::duration_cast<Tgt>(
+               std::chrono::duration<typename Tgt::rep, SubsecondRatio>{
+                   subseconds});
+  } else {
+    // For negative numbers we have to round subseconds up towards zero, even
+    // though it is a positive value, since the overall value is negative.
+    return std::chrono::duration_cast<Tgt>(
+               std::chrono::duration<typename Tgt::rep>{seconds + 1}) -
+        std::chrono::duration_cast<Tgt>(
+               std::chrono::duration<typename Tgt::rep, SubsecondRatio>{
+                   SubsecondRatio::den - subseconds});
+  }
+}
 
 /**
  * Convert a timeval or a timespec to a std::chrono::duration with
  * granularity coarser than 1 second.
  */
-template <typename Rep, std::intmax_t Numerator>
-struct PosixTimeToDuration<
-    std::chrono::duration<Rep, std::ratio<Numerator, 1>>> {
-  using Tgt = std::chrono::duration<Rep, std::ratio<Numerator, 1>>;
+template <
+    typename SubsecondRatio,
+    typename Seconds,
+    typename Subseconds,
+    typename Rep,
+    std::intmax_t Numerator>
+auto posixTimeToDuration(
+    Seconds seconds,
+    Subseconds subseconds,
+    std::chrono::duration<Rep, std::ratio<Numerator, 1>> dummy)
+    -> Expected<decltype(dummy), ConversionCode> {
+  using Tgt = decltype(dummy);
+  static_assert(Tgt::period::num != 1, "special case expecting num!=1");
+  static_assert(Tgt::period::den == 1, "special case expecting den==1");
+  static_assert(
+      SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
-  template <typename SubsecondRatio, typename Seconds, typename Subseconds>
-  static Expected<Tgt, ConversionCode> cast(
-      Seconds seconds,
-      Subseconds subseconds) {
-    static_assert(Tgt::period::num != 1, "special case expecting num!=1");
-    static_assert(Tgt::period::den == 1, "special case expecting den==1");
-    static_assert(
-        SubsecondRatio::num == 1, "subsecond numerator should always be 1");
-
-    if (UNLIKELY(seconds < 0) && subseconds > 0) {
-      // Increment seconds by one to handle truncation of negative numbers
-      // properly.
-      if (UNLIKELY(seconds == std::numeric_limits<Seconds>::lowest())) {
-        return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
-      }
-      seconds += 1;
+  if (UNLIKELY(seconds < 0) && subseconds > 0) {
+    // Increment seconds by one to handle truncation of negative numbers
+    // properly.
+    if (UNLIKELY(seconds == std::numeric_limits<Seconds>::lowest())) {
+      return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
     }
-
-    if (std::is_floating_point<typename Tgt::rep>::value) {
-      // Convert to the floating point type before performing the division
-      return Tgt{static_cast<typename Tgt::rep>(seconds) / Tgt::period::num};
-    } else {
-      // Perform the division as an integer, and check that the result fits in
-      // the output integer type
-      auto outputValue = (seconds / Tgt::period::num);
-      auto expectedOuput = tryTo<typename Tgt::rep>(outputValue);
-      if (expectedOuput.hasError()) {
-        return makeUnexpected(expectedOuput.error());
-      }
-
-      return Tgt{expectedOuput.value()};
-    }
+    seconds += 1;
   }
-};
+
+  if (std::is_floating_point<typename Tgt::rep>::value) {
+    // Convert to the floating point type before performing the division
+    return Tgt{static_cast<typename Tgt::rep>(seconds) / Tgt::period::num};
+  } else {
+    // Perform the division as an integer, and check that the result fits in
+    // the output integer type
+    auto outputValue = (seconds / Tgt::period::num);
+    auto expectedOuput = tryTo<typename Tgt::rep>(outputValue);
+    if (expectedOuput.hasError()) {
+      return makeUnexpected(expectedOuput.error());
+    }
+
+    return Tgt{expectedOuput.value()};
+  }
+}
 
 /**
- * PosixTimeToDuration::cast() implementation for the default case
- * with unusual durations where neither the numerator nor denominator are 1.
+ * Convert a timeval or timespec to a std::chrono::duration
+ *
+ * This overload is only used for unusual durations where neither the numerator
+ * nor denominator are 1.
  */
-template <typename Tgt>
-template <typename SubsecondRatio, typename Seconds, typename Subseconds>
-Expected<Tgt, ConversionCode> PosixTimeToDuration<Tgt>::cast(
+template <
+    typename SubsecondRatio,
+    typename Seconds,
+    typename Subseconds,
+    typename Rep,
+    std::intmax_t Denominator,
+    std::intmax_t Numerator>
+auto posixTimeToDuration(
     Seconds seconds,
-    Subseconds subseconds) {
+    Subseconds subseconds,
+    std::chrono::duration<Rep, std::ratio<Numerator, Denominator>> dummy)
+    -> Expected<decltype(dummy), ConversionCode> {
+  using Tgt = decltype(dummy);
   static_assert(
       Tgt::period::num != 1, "should use special-case code when num==1");
   static_assert(
@@ -488,19 +527,25 @@ Expected<Tgt, ConversionCode> PosixTimeToDuration<Tgt>::cast(
   static_assert(
       SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
-  // TODO: We need to implement an overflow-checking tryTo() function for
-  // duration-to-duration casts for the code above to work.
+  // Cast through an intermediate type with subsecond granularity.
+  // Note that this could fail due to overflow during the initial conversion
+  // even if the result is representable in the output POSIX-style types.
   //
-  // For now this is unimplemented, and we just have a static_assert that
-  // will always fail if someone tries to instantiate this.  Unusual duration
-  // types should be extremely rare, and I'm not aware of any code at the
-  // moment that actually needs this.
-  static_assert(
-      Tgt::period::num == 1,
-      "conversion to unusual duration types is not implemented yet");
-  (void)seconds;
-  (void)subseconds;
-  return makeUnexpected(ConversionCode::SUCCESS);
+  // Note that for integer type conversions going through this intermediate
+  // type can result in slight imprecision due to truncating the intermediate
+  // calculation to an integer.
+  using IntermediateType =
+      IntermediateDuration<typename Tgt::rep, typename Tgt::period>;
+  auto intermediate = posixTimeToDuration<SubsecondRatio>(
+      seconds, subseconds, IntermediateType{});
+  if (intermediate.hasError()) {
+    return makeUnexpected(intermediate.error());
+  }
+  // Now convert back to the target duration.  Use tryTo() to confirm that the
+  // result fits in the target representation type.
+  return tryTo<typename Tgt::rep>(
+             intermediate.value().count() / Tgt::period::num)
+      .then([](typename Tgt::rep tgt) { return Tgt{tgt}; });
 }
 
 template <
@@ -534,8 +579,7 @@ Expected<Tgt, ConversionCode> tryPosixTimeToDuration(
     subseconds = remainder;
   }
 
-  using Converter = PosixTimeToDuration<Tgt>;
-  return Converter::template cast<SubsecondRatio>(seconds, subseconds);
+  return posixTimeToDuration<SubsecondRatio>(seconds, subseconds, Tgt{});
 }
 
 } // namespace detail

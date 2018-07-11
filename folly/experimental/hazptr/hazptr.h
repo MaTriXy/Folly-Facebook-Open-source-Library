@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2016-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,9 +49,24 @@ class hazptr_array;
 template <size_t M>
 class hazptr_local;
 
+/** hazptr_priv: Per-thread list of retired objects pushed in bulk to domain */
+class hazptr_priv;
+
 /** hazptr_domain: Class of hazard pointer domains. Each domain manages a set
  *  of hazard pointers and a set of retired objects. */
 class hazptr_domain {
+  memory_resource* mr_;
+  std::atomic<hazptr_rec*> hazptrs_ = {nullptr};
+  std::atomic<hazptr_obj*> retired_ = {nullptr};
+  /* Using signed int for rcount_ because it may transiently be
+   * negative.  Using signed int for all integer variables that may be
+   * involved in calculations related to the value of rcount_. */
+  std::atomic<int> hcount_ = {0};
+  std::atomic<int> rcount_ = {0};
+
+  static constexpr uint64_t syncTimePeriod_{2000000000}; // in ns
+  std::atomic<uint64_t> syncTime_{0};
+
  public:
   constexpr explicit hazptr_domain(
       memory_resource* = get_default_resource()) noexcept;
@@ -62,19 +77,19 @@ class hazptr_domain {
   hazptr_domain& operator=(const hazptr_domain&) = delete;
   hazptr_domain& operator=(hazptr_domain&&) = delete;
 
+  /** Free-function retire.  May allocate memory */
+  template <typename T, typename D = std::default_delete<T>>
+  void retire(T* obj, D reclaim = {});
+  void cleanup();
+  void tryTimedCleanup();
+
  private:
   friend class hazptr_holder;
   template <typename, typename>
   friend class hazptr_obj_base;
   template <typename, typename>
   friend class hazptr_obj_base_refcounted;
-  friend struct hazptr_priv;
-
-  memory_resource* mr_;
-  std::atomic<hazptr_rec*> hazptrs_ = {nullptr};
-  std::atomic<hazptr_obj*> retired_ = {nullptr};
-  std::atomic<int> hcount_ = {0};
-  std::atomic<int> rcount_ = {0};
+  friend class hazptr_priv;
 
   void objRetire(hazptr_obj*);
   hazptr_rec* hazptrAcquire();
@@ -90,6 +105,15 @@ hazptr_domain& default_hazptr_domain();
 
 extern hazptr_domain default_domain_;
 
+/** Free-function retire, that operates on the default domain */
+template <typename T, typename D = std::default_delete<T>>
+void hazptr_retire(T* obj, D reclaim = {});
+
+/** hazptr_cleanup
+ *  Reclaims all reclaimable objects retired to the domain before this call.
+ */
+void hazptr_cleanup(hazptr_domain& domain = default_hazptr_domain());
+
 /** Definition of hazptr_obj */
 class hazptr_obj {
   friend class hazptr_domain;
@@ -97,10 +121,43 @@ class hazptr_obj {
   friend class hazptr_obj_base;
   template <typename, typename>
   friend class hazptr_obj_base_refcounted;
-  friend struct hazptr_priv;
+  friend class hazptr_priv;
 
   void (*reclaim_)(hazptr_obj*);
   hazptr_obj* next_;
+
+ public:
+  // All constructors set next_ to this in order to catch misuse bugs like
+  // double retire.
+  hazptr_obj() noexcept : next_(this) {}
+
+  hazptr_obj(const hazptr_obj&) noexcept : next_(this) {}
+
+  hazptr_obj(hazptr_obj&&) noexcept : next_(this) {}
+
+  hazptr_obj& operator=(const hazptr_obj&) {
+    return *this;
+  }
+
+  hazptr_obj& operator=(hazptr_obj&&) {
+    return *this;
+  }
+
+ private:
+  void set_next(hazptr_obj* obj) {
+    next_ = obj;
+  }
+
+  void retireCheck() {
+    // Only for catching misuse bugs like double retire
+    if (next_ != this) {
+      retireCheckFail();
+    }
+  }
+
+  FOLLY_NOINLINE void retireCheckFail() {
+    CHECK_EQ(next_, this);
+  }
 
   const void* getObjPtr() const;
 };
@@ -140,6 +197,8 @@ class hazptr_obj_base_refcounted : public hazptr_obj {
   bool release_ref();
 
  private:
+  void preRetire(D deleter);
+
   std::atomic<uint32_t> refcount_{0};
   D deleter_;
 };
@@ -266,10 +325,10 @@ class hazptr_local {
 
  private:
   aligned_hazptr_holder raw_[M];
-  bool need_destruct_{false};
+  bool slow_path_{false};
 };
 
 } // namespace hazptr
 } // namespace folly
 
-#include "hazptr-impl.h"
+#include <folly/experimental/hazptr/hazptr-impl.h>

@@ -26,7 +26,7 @@
  *  * std::launder
  */
 
-#if __cpp_lib_launder >= 201606
+#if __cpp_lib_launder >= 201606 || (_MSC_VER && _HAS_LAUNDER)
 
 namespace folly {
 

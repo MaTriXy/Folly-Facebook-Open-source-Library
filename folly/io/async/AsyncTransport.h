@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@
 
 #include <folly/io/IOBuf.h>
 #include <folly/io/async/AsyncSocketBase.h>
+#include <folly/io/async/AsyncTransportCertificate.h>
 #include <folly/io/async/DelayedDestruction.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/portability/OpenSSL.h>
@@ -28,11 +29,11 @@
 
 constexpr bool kOpenSslModeMoveBufferOwnership =
 #ifdef SSL_MODE_MOVE_BUFFER_OWNERSHIP
-  true
+    true
 #else
-  false
+    false
 #endif
-;
+    ;
 
 namespace folly {
 
@@ -71,7 +72,7 @@ enum class WriteFlags : uint32_t {
  */
 inline WriteFlags operator|(WriteFlags a, WriteFlags b) {
   return static_cast<WriteFlags>(
-    static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
+      static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
 }
 
 /*
@@ -87,7 +88,7 @@ inline WriteFlags& operator|=(WriteFlags& a, WriteFlags b) {
  */
 inline WriteFlags operator&(WriteFlags a, WriteFlags b) {
   return static_cast<WriteFlags>(
-    static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
+      static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
 }
 
 /*
@@ -118,7 +119,6 @@ inline WriteFlags unSet(WriteFlags a, WriteFlags b) {
 inline bool isSet(WriteFlags a, WriteFlags b) {
   return (a & b) == b;
 }
-
 
 /**
  * AsyncTransport defines an asynchronous API for streaming I/O.
@@ -381,13 +381,45 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
   /**
    * Get the certificate used to authenticate the peer.
    */
-  virtual ssl::X509UniquePtr getPeerCert() const { return nullptr; }
+  virtual ssl::X509UniquePtr getPeerCert() const {
+    return nullptr;
+  }
 
   /**
    * The local certificate used for this connection. May be null
    */
   virtual const X509* getSelfCert() const {
     return nullptr;
+  }
+
+  /**
+   * Get the peer certificate information if any
+   */
+  virtual const AsyncTransportCertificate* getPeerCertificate() const {
+    return nullptr;
+  }
+
+  /**
+   * Get the certificate information of this transport, if any
+   */
+  virtual const AsyncTransportCertificate* getSelfCertificate() const {
+    return nullptr;
+  }
+
+  /**
+   * Return the application protocol being used by the underlying transport
+   * protocol. This is useful for transports which are used to tunnel other
+   * protocols.
+   */
+  virtual std::string getApplicationProtocol() noexcept {
+    return "";
+  }
+
+  /**
+   * Returns the name of the security protocol being used.
+   */
+  virtual std::string getSecurityProtocol() const {
+    return "";
   }
 
   /**
@@ -428,7 +460,9 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
    * False if the transport does not have replay protection, but will in the
    * future.
    */
-  virtual bool isReplaySafe() const { return true; }
+  virtual bool isReplaySafe() const {
+    return true;
+  }
 
   /**
    * Set the ReplaySafeCallback on this transport.
@@ -549,8 +583,8 @@ class AsyncReader {
      * @param readBuf The unique pointer of read buffer.
      */
 
-    virtual void readBufferAvailable(std::unique_ptr<IOBuf> /*readBuf*/)
-      noexcept {}
+    virtual void readBufferAvailable(
+        std::unique_ptr<IOBuf> /*readBuf*/) noexcept {}
 
     /**
      * readEOF() will be invoked when the transport is closed.
@@ -605,18 +639,26 @@ class AsyncWriter {
      * @param bytesWritten      The number of bytes that were successfull
      * @param ex                An exception describing the error that occurred.
      */
-    virtual void writeErr(size_t bytesWritten,
-                          const AsyncSocketException& ex) noexcept = 0;
+    virtual void writeErr(
+        size_t bytesWritten,
+        const AsyncSocketException& ex) noexcept = 0;
   };
 
   // Write methods that aren't part of AsyncTransport
-  virtual void write(WriteCallback* callback, const void* buf, size_t bytes,
-                     WriteFlags flags = WriteFlags::NONE) = 0;
-  virtual void writev(WriteCallback* callback, const iovec* vec, size_t count,
-                      WriteFlags flags = WriteFlags::NONE) = 0;
-  virtual void writeChain(WriteCallback* callback,
-                          std::unique_ptr<IOBuf>&& buf,
-                          WriteFlags flags = WriteFlags::NONE) = 0;
+  virtual void write(
+      WriteCallback* callback,
+      const void* buf,
+      size_t bytes,
+      WriteFlags flags = WriteFlags::NONE) = 0;
+  virtual void writev(
+      WriteCallback* callback,
+      const iovec* vec,
+      size_t count,
+      WriteFlags flags = WriteFlags::NONE) = 0;
+  virtual void writeChain(
+      WriteCallback* callback,
+      std::unique_ptr<IOBuf>&& buf,
+      WriteFlags flags = WriteFlags::NONE) = 0;
 
  protected:
   virtual ~AsyncWriter() = default;
@@ -632,8 +674,8 @@ class AsyncTransportWrapper : virtual public AsyncTransport,
 
   // Alias for inherited members from AsyncReader and AsyncWriter
   // to keep compatibility.
-  using ReadCallback    = AsyncReader::ReadCallback;
-  using WriteCallback   = AsyncWriter::WriteCallback;
+  using ReadCallback = AsyncReader::ReadCallback;
+  using WriteCallback = AsyncWriter::WriteCallback;
   void setReadCB(ReadCallback* callback) override = 0;
   ReadCallback* getReadCallback() const override = 0;
   void write(
@@ -680,22 +722,8 @@ class AsyncTransportWrapper : virtual public AsyncTransport,
   template <class T>
   T* getUnderlyingTransport() {
     return const_cast<T*>(static_cast<const AsyncTransportWrapper*>(this)
-        ->getUnderlyingTransport<T>());
+                              ->getUnderlyingTransport<T>());
   }
-
-  /**
-   * Return the application protocol being used by the underlying transport
-   * protocol. This is useful for transports which are used to tunnel other
-   * protocols.
-   */
-  virtual std::string getApplicationProtocol() noexcept {
-    return "";
-  }
-
-  /**
-   * Returns the name of the security protocol being used.
-   */
-  virtual std::string getSecurityProtocol() const { return ""; }
 };
 
 } // namespace folly

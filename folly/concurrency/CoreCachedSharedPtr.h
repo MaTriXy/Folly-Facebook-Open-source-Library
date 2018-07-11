@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2017-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@
 #include <folly/concurrency/AtomicSharedPtr.h>
 #include <folly/concurrency/CacheLocality.h>
 #include <folly/container/Enumerate.h>
-#include <folly/experimental/hazptr/hazptr.h>
+#include <folly/synchronization/Hazptr.h>
 
 namespace folly {
 
@@ -44,11 +44,11 @@ class CoreCachedSharedPtr {
   }
 
   void reset(const std::shared_ptr<T>& p = nullptr) {
-    // Allocate each Holder in a different CoreAllocator stripe to
+    // Allocate each Holder in a different CoreRawAllocator stripe to
     // prevent false sharing. Their control blocks will be adjacent
     // thanks to allocate_shared().
     for (auto slot : folly::enumerate(slots_)) {
-      auto alloc = getCoreAllocatorStl<Holder, kNumSlots>(slot.index);
+      auto alloc = getCoreAllocator<Holder, kNumSlots>(slot.index);
       auto holder = std::allocate_shared<Holder>(alloc, p);
       *slot = std::shared_ptr<T>(holder, p.get());
     }
@@ -114,11 +114,11 @@ class AtomicCoreCachedSharedPtr {
 
   void reset(const std::shared_ptr<T>& p = nullptr) {
     auto newslots = folly::make_unique<Slots>();
-    // Allocate each Holder in a different CoreAllocator stripe to
+    // Allocate each Holder in a different CoreRawAllocator stripe to
     // prevent false sharing. Their control blocks will be adjacent
     // thanks to allocate_shared().
     for (auto slot : folly::enumerate(newslots->slots_)) {
-      auto alloc = getCoreAllocatorStl<Holder, kNumSlots>(slot.index);
+      auto alloc = getCoreAllocator<Holder, kNumSlots>(slot.index);
       auto holder = std::allocate_shared<Holder>(alloc, p);
       *slot = std::shared_ptr<T>(holder, p.get());
     }
@@ -130,8 +130,8 @@ class AtomicCoreCachedSharedPtr {
   }
 
   std::shared_ptr<T> get() const {
-    folly::hazptr::hazptr_holder hazptr;
-    auto slots = hazptr.get_protected(slots_);
+    folly::hazptr_local<1> hazptr;
+    auto slots = hazptr[0].get_protected(slots_);
     if (!slots) {
       return nullptr;
     }
@@ -140,7 +140,7 @@ class AtomicCoreCachedSharedPtr {
 
  private:
   using Holder = std::shared_ptr<T>;
-  struct Slots : folly::hazptr::hazptr_obj_base<Slots> {
+  struct Slots : folly::hazptr_obj_base<Slots> {
     std::array<std::shared_ptr<T>, kNumSlots> slots_;
   };
   std::atomic<Slots*> slots_{nullptr};

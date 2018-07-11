@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2011-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -53,7 +53,7 @@
       classname##__folly_traits_impl__<TTheClass_>::template test<TTheClass_>( \
           nullptr),                                                            \
       std::true_type,                                                          \
-      std::false_type>::type;
+      std::false_type>::type
 
 #define FOLLY_CREATE_HAS_MEMBER_FN_TRAITS_IMPL(classname, func_name, cv_qual) \
   template <typename TTheClass_, typename RTheReturn_, typename... TTheArgs_> \
@@ -134,6 +134,21 @@
 
 namespace folly {
 
+#if __cpp_lib_bool_constant || _MSC_VER
+
+using std::bool_constant;
+
+#else
+
+//  mimic: std::bool_constant, C++17
+template <bool B>
+using bool_constant = std::integral_constant<bool, B>;
+
+#endif
+
+template <std::size_t I>
+using index_constant = std::integral_constant<std::size_t, I>;
+
 /***
  *  _t
  *
@@ -154,6 +169,61 @@ namespace folly {
  */
 template <typename T>
 using _t = typename T::type;
+
+/**
+ * A type trait to remove all const volatile and reference qualifiers on a
+ * type T
+ */
+template <typename T>
+struct remove_cvref {
+  using type =
+      typename std::remove_cv<typename std::remove_reference<T>::type>::type;
+};
+template <typename T>
+using remove_cvref_t = typename remove_cvref<T>::type;
+
+namespace detail {
+template <typename Src>
+struct like_ {
+  template <typename Dst>
+  using apply = Dst;
+};
+template <typename Src>
+struct like_<Src const> {
+  template <typename Dst>
+  using apply = Dst const;
+};
+template <typename Src>
+struct like_<Src volatile> {
+  template <typename Dst>
+  using apply = Dst volatile;
+};
+template <typename Src>
+struct like_<Src const volatile> {
+  template <typename Dst>
+  using apply = Dst const volatile;
+};
+template <typename Src>
+struct like_<Src&> {
+  template <typename Dst>
+  using apply = typename like_<Src>::template apply<Dst>&;
+};
+template <typename Src>
+struct like_<Src&&> {
+  template <typename Dst>
+  using apply = typename like_<Src>::template apply<Dst>&&;
+};
+} // namespace detail
+
+//  mimic: like_t, p0847r0
+template <typename Src, typename Dst>
+using like_t = typename detail::like_<Src>::template apply<remove_cvref_t<Dst>>;
+
+//  mimic: like, p0847r0
+template <typename Src, typename Dst>
+struct like {
+  using type = like_t<Src, Dst>;
+};
 
 /**
  *  type_t
@@ -231,6 +301,18 @@ using type_t = typename traits_detail::type_t_<T, Ts...>::type;
 template <class... Ts>
 using void_t = type_t<void, Ts...>;
 
+// Older versions of libstdc++ do not provide std::is_trivially_copyable
+#if defined(__clang__) && !defined(_LIBCPP_VERSION)
+template <class T>
+struct is_trivially_copyable : bool_constant<__is_trivially_copyable(T)> {};
+#elif defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 5
+template <class T>
+struct is_trivially_copyable : std::is_trivial<T> {};
+#else
+template <class T>
+using is_trivially_copyable = std::is_trivially_copyable<T>;
+#endif
+
 /**
  * IsRelocatable<T>::value describes the ability of moving around
  * memory a value of type T by using memcpy (as opposed to the
@@ -269,11 +351,6 @@ using void_t = type_t<void, Ts...>;
  * It may be unset in a base class by overriding the typedef to false_type.
  */
 /*
- * IsTriviallyCopyable describes the value semantics property. C++11 contains
- * the type trait is_trivially_copyable; however, it is not yet implemented
- * in gcc (as of 4.7.1), and the user may wish to specify otherwise.
- */
-/*
  * IsZeroInitializable describes the property that default construction is the
  * same as memset(dst, 0, sizeof(T)).
  */
@@ -288,26 +365,13 @@ namespace traits_detail {
   struct has_true_##name : std::conditional<                                 \
                                has_##name<T>::value,                         \
                                name##_is_true<T>,                            \
-                               std::false_type>::type {};
+                               std::false_type>::type {}
 
-FOLLY_HAS_TRUE_XXX(IsRelocatable)
-FOLLY_HAS_TRUE_XXX(IsZeroInitializable)
-FOLLY_HAS_TRUE_XXX(IsTriviallyCopyable)
+FOLLY_HAS_TRUE_XXX(IsRelocatable);
+FOLLY_HAS_TRUE_XXX(IsZeroInitializable);
 
 #undef FOLLY_HAS_TRUE_XXX
 
-// Older versions of libstdc++ do not provide std::is_trivially_copyable
-#if defined(__clang__) && !defined(_LIBCPP_VERSION)
-template <class T>
-struct is_trivially_copyable
-    : std::integral_constant<bool, __is_trivially_copyable(T)> {};
-#elif defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 5
-template <class T>
-struct is_trivially_copyable : std::is_trivial<T> {};
-#else
-template <class T>
-using is_trivially_copyable = std::is_trivially_copyable<T>;
-#endif
 } // namespace traits_detail
 
 struct Ignore {
@@ -367,37 +431,28 @@ using IsNothrowSwappable = std::_Is_nothrow_swappable<T>;
 
 template <class T>
 struct IsNothrowSwappable
-    : std::integral_constant<bool,
-        std::is_nothrow_move_constructible<T>::value &&
-        noexcept(swap(std::declval<T&>(), std::declval<T&>()))
-      > {};
+    : bool_constant<std::is_nothrow_move_constructible<T>::value&& noexcept(
+          swap(std::declval<T&>(), std::declval<T&>()))> {};
 #endif
 } // namespace traits_detail_IsNothrowSwappable
 
 /* using override */ using traits_detail_IsNothrowSwappable::IsNothrowSwappable;
 
-template <class T> struct IsTriviallyCopyable
-  : std::conditional<
-      traits_detail::has_IsTriviallyCopyable<T>::value,
-      traits_detail::has_true_IsTriviallyCopyable<T>,
-      traits_detail::is_trivially_copyable<T>
-    >::type {};
+template <class T>
+struct IsRelocatable : std::conditional<
+                           traits_detail::has_IsRelocatable<T>::value,
+                           traits_detail::has_true_IsRelocatable<T>,
+                           // TODO add this line (and some tests for it) when we
+                           // upgrade to gcc 4.7
+                           // std::is_trivially_move_constructible<T>::value ||
+                           is_trivially_copyable<T>>::type {};
 
-template <class T> struct IsRelocatable
-  : std::conditional<
-      traits_detail::has_IsRelocatable<T>::value,
-      traits_detail::has_true_IsRelocatable<T>,
-      // TODO add this line (and some tests for it) when we upgrade to gcc 4.7
-      //std::is_trivially_move_constructible<T>::value ||
-      IsTriviallyCopyable<T>
-    >::type {};
-
-template <class T> struct IsZeroInitializable
-  : std::conditional<
-      traits_detail::has_IsZeroInitializable<T>::value,
-      traits_detail::has_true_IsZeroInitializable<T>,
-      std::integral_constant<bool, !std::is_class<T>::value>
-    >::type {};
+template <class T>
+struct IsZeroInitializable
+    : std::conditional<
+          traits_detail::has_IsZeroInitializable<T>::value,
+          traits_detail::has_true_IsZeroInitializable<T>,
+          bool_constant<!std::is_class<T>::value>>::type {};
 
 template <typename...>
 struct Conjunction : std::true_type {};
@@ -416,7 +471,7 @@ struct Disjunction<T, TList...>
     : std::conditional<T::value, T, Disjunction<TList...>>::type {};
 
 template <typename T>
-struct Negation : std::integral_constant<bool, !T::value> {};
+struct Negation : bool_constant<!T::value> {};
 
 template <bool... Bs>
 struct Bools {
@@ -453,7 +508,7 @@ struct StrictDisjunction
  * FOLLY_ASSUME_RELOCATABLE(MyType<T1, T2>)
  */
 #define FOLLY_ASSUME_RELOCATABLE(...) \
-  struct IsRelocatable<  __VA_ARGS__ > : std::true_type {};
+  struct IsRelocatable<__VA_ARGS__> : std::true_type {}
 
 /**
  * The FOLLY_ASSUME_FBVECTOR_COMPATIBLE* macros below encode the
@@ -483,31 +538,31 @@ struct StrictDisjunction
 #define FOLLY_ASSUME_FBVECTOR_COMPATIBLE(...) \
   namespace folly {                           \
   template <>                                 \
-  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__)       \
+  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__);      \
   }
 // Use this macro ONLY at global level (no namespace)
 #define FOLLY_ASSUME_FBVECTOR_COMPATIBLE_1(...) \
   namespace folly {                             \
   template <class T1>                           \
-  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1>)     \
+  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1>);    \
   }
 // Use this macro ONLY at global level (no namespace)
-#define FOLLY_ASSUME_FBVECTOR_COMPATIBLE_2(...) \
-  namespace folly {                             \
-  template <class T1, class T2>                 \
-  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1, T2>) \
+#define FOLLY_ASSUME_FBVECTOR_COMPATIBLE_2(...)  \
+  namespace folly {                              \
+  template <class T1, class T2>                  \
+  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1, T2>); \
   }
 // Use this macro ONLY at global level (no namespace)
-#define FOLLY_ASSUME_FBVECTOR_COMPATIBLE_3(...)     \
-  namespace folly {                                 \
-  template <class T1, class T2, class T3>           \
-  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1, T2, T3>) \
+#define FOLLY_ASSUME_FBVECTOR_COMPATIBLE_3(...)      \
+  namespace folly {                                  \
+  template <class T1, class T2, class T3>            \
+  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1, T2, T3>); \
   }
 // Use this macro ONLY at global level (no namespace)
-#define FOLLY_ASSUME_FBVECTOR_COMPATIBLE_4(...)         \
-  namespace folly {                                     \
-  template <class T1, class T2, class T3, class T4>     \
-  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1, T2, T3, T4>) \
+#define FOLLY_ASSUME_FBVECTOR_COMPATIBLE_4(...)          \
+  namespace folly {                                      \
+  template <class T1, class T2, class T3, class T4>      \
+  FOLLY_ASSUME_RELOCATABLE(__VA_ARGS__<T1, T2, T3, T4>); \
   }
 
 /**
@@ -551,10 +606,8 @@ namespace folly {
 
 // STL commonly-used types
 template <class T, class U>
-struct IsRelocatable< std::pair<T, U> >
-    : std::integral_constant<bool,
-        IsRelocatable<T>::value &&
-        IsRelocatable<U>::value> {};
+struct IsRelocatable<std::pair<T, U>>
+    : bool_constant<IsRelocatable<T>::value && IsRelocatable<U>::value> {};
 
 // Is T one of T1, T2, ..., Tn?
 template <typename T, typename... Ts>
@@ -587,9 +640,9 @@ struct is_negative_impl<T, false> {
 // types) that violate -Wsign-compare and/or -Wbool-compare so suppress them
 // in order to not prevent all calling code from using it.
 FOLLY_PUSH_WARNING
-FOLLY_GCC_DISABLE_WARNING("-Wsign-compare")
+FOLLY_GNU_DISABLE_WARNING("-Wsign-compare")
 #if __GNUC_PREREQ(5, 0)
-FOLLY_GCC_DISABLE_WARNING("-Wbool-compare")
+FOLLY_GNU_DISABLE_WARNING("-Wbool-compare")
 #endif
 FOLLY_MSVC_DISABLE_WARNING(4388) // sign-compare
 FOLLY_MSVC_DISABLE_WARNING(4804) // bool-compare

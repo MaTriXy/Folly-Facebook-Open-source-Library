@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-present Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -54,9 +54,8 @@ class UndelayedDestruction : public TDD {
   // in the standard seems to indicate that returning false is the correct
   // behavior for non-destructible types, which is unfortunate.)
   template <typename... Args>
-  explicit UndelayedDestruction(Args&& ...args)
-    : TDD(std::forward<Args>(args)...) {
-  }
+  explicit UndelayedDestruction(Args&&... args)
+      : TDD(std::forward<Args>(args)...) {}
 
   /**
    * Public destructor.
@@ -101,8 +100,8 @@ class UndelayedDestruction : public TDD {
 
  private:
   // Forbidden copy constructor and assignment operator
-  UndelayedDestruction(UndelayedDestruction const &) = delete;
-  UndelayedDestruction& operator=(UndelayedDestruction const &) = delete;
+  UndelayedDestruction(UndelayedDestruction const&) = delete;
+  UndelayedDestruction& operator=(UndelayedDestruction const&) = delete;
 };
 
 } // namespace folly

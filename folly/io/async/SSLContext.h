@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,7 +51,7 @@ class PasswordCollector {
    *
    * By default, OpenSSL prints a prompt on screen and request for password
    * while loading private key. To implement a custom password collector,
-   * implement this interface and register it with TSSLSocketFactory.
+   * implement this interface and register it with SSLContext.
    *
    * @param password Pass collected password back to OpenSSL
    * @param size     Maximum length of password including nullptr character
@@ -96,15 +96,18 @@ class SSLContext {
   };
 
   struct NextProtocolsItem {
-    NextProtocolsItem(int wt, const std::list<std::string>& ptcls):
-      weight(wt), protocols(ptcls) {}
+    NextProtocolsItem(int wt, const std::list<std::string>& ptcls)
+        : weight(wt), protocols(ptcls) {}
     int weight;
     std::list<std::string> protocols;
   };
 
   // Function that selects a client protocol given the server's list
-  using ClientProtocolFilterCallback = bool (*)(unsigned char**, unsigned int*,
-                                        const unsigned char*, unsigned int);
+  using ClientProtocolFilterCallback = bool (*)(
+      unsigned char**,
+      unsigned int*,
+      const unsigned char*,
+      unsigned int);
 
   /**
    * Convenience function to call getErrors() with the current errno value.
@@ -224,8 +227,9 @@ class SSLContext {
    *
    */
   virtual bool needsPeerVerification() {
-    return (verifyPeer_ == SSLVerifyPeerEnum::VERIFY ||
-              verifyPeer_ == SSLVerifyPeerEnum::VERIFY_REQ_CLIENT_CERT);
+    return (
+        verifyPeer_ == SSLVerifyPeerEnum::VERIFY ||
+        verifyPeer_ == SSLVerifyPeerEnum::VERIFY_REQ_CLIENT_CERT);
   }
 
   /**
@@ -260,8 +264,10 @@ class SSLContext {
    *                      name of peer matches the given string (altername
    *                      name(s) are not used in this case).
    */
-  virtual void authenticate(bool checkPeerCert, bool checkPeerName,
-                            const std::string& peerName = std::string());
+  virtual void authenticate(
+      bool checkPeerCert,
+      bool checkPeerName,
+      const std::string& peerName = std::string());
   /**
    * Load server certificate.
    *
@@ -275,6 +281,7 @@ class SSLContext {
    * @param cert  A PEM formatted certificate
    */
   virtual void loadCertificateFromBufferPEM(folly::StringPiece cert);
+
   /**
    * Load private key.
    *
@@ -288,6 +295,41 @@ class SSLContext {
    * @param pkey  A PEM formatted key
    */
   virtual void loadPrivateKeyFromBufferPEM(folly::StringPiece pkey);
+
+  /**
+   * Load cert and key from PEM buffers. Guaranteed to throw if cert and
+   * private key mismatch so no need to call isCertKeyPairValid.
+   *
+   * @param cert A PEM formatted certificate
+   * @param pkey A PEM formatted key
+   */
+  virtual void loadCertKeyPairFromBufferPEM(
+      folly::StringPiece cert,
+      folly::StringPiece pkey);
+
+  /**
+   * Load cert and key from files. Guaranteed to throw if cert and key mismatch.
+   * Equivalent to calling loadCertificate() and loadPrivateKey().
+   *
+   * @param certPath   Path to the certificate file
+   * @param keyPath   Path to the private key file
+   * @param certFormat Certificate file format
+   * @param keyFormat Private key file format
+   */
+  virtual void loadCertKeyPairFromFiles(
+      const char* certPath,
+      const char* keyPath,
+      const char* certFormat = "PEM",
+      const char* keyFormat = "PEM");
+
+  /**
+   * Call after both cert and key are loaded to check if cert matches key.
+   * Must call if private key is loaded before loading the cert.
+   * No need to call if cert is loaded first before private key.
+   * @return true if matches, or false if mismatch.
+   */
+  virtual bool isCertKeyPairValid() const;
+
   /**
    * Load trusted certificates from specified file.
    *
@@ -458,7 +500,7 @@ class SSLContext {
   /**
    * Gets the underlying SSL_CTX for advanced usage
    */
-  SSL_CTX *getSSLCtx() const {
+  SSL_CTX* getSSLCtx() const {
     return ctx_;
   }
 
@@ -470,8 +512,12 @@ class SSLContext {
    */
   static std::string getErrors(int errnoCopy);
 
-  bool checkPeerName() { return checkPeerName_; }
-  std::string peerFixedName() { return peerFixedName_; }
+  bool checkPeerName() {
+    return checkPeerName_;
+  }
+  std::string peerFixedName() {
+    return peerFixedName_;
+  }
 
 #if defined(SSL_MODE_HANDSHAKE_CUTTHROUGH)
   /**
@@ -487,8 +533,7 @@ class SSLContext {
    */
   static bool matchName(const char* host, const char* pattern, int size);
 
-  FOLLY_DEPRECATED("Use folly::ssl::init")
-  static void initializeOpenSSL();
+  [[deprecated("Use folly::ssl::init")]] static void initializeOpenSSL();
 
  protected:
   SSL_CTX* ctx_;
@@ -522,19 +567,27 @@ class SSLContext {
   std::vector<int> advertisedNextProtocolWeights_;
   std::discrete_distribution<int> nextProtocolDistribution_;
 
-  static int advertisedNextProtocolCallback(SSL* ssl,
-      const unsigned char** out, unsigned int* outlen, void* data);
+  static int advertisedNextProtocolCallback(
+      SSL* ssl,
+      const unsigned char** out,
+      unsigned int* outlen,
+      void* data);
   static int selectNextProtocolCallback(
-    SSL* ssl, unsigned char **out, unsigned char *outlen,
-    const unsigned char *server, unsigned int server_len, void *args);
+      SSL* ssl,
+      unsigned char** out,
+      unsigned char* outlen,
+      const unsigned char* server,
+      unsigned int server_len,
+      void* args);
 
 #if FOLLY_OPENSSL_HAS_ALPN
-  static int alpnSelectCallback(SSL* ssl,
-                                const unsigned char** out,
-                                unsigned char* outlen,
-                                const unsigned char* in,
-                                unsigned int inlen,
-                                void* data);
+  static int alpnSelectCallback(
+      SSL* ssl,
+      const unsigned char** out,
+      unsigned char* outlen,
+      const unsigned char* in,
+      unsigned int inlen,
+      void* data);
 #endif
   size_t pickNextProtocols();
 
@@ -554,10 +607,9 @@ class SSLContext {
    * generically for performing logic after the Client Hello comes in.
    */
   static int baseServerNameOpenSSLCallback(
-    SSL* ssl,
-    int* al /* alert (return value) */,
-    void* data
-  );
+      SSL* ssl,
+      int* al /* alert (return value) */,
+      void* data);
 #endif
 
   std::string providedCiphersString_;

@@ -21,6 +21,12 @@
 class InvokeTest : public testing::Test {};
 
 namespace {
+
+struct from_any {
+  template <typename T>
+  /* implicit */ from_any(T&&) {}
+};
+
 struct Fn {
   char operator()(int, int) noexcept {
     return 'a';
@@ -48,6 +54,38 @@ struct Obj {
   }
   int volatile x_ = 17;
 };
+
+namespace x {
+struct Obj {};
+int go(Obj const&, int) noexcept {
+  return 3;
+}
+} // namespace x
+
+namespace y {
+struct Obj {};
+char go(Obj const&, char const*) {
+  return 'a';
+}
+} // namespace y
+
+namespace z {
+struct Obj {};
+} // namespace z
+float go(z::Obj const&, int) {
+  return 9;
+}
+
+namespace swappable {
+struct Obj {
+  int x_;
+};
+void swap(Obj&, Obj&) noexcept {} // no-op
+} // namespace swappable
+
+FOLLY_CREATE_FREE_INVOKE_TRAITS(go_invoke_traits, go);
+FOLLY_CREATE_FREE_INVOKE_TRAITS(swap_invoke_traits, swap, std);
+FOLLY_CREATE_FREE_INVOKE_TRAITS(unused_invoke_traits, definitely_unused_name_);
 
 } // namespace
 
@@ -96,6 +134,86 @@ TEST_F(InvokeTest, is_nothrow_invocable_r) {
   EXPECT_TRUE((folly::is_nothrow_invocable_r<int, Fn, int, char>::value));
   EXPECT_FALSE((folly::is_nothrow_invocable_r<int, Fn, int, char*>::value));
   EXPECT_FALSE((folly::is_nothrow_invocable_r<int, Fn, int>::value));
+}
+
+TEST_F(InvokeTest, free_invoke) {
+  using traits = go_invoke_traits;
+
+  x::Obj x_;
+  y::Obj y_;
+
+  EXPECT_TRUE(noexcept(traits::invoke(x_, 3)));
+  EXPECT_FALSE(noexcept(traits::invoke(y_, "hello")));
+
+  EXPECT_EQ(3, traits::invoke(x_, 3));
+  EXPECT_EQ('a', traits::invoke(y_, "hello"));
+}
+
+TEST_F(InvokeTest, free_invoke_result) {
+  using traits = go_invoke_traits;
+
+  EXPECT_TRUE((std::is_same<int, traits::invoke_result_t<x::Obj, int>>::value));
+  EXPECT_TRUE((
+      std::is_same<char, traits::invoke_result_t<y::Obj, char const*>>::value));
+}
+
+TEST_F(InvokeTest, free_is_invocable) {
+  using traits = go_invoke_traits;
+
+  EXPECT_TRUE((traits::is_invocable<x::Obj, int>::value));
+  EXPECT_TRUE((traits::is_invocable<y::Obj, char const*>::value));
+  EXPECT_FALSE((traits::is_invocable<z::Obj, int>::value));
+  EXPECT_FALSE((traits::is_invocable<float>::value));
+}
+
+TEST_F(InvokeTest, free_is_invocable_r) {
+  using traits = go_invoke_traits;
+
+  EXPECT_TRUE((traits::is_invocable_r<int, x::Obj, int>::value));
+  EXPECT_TRUE((traits::is_invocable_r<char, y::Obj, char const*>::value));
+  EXPECT_FALSE((traits::is_invocable_r<float, z::Obj, int>::value));
+  EXPECT_FALSE((traits::is_invocable_r<from_any, float>::value));
+}
+
+TEST_F(InvokeTest, free_is_nothrow_invocable) {
+  using traits = go_invoke_traits;
+
+  EXPECT_TRUE((traits::is_nothrow_invocable<x::Obj, int>::value));
+  EXPECT_FALSE((traits::is_nothrow_invocable<y::Obj, char const*>::value));
+  EXPECT_FALSE((traits::is_nothrow_invocable<z::Obj, int>::value));
+  EXPECT_FALSE((traits::is_nothrow_invocable<float>::value));
+}
+
+TEST_F(InvokeTest, free_is_nothrow_invocable_r) {
+  using traits = go_invoke_traits;
+
+  EXPECT_TRUE((traits::is_nothrow_invocable_r<int, x::Obj, int>::value));
+  EXPECT_FALSE(
+      (traits::is_nothrow_invocable_r<char, y::Obj, char const*>::value));
+  EXPECT_FALSE((traits::is_nothrow_invocable_r<float, z::Obj, int>::value));
+  EXPECT_FALSE((traits::is_nothrow_invocable_r<from_any, float>::value));
+}
+
+TEST_F(InvokeTest, free_invoke_swap) {
+  using traits = swap_invoke_traits;
+
+  int a = 3;
+  int b = 4;
+
+  traits::invoke(a, b);
+  EXPECT_EQ(4, a);
+  EXPECT_EQ(3, b);
+
+  swappable::Obj x{3};
+  swappable::Obj y{4};
+
+  traits::invoke(x, y);
+  EXPECT_EQ(3, x.x_);
+  EXPECT_EQ(4, y.x_);
+
+  std::swap(x, y);
+  EXPECT_EQ(4, x.x_);
+  EXPECT_EQ(3, y.x_);
 }
 
 TEST_F(InvokeTest, member_invoke) {

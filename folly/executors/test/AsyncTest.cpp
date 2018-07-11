@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2017-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -36,18 +36,18 @@ TEST(AsyncFunc, manual_executor) {
 TEST(AsyncFunc, value_lambda) {
   auto lambda = [] { return 42; };
   auto future = async(lambda);
-  EXPECT_EQ(42, future.get());
+  EXPECT_EQ(42, std::move(future).get());
 }
 
 TEST(AsyncFunc, void_lambda) {
   auto lambda = [] { /*do something*/ return; };
   auto future = async(lambda);
   // Futures with a void returning function, return Unit type
-  EXPECT_EQ(typeid(Unit), typeid(future.get()));
+  EXPECT_EQ(typeid(Unit), typeid(std::move(future).get()));
 }
 
 TEST(AsyncFunc, moveonly_lambda) {
   auto lambda = [] { return std::make_unique<int>(42); };
   auto future = async(lambda);
-  EXPECT_EQ(42, *future.get());
+  EXPECT_EQ(42, *std::move(future).get());
 }

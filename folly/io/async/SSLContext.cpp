@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "SSLContext.h"
+#include <folly/io/async/SSLContext.h>
 
 #include <folly/Format.h>
 #include <folly/Memory.h>
@@ -148,19 +148,19 @@ void SSLContext::setCiphersOrThrow(const std::string& ciphers) {
   providedCiphersString_ = ciphers;
 }
 
-void SSLContext::setVerificationOption(const SSLContext::SSLVerifyPeerEnum&
-    verifyPeer) {
+void SSLContext::setVerificationOption(
+    const SSLContext::SSLVerifyPeerEnum& verifyPeer) {
   CHECK(verifyPeer != SSLVerifyPeerEnum::USE_CTX); // dont recurse
   verifyPeer_ = verifyPeer;
 }
 
-int SSLContext::getVerificationMode(const SSLContext::SSLVerifyPeerEnum&
-    verifyPeer) {
+int SSLContext::getVerificationMode(
+    const SSLContext::SSLVerifyPeerEnum& verifyPeer) {
   CHECK(verifyPeer != SSLVerifyPeerEnum::USE_CTX);
   int mode = SSL_VERIFY_NONE;
-  switch(verifyPeer) {
-    // case SSLVerifyPeerEnum::USE_CTX: // can't happen
-    // break;
+  switch (verifyPeer) {
+      // case SSLVerifyPeerEnum::USE_CTX: // can't happen
+      // break;
 
     case SSLVerifyPeerEnum::VERIFY:
       mode = SSL_VERIFY_PEER;
@@ -184,8 +184,10 @@ int SSLContext::getVerificationMode() {
   return getVerificationMode(verifyPeer_);
 }
 
-void SSLContext::authenticate(bool checkPeerCert, bool checkPeerName,
-                              const std::string& peerName) {
+void SSLContext::authenticate(
+    bool checkPeerCert,
+    bool checkPeerName,
+    const std::string& peerName) {
   int mode;
   if (checkPeerCert) {
     mode = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT |
@@ -203,10 +205,10 @@ void SSLContext::authenticate(bool checkPeerCert, bool checkPeerName,
 void SSLContext::loadCertificate(const char* path, const char* format) {
   if (path == nullptr || format == nullptr) {
     throw std::invalid_argument(
-         "loadCertificateChain: either <path> or <format> is nullptr");
+        "loadCertificateChain: either <path> or <format> is nullptr");
   }
   if (strcmp(format, "PEM") == 0) {
-    if (SSL_CTX_use_certificate_chain_file(ctx_, path) == 0) {
+    if (SSL_CTX_use_certificate_chain_file(ctx_, path) != 1) {
       int errnoCopy = errno;
       std::string reason("SSL_CTX_use_certificate_chain_file: ");
       reason.append(path);
@@ -287,6 +289,32 @@ void SSLContext::loadPrivateKeyFromBufferPEM(folly::StringPiece pkey) {
   }
 }
 
+void SSLContext::loadCertKeyPairFromBufferPEM(
+    folly::StringPiece cert,
+    folly::StringPiece pkey) {
+  loadCertificateFromBufferPEM(cert);
+  loadPrivateKeyFromBufferPEM(pkey);
+  if (!isCertKeyPairValid()) {
+    throw std::runtime_error("SSL certificate and private key do not match");
+  }
+}
+
+void SSLContext::loadCertKeyPairFromFiles(
+    const char* certPath,
+    const char* keyPath,
+    const char* certFormat,
+    const char* keyFormat) {
+  loadCertificate(certPath, certFormat);
+  loadPrivateKey(keyPath, keyFormat);
+  if (!isCertKeyPairValid()) {
+    throw std::runtime_error("SSL certificate and private key do not match");
+  }
+}
+
+bool SSLContext::isCertKeyPairValid() const {
+  return SSL_CTX_check_private_key(ctx_) == 1;
+}
+
 void SSLContext::loadTrustedCertificates(const char* path) {
   if (path == nullptr) {
     throw std::invalid_argument("loadTrustedCertificates: <path> is nullptr");
@@ -304,7 +332,7 @@ void SSLContext::loadTrustedCertificates(X509_STORE* store) {
 void SSLContext::loadClientCAList(const char* path) {
   auto clientCAs = SSL_load_client_CA_file(path);
   if (clientCAs == nullptr) {
-    LOG(ERROR) << "Unable to load ca file: " << path;
+    LOG(ERROR) << "Unable to load ca file: " << path << " " << getErrors();
     return;
   }
   SSL_CTX_set_client_CA_list(ctx_, clientCAs);
@@ -370,12 +398,13 @@ int SSLContext::baseServerNameOpenSSLCallback(SSL* ssl, int* al, void* data) {
 #endif // FOLLY_OPENSSL_HAS_SNI
 
 #if FOLLY_OPENSSL_HAS_ALPN
-int SSLContext::alpnSelectCallback(SSL* /* ssl */,
-                                   const unsigned char** out,
-                                   unsigned char* outlen,
-                                   const unsigned char* in,
-                                   unsigned int inlen,
-                                   void* data) {
+int SSLContext::alpnSelectCallback(
+    SSL* /* ssl */,
+    const unsigned char** out,
+    unsigned char* outlen,
+    const unsigned char* in,
+    unsigned int inlen,
+    void* data) {
   SSLContext* context = (SSLContext*)data;
   CHECK(context);
   if (context->advertisedNextProtocols_.empty()) {
@@ -384,12 +413,13 @@ int SSLContext::alpnSelectCallback(SSL* /* ssl */,
   } else {
     auto i = context->pickNextProtocols();
     const auto& item = context->advertisedNextProtocols_[i];
-    if (SSL_select_next_proto((unsigned char**)out,
-                              outlen,
-                              item.protocols,
-                              item.length,
-                              in,
-                              inlen) != OPENSSL_NPN_NEGOTIATED) {
+    if (SSL_select_next_proto(
+            (unsigned char**)out,
+            outlen,
+            item.protocols,
+            item.length,
+            in,
+            inlen) != OPENSSL_NPN_NEGOTIATED) {
       return SSL_TLSEXT_ERR_NOACK;
     }
   }
@@ -400,18 +430,20 @@ int SSLContext::alpnSelectCallback(SSL* /* ssl */,
 #ifdef OPENSSL_NPN_NEGOTIATED
 
 bool SSLContext::setAdvertisedNextProtocols(
-    const std::list<std::string>& protocols, NextProtocolType protocolType) {
+    const std::list<std::string>& protocols,
+    NextProtocolType protocolType) {
   return setRandomizedAdvertisedNextProtocols({{1, protocols}}, protocolType);
 }
 
 bool SSLContext::setRandomizedAdvertisedNextProtocols(
-    const std::list<NextProtocolsItem>& items, NextProtocolType protocolType) {
+    const std::list<NextProtocolsItem>& items,
+    NextProtocolType protocolType) {
   unsetNextProtocols();
   if (items.size() == 0) {
     return false;
   }
   int total_weight = 0;
-  for (const auto &item : items) {
+  for (const auto& item : items) {
     if (item.protocols.size() == 0) {
       continue;
     }
@@ -445,9 +477,9 @@ bool SSLContext::setRandomizedAdvertisedNextProtocols(
     deleteNextProtocolsStrings();
     return false;
   }
-  nextProtocolDistribution_ =
-      std::discrete_distribution<>(advertisedNextProtocolWeights_.begin(),
-                                   advertisedNextProtocolWeights_.end());
+  nextProtocolDistribution_ = std::discrete_distribution<>(
+      advertisedNextProtocolWeights_.begin(),
+      advertisedNextProtocolWeights_.end());
   if ((uint8_t)protocolType & (uint8_t)NextProtocolType::NPN) {
     SSL_CTX_set_next_protos_advertised_cb(
         ctx_, advertisedNextProtocolCallback, this);
@@ -457,9 +489,10 @@ bool SSLContext::setRandomizedAdvertisedNextProtocols(
   if ((uint8_t)protocolType & (uint8_t)NextProtocolType::ALPN) {
     SSL_CTX_set_alpn_select_cb(ctx_, alpnSelectCallback, this);
     // Client cannot really use randomized alpn
-    SSL_CTX_set_alpn_protos(ctx_,
-                            advertisedNextProtocols_[0].protocols,
-                            advertisedNextProtocols_[0].length);
+    SSL_CTX_set_alpn_protos(
+        ctx_,
+        advertisedNextProtocols_[0].protocols,
+        advertisedNextProtocols_[0].length);
   }
 #endif
   return true;
@@ -489,8 +522,11 @@ size_t SSLContext::pickNextProtocols() {
   return size_t(nextProtocolDistribution_(rng));
 }
 
-int SSLContext::advertisedNextProtocolCallback(SSL* ssl,
-      const unsigned char** out, unsigned int* outlen, void* data) {
+int SSLContext::advertisedNextProtocolCallback(
+    SSL* ssl,
+    const unsigned char** out,
+    unsigned int* outlen,
+    void* data) {
   static int nextProtocolsExDataIndex = SSL_get_ex_new_index(
       0, (void*)"Advertised next protocol index", nullptr, nullptr, nullptr);
 
@@ -519,12 +555,13 @@ int SSLContext::advertisedNextProtocolCallback(SSL* ssl,
   return SSL_TLSEXT_ERR_OK;
 }
 
-int SSLContext::selectNextProtocolCallback(SSL* ssl,
-                                           unsigned char** out,
-                                           unsigned char* outlen,
-                                           const unsigned char* server,
-                                           unsigned int server_len,
-                                           void* data) {
+int SSLContext::selectNextProtocolCallback(
+    SSL* ssl,
+    unsigned char** out,
+    unsigned char* outlen,
+    const unsigned char* server,
+    unsigned int server_len,
+    void* data) {
   (void)ssl; // Make -Wunused-parameters happy
   SSLContext* ctx = (SSLContext*)data;
   if (ctx->advertisedNextProtocols_.size() > 1) {
@@ -542,7 +579,7 @@ int SSLContext::selectNextProtocolCallback(SSL* ssl,
 
   if (!filtered) {
     if (ctx->advertisedNextProtocols_.empty()) {
-      client = (unsigned char *) "";
+      client = (unsigned char*)"";
       client_len = 0;
     } else {
       client = ctx->advertisedNextProtocols_[0].protocols;
@@ -550,8 +587,8 @@ int SSLContext::selectNextProtocolCallback(SSL* ssl,
     }
   }
 
-  int retval = SSL_select_next_proto(out, outlen, server, server_len,
-                                     client, client_len);
+  int retval = SSL_select_next_proto(
+      out, outlen, server, server_len, client, client_len);
   if (retval != OPENSSL_NPN_NEGOTIATED) {
     VLOG(3) << "SSLContext::selectNextProcolCallback() "
             << "unable to pick a next protocol.";
@@ -609,10 +646,7 @@ bool SSLContext::matchName(const char* host, const char* pattern, int size) {
   return match;
 }
 
-int SSLContext::passwordCallback(char* password,
-                                 int size,
-                                 int,
-                                 void* data) {
+int SSLContext::passwordCallback(char* password, int size, int, void* data) {
   SSLContext* context = (SSLContext*)data;
   if (context == nullptr || context->passwordCollector() == nullptr) {
     return 0;
@@ -644,8 +678,8 @@ void SSLContext::setOptions(long options) {
 
 std::string SSLContext::getErrors(int errnoCopy) {
   std::string errors;
-  unsigned long  errorCode;
-  char   message[256];
+  unsigned long errorCode;
+  char message[256];
 
   errors.reserve(512);
   while ((errorCode = ERR_get_error()) != 0) {
@@ -654,7 +688,7 @@ std::string SSLContext::getErrors(int errnoCopy) {
     }
     const char* reason = ERR_reason_error_string(errorCode);
     if (reason == nullptr) {
-      snprintf(message, sizeof(message) - 1, "SSL error # %lu", errorCode);
+      snprintf(message, sizeof(message) - 1, "SSL error # %08lX", errorCode);
       reason = message;
     }
     errors += reason;
@@ -665,8 +699,7 @@ std::string SSLContext::getErrors(int errnoCopy) {
   return errors;
 }
 
-std::ostream&
-operator<<(std::ostream& os, const PasswordCollector& collector) {
+std::ostream& operator<<(std::ostream& os, const PasswordCollector& collector) {
   os << collector.describe();
   return os;
 }

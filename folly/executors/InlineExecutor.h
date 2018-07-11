@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,11 @@
  */
 
 #pragma once
+
+#include <atomic>
+
+#include <folly/CPortability.h>
+#include <folly/CppAttributes.h>
 #include <folly/Executor.h>
 
 namespace folly {
@@ -24,11 +29,20 @@ namespace folly {
 /// QueuedImmediateExecutor.
 class InlineExecutor : public Executor {
  public:
-  static InlineExecutor& instance();
+  FOLLY_ATTR_VISIBILITY_HIDDEN FOLLY_ALWAYS_INLINE static InlineExecutor&
+  instance() noexcept {
+    auto const value = cache.load(std::memory_order_acquire);
+    return value ? *value : instance_slow();
+  }
 
   void add(Func f) override {
     f();
   }
+
+ private:
+  FOLLY_COLD static InlineExecutor& instance_slow() noexcept;
+
+  static std::atomic<InlineExecutor*> cache;
 };
 
 } // namespace folly

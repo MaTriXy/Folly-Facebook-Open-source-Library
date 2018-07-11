@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2016-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -157,8 +157,7 @@ void MicroLockCore::unlock(unsigned slot) {
       oldWord, newWord, std::memory_order_release, std::memory_order_relaxed));
 
   if (oldWord & waitBit(slot)) {
-    // We don't track the number of waiters, so wake everyone
-    (void)wordPtr->futexWake(std::numeric_limits<int>::max(), heldBit(slot));
+    (void)wordPtr->futexWake(1, heldBit(slot));
   }
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,8 @@
 namespace folly {
 
 template <class T>
-Try<T>::Try(Try<T>&& t) noexcept : contains_(t.contains_) {
+Try<T>::Try(Try<T>&& t) noexcept(std::is_nothrow_move_constructible<T>::value)
+    : contains_(t.contains_) {
   if (contains_ == Contains::VALUE) {
     new (&value_)T(std::move(t.value_));
   } else if (contains_ == Contains::EXCEPTION) {
@@ -34,8 +35,9 @@ Try<T>::Try(Try<T>&& t) noexcept : contains_(t.contains_) {
 
 template <class T>
 template <class T2>
-Try<T>::Try(typename std::enable_if<std::is_same<Unit, T2>::value,
-                                    Try<void> const&>::type t)
+Try<T>::Try(typename std::enable_if<
+            std::is_same<Unit, T2>::value,
+            Try<void> const&>::type t) noexcept
     : contains_(Contains::NOTHING) {
   if (t.hasValue()) {
     contains_ = Contains::VALUE;
@@ -47,7 +49,8 @@ Try<T>::Try(typename std::enable_if<std::is_same<Unit, T2>::value,
 }
 
 template <class T>
-Try<T>& Try<T>::operator=(Try<T>&& t) noexcept {
+Try<T>& Try<T>::operator=(Try<T>&& t) noexcept(
+    std::is_nothrow_move_constructible<T>::value) {
   if (this == &t) {
     return *this;
   }
@@ -63,7 +66,8 @@ Try<T>& Try<T>::operator=(Try<T>&& t) noexcept {
 }
 
 template <class T>
-Try<T>::Try(const Try<T>& t) {
+Try<T>::Try(const Try<T>& t) noexcept(
+    std::is_nothrow_copy_constructible<T>::value) {
   static_assert(
       std::is_copy_constructible<T>::value,
       "T must be copyable for Try<T> to be copyable");
@@ -76,7 +80,8 @@ Try<T>::Try(const Try<T>& t) {
 }
 
 template <class T>
-Try<T>& Try<T>::operator=(const Try<T>& t) {
+Try<T>& Try<T>::operator=(const Try<T>& t) noexcept(
+    std::is_nothrow_copy_constructible<T>::value) {
   static_assert(
       std::is_copy_constructible<T>::value,
       "T must be copyable for Try<T> to be copyable");
@@ -131,7 +136,7 @@ void Try<T>::throwIfFailed() const {
     case Contains::EXCEPTION:
       e_.throw_exception();
     default:
-      try_detail::throwUsingUninitializedTry();
+      throw_exception<UsingUninitializedTry>();
   }
 }
 
@@ -143,10 +148,10 @@ void Try<void>::throwIfFailed() const {
 
 template <typename F>
 typename std::enable_if<
-  !std::is_same<typename std::result_of<F()>::type, void>::value,
-  Try<typename std::result_of<F()>::type>>::type
+    !std::is_same<invoke_result_t<F>, void>::value,
+    Try<invoke_result_t<F>>>::type
 makeTryWith(F&& f) {
-  typedef typename std::result_of<F()>::type ResultType;
+  using ResultType = invoke_result_t<F>;
   try {
     return Try<ResultType>(f());
   } catch (std::exception& e) {
@@ -157,10 +162,9 @@ makeTryWith(F&& f) {
 }
 
 template <typename F>
-typename std::enable_if<
-  std::is_same<typename std::result_of<F()>::type, void>::value,
-  Try<void>>::type
-makeTryWith(F&& f) {
+typename std::
+    enable_if<std::is_same<invoke_result_t<F>, void>::value, Try<void>>::type
+    makeTryWith(F&& f) {
   try {
     f();
     return Try<void>();

@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-present Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -28,21 +28,22 @@ namespace folly {
 
 SocketPair::SocketPair(Mode mode) {
   if (socketpair(PF_UNIX, SOCK_STREAM, 0, fds_) != 0) {
-    throw std::runtime_error(
-      folly::to<std::string>("test::SocketPair: failed create socket pair",
-                             errno));
+    throw std::runtime_error(folly::to<std::string>(
+        "test::SocketPair: failed create socket pair", errno));
   }
 
   if (mode == NONBLOCKING) {
     if (fcntl(fds_[0], F_SETFL, O_NONBLOCK) != 0) {
-      throw std::runtime_error(
-        folly::to<std::string>("test::SocketPair: failed to set non-blocking "
-                               "read mode", errno));
+      throw std::runtime_error(folly::to<std::string>(
+          "test::SocketPair: failed to set non-blocking "
+          "read mode",
+          errno));
     }
     if (fcntl(fds_[1], F_SETFL, O_NONBLOCK) != 0) {
-      throw std::runtime_error(
-        folly::to<std::string>("test::SocketPair: failed to set non-blocking "
-                               "write mode", errno));
+      throw std::runtime_error(folly::to<std::string>(
+          "test::SocketPair: failed to set non-blocking "
+          "write mode",
+          errno));
     }
   }
 }

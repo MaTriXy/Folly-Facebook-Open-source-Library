@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2016-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,5 +35,5 @@ FOLLY_ALWAYS_INLINE void asymmetricLightBarrier() {
   }
 }
 
-void asymmetricHeavyBarrier(AMBFlags flags = AMBFlags::NORMAL);
+void asymmetricHeavyBarrier(AMBFlags flags = AMBFlags::EXPEDITED);
 } // namespace folly

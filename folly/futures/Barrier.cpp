@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2015-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 
 #include <folly/futures/Barrier.h>
+#include <folly/lang/Exception.h>
 
 namespace folly { namespace futures {
 
@@ -38,11 +39,11 @@ Barrier::~Barrier() {
 }
 
 auto Barrier::allocateControlBlock() -> ControlBlock* {
-  auto block = static_cast<ControlBlock*>(malloc(controlBlockSize(size_)));
-  if (!block) {
-    throw std::bad_alloc();
+  auto storage = malloc(controlBlockSize(size_));
+  if (!storage) {
+    throw_exception<std::bad_alloc>();
   }
-  block->valueAndReaderCount = 0;
+  auto block = ::new (storage) ControlBlock();
 
   auto p = promises(block);
   uint32_t i = 0;

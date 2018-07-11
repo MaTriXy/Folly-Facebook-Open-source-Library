@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2012-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,9 +22,9 @@
 
 #include <glog/logging.h>
 
-#include <folly/Bits.h>
 #include <folly/Portability.h>
 #include <folly/Range.h>
+#include <folly/lang/Bits.h>
 
 namespace folly {
 
@@ -57,10 +57,8 @@ struct BitsTraits<Unaligned<T>, typename std::enable_if<
   static void store(Unaligned<T>& x, T v) { x.value = v; }
   static T loadRMW(const Unaligned<T>& x) {
     FOLLY_PUSH_WARNING
-    FOLLY_GCC_DISABLE_WARNING("-Wuninitialized")
-#if !__clang__ // for gcc version [4.8, ?)
+    FOLLY_GNU_DISABLE_WARNING("-Wuninitialized")
     FOLLY_GCC_DISABLE_WARNING("-Wmaybe-uninitialized")
-#endif
     return x.value;
     FOLLY_POP_WARNING
   }
@@ -78,10 +76,8 @@ struct BitsTraits<UnalignedNoASan<T>, typename std::enable_if<
   static T FOLLY_DISABLE_ADDRESS_SANITIZER
   loadRMW(const UnalignedNoASan<T>& x) {
     FOLLY_PUSH_WARNING
-    FOLLY_GCC_DISABLE_WARNING("-Wuninitialized")
-#if !__clang__ // for gcc version [4.8, ?)
+    FOLLY_GNU_DISABLE_WARNING("-Wuninitialized")
     FOLLY_GCC_DISABLE_WARNING("-Wmaybe-uninitialized")
-#endif
     return x.value;
     FOLLY_POP_WARNING
   }
@@ -96,10 +92,8 @@ struct BitsTraits<T, typename std::enable_if<
   static void store(T& x, T v) { x = v; }
   static T loadRMW(const T& x) {
     FOLLY_PUSH_WARNING
-    FOLLY_GCC_DISABLE_WARNING("-Wuninitialized")
-#if !__clang__ // for gcc version [4.8, ?)
+    FOLLY_GNU_DISABLE_WARNING("-Wuninitialized")
     FOLLY_GCC_DISABLE_WARNING("-Wmaybe-uninitialized")
-#endif
     return x;
     FOLLY_POP_WARNING
   }
@@ -205,10 +199,8 @@ struct Bits {
 // gcc 4.8 needs more -Wmaybe-uninitialized tickling, as it propagates the
 // taint upstream from loadRMW
 FOLLY_PUSH_WARNING
-FOLLY_GCC_DISABLE_WARNING("-Wuninitialized")
-#if !__clang__ // for gcc version [4.8, ?)
+FOLLY_GNU_DISABLE_WARNING("-Wuninitialized")
 FOLLY_GCC_DISABLE_WARNING("-Wmaybe-uninitialized")
-#endif
 
 template <class T, class Traits>
 inline void Bits<T, Traits>::set(T* p, size_t bit) {

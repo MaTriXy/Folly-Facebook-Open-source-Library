@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2016-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -68,4 +68,18 @@ TEST(make_array, deduced_common_type) {
       is_same<typename decltype(arr)::value_type, double>::value,
       "Wrong array type");
   EXPECT_EQ(arr.size(), 5);
+}
+
+TEST(make_array_with, example) {
+  struct make_item {
+    constexpr int operator()(size_t index) const {
+      return index + 4;
+    }
+  };
+  using folly::make_array_with;
+  using folly::array_detail::make_array_with; // should not collide
+
+  constexpr auto actual = make_array_with<3>(make_item{});
+  constexpr auto expected = make_array<int>(4, 5, 6);
+  EXPECT_EQ(expected, actual);
 }

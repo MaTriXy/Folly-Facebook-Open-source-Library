@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2012-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -129,14 +129,15 @@ TemporaryDirectory::~TemporaryDirectory() {
   }
 }
 
-ChangeToTempDir::ChangeToTempDir() : initialPath_(fs::current_path()) {
-  std::string p = dir_.path().string();
-  ::chdir(p.c_str());
+ChangeToTempDir::ChangeToTempDir() {
+  orig_ = fs::current_path();
+  fs::current_path(path());
 }
 
 ChangeToTempDir::~ChangeToTempDir() {
-  std::string p = initialPath_.string();
-  ::chdir(p.c_str());
+  if (!orig_.empty()) {
+    fs::current_path(orig_);
+  }
 }
 
 namespace detail {

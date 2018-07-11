@@ -39,7 +39,8 @@ thread_local_test_lib_la_LDFLAGS = -module -rpath /force_shared
 thread_local_test_lib_la_LIBADD = $(top_builddir)/libfolly.la
 
 noinst_HEADERS = FBStringTestBenchmarks.cpp.h \
-	FBVectorTestBenchmarks.cpp.h
+	FBVectorBenchmarks.cpp.h \
+	FBVectorTests.cpp.h
 
 spin_lock_test_SOURCES = SpinLockTest.cpp
 spin_lock_test_LDADD = libfollytestmain.la
@@ -54,7 +55,7 @@ constexpr_math_test_LDADD = libfollytestmain.la
 TESTS += constexpr_math_test
 
 if RUN_ARCH_SPECIFIC_TESTS
-small_locks_test_SOURCES = SmallLocksTest.cpp
+small_locks_test_SOURCES = ../synchronization/test/SmallLocksTest.cpp
 small_locks_test_LDADD = libfollytestmain.la
 TESTS += small_locks_test
 
@@ -133,6 +134,10 @@ json_test_SOURCES = JsonTest.cpp
 json_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
 TESTS += json_test
 
+json_pointer_test_SOURCES = json_pointer_test.cpp
+json_pointer_test_LDADD = libfollytestmain.la
+TESTS += json_pointer_test
+
 benchmark_test_SOURCES = BenchmarkTest.cpp
 benchmark_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
 check_PROGRAMS += benchmark_test
@@ -145,6 +150,10 @@ TESTS += scope_guard_test
 timeout_queue_test_SOURCES = TimeoutQueueTest.cpp
 timeout_queue_test_LDADD = libfollytestmain.la
 TESTS += timeout_queue_test
+
+cold_class_test_SOURCES = ../lang/test/ColdClassTest.cpp
+cold_class_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
+TESTS += cold_class_test
 
 conv_test_SOURCES = ConvTest.cpp
 conv_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
@@ -162,11 +171,11 @@ math_test_SOURCES = MathTest.cpp
 math_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
 TESTS += math_test
 
-bits_test_SOURCES = BitsTest.cpp
+bits_test_SOURCES = ../lang/test/BitsTest.cpp
 bits_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
 TESTS += bits_test
 
-bit_iterator_test_SOURCES = BitIteratorTest.cpp
+bit_iterator_test_SOURCES = ../container/test/BitIteratorTest.cpp
 bit_iterator_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
 TESTS += bit_iterator_test
 
@@ -174,7 +183,7 @@ endian_test_SOURCES = EndianTest.cpp
 endian_test_LDADD = libfollytestmain.la
 TESTS += endian_test
 
-rw_spinlock_test_SOURCES = RWSpinLockTest.cpp
+rw_spinlock_test_SOURCES = ../synchronization/test/RWSpinLockTest.cpp
 rw_spinlock_test_LDADD = libfollytestmain.la $(top_builddir)/libfollybenchmark.la
 TESTS += rw_spinlock_test
 
@@ -308,7 +317,6 @@ futures_test_SOURCES = \
     ../futures/test/ConversionOperatorTest.cpp \
     ../futures/test/CoreTest.cpp \
     ../futures/test/EnsureTest.cpp \
-    ../futures/test/FSMTest.cpp \
     ../futures/test/FilterTest.cpp \
     ../futures/test/FutureTest.cpp \
     ../futures/test/HeaderCompileTest.cpp \
@@ -375,6 +383,10 @@ TESTS += utility_test
 
 iterator_test_SOURCES = ../container/test/IteratorTest.cpp
 iterator_test_LDADD = libfollytestmain.la
+TESTS += iterator_test
+
+detail_iterators_test_SOURCES = IteratorTests.cpp
+detail_iterators_test_LDADD = libfollytestmain.la
 TESTS += iterator_test
 
 check_PROGRAMS += $(TESTS)

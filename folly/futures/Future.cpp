@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 
 #include <folly/futures/Future.h>
 #include <folly/Likely.h>
+#include <folly/SingletonThreadLocal.h>
 #include <folly/futures/ThreadWheelTimekeeper.h>
 
 namespace folly {
@@ -46,7 +47,7 @@ Future<Unit> sleep(Duration dur, Timekeeper* tk) {
   }
 
   if (UNLIKELY(!tk)) {
-    return makeFuture<Unit>(NoTimekeeper());
+    return makeFuture<Unit>(FutureNoTimekeeper());
   }
 
   return tk->after(dur);

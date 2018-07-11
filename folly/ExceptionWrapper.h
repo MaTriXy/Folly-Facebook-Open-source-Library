@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -162,7 +162,7 @@ auto fold(Fn&& fn, A&& a, B&& b, Bs&&... bs) {
 //! \endcode
 class exception_wrapper final {
  private:
-  struct AnyException : std::exception {
+  struct FOLLY_EXPORT AnyException : std::exception {
     std::type_info const* typeinfo_;
     template <class T>
     /* implicit */ AnyException(T&& t) noexcept : typeinfo_(&typeid(t)) {}
@@ -235,18 +235,21 @@ class exception_wrapper final {
     Ex const& as() const noexcept;
   };
 
-  enum class Placement { kInSitu, kOnHeap };
-  template <class T>
-  using PlacementOf = std::integral_constant<
-      Placement,
-      sizeof(T) <= sizeof(Buffer::Storage) &&
-              alignof(T) <= alignof(Buffer::Storage) &&
-              noexcept(T(std::declval<T&&>()))
-          ? Placement::kInSitu
-          : Placement::kOnHeap>;
+  struct ThrownTag {};
+  struct InSituTag {};
+  struct OnHeapTag {};
 
-  using InSituTag = std::integral_constant<Placement, Placement::kInSitu>;
-  using OnHeapTag = std::integral_constant<Placement, Placement::kOnHeap>;
+  template <class T>
+  using PlacementOf = _t<std::conditional<
+      !IsStdException<T>::value,
+      ThrownTag,
+      _t<std::conditional<
+          sizeof(T) <= sizeof(Buffer::Storage) &&
+              alignof(T) <= alignof(Buffer::Storage) &&
+              noexcept(T(std::declval<T&&>())) &&
+              noexcept(T(std::declval<T const&>())),
+          InSituTag,
+          OnHeapTag>>>>;
 
   static std::exception const* as_exception_or_null_(std::exception const& ex);
   static std::exception const* as_exception_or_null_(AnyException);
@@ -280,6 +283,7 @@ class exception_wrapper final {
 
   template <class Ex>
   struct InPlace {
+    static_assert(IsStdException<Ex>::value, "only deriving std::exception");
     static void copy_(exception_wrapper const* from, exception_wrapper* to);
     static void move_(exception_wrapper* from, exception_wrapper* to);
     static void delete_(exception_wrapper* that);
@@ -308,6 +312,7 @@ class exception_wrapper final {
     };
     template <class Ex>
     struct Impl final : public Base {
+      static_assert(IsStdException<Ex>::value, "only deriving std::exception");
       Ex ex_;
       Impl() = default;
       template <typename... As>
@@ -335,6 +340,9 @@ class exception_wrapper final {
     SharedPtr sptr_;
   };
   VTable const* vptr_{&uninit_};
+
+  template <class Ex, typename... As>
+  exception_wrapper(ThrownTag, in_place_type_t<Ex>, As&&... as);
 
   template <class Ex, typename... As>
   exception_wrapper(OnHeapTag, in_place_type_t<Ex>, As&&... as);
@@ -383,7 +391,7 @@ class exception_wrapper final {
   //! Copy-constructs an `exception_wrapper`
   //! \post `*this` contains a copy of `that`, and `that` is unmodified
   //! \post `type() == that.type()`
-  exception_wrapper(exception_wrapper const& that);
+  exception_wrapper(exception_wrapper const& that) noexcept;
 
   //! Move-assigns an `exception_wrapper`
   //! \pre `this != &that`
@@ -394,7 +402,7 @@ class exception_wrapper final {
   //! Copy-assigns an `exception_wrapper`
   //! \post `*this` contains a copy of `that`, and `that` is unmodified
   //! \post `type() == that.type()`
-  exception_wrapper& operator=(exception_wrapper const& that);
+  exception_wrapper& operator=(exception_wrapper const& that) noexcept;
 
   ~exception_wrapper();
 

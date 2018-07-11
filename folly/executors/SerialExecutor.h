@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2017-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,10 +16,13 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <mutex>
+#include <queue>
 
-#include <folly/Executor.h>
 #include <folly/executors/GlobalExecutor.h>
+#include <folly/executors/SequencedExecutor.h>
 
 namespace folly {
 
@@ -46,16 +49,36 @@ namespace folly {
  * parent executor is executing tasks.
  */
 
-class SerialExecutor : public folly::Executor {
+class SerialExecutor : public SequencedExecutor {
  public:
-  ~SerialExecutor() override = default;
   SerialExecutor(SerialExecutor const&) = delete;
   SerialExecutor& operator=(SerialExecutor const&) = delete;
-  SerialExecutor(SerialExecutor&&) = default;
-  SerialExecutor& operator=(SerialExecutor&&) = default;
+  SerialExecutor(SerialExecutor&&) = delete;
+  SerialExecutor& operator=(SerialExecutor&&) = delete;
 
-  explicit SerialExecutor(
-      std::shared_ptr<folly::Executor> parent = folly::getCPUExecutor());
+  static KeepAlive<SerialExecutor> create(
+      KeepAlive<Executor> parent = getKeepAliveToken(getCPUExecutor().get()));
+
+  class Deleter {
+   public:
+    Deleter() {}
+
+    void operator()(SerialExecutor* executor) {
+      executor->keepAliveRelease();
+    }
+
+   private:
+    friend class SerialExecutor;
+    explicit Deleter(std::shared_ptr<Executor> parent)
+        : parent_(std::move(parent)) {}
+
+    std::shared_ptr<Executor> parent_;
+  };
+
+  using UniquePtr = std::unique_ptr<SerialExecutor, Deleter>;
+  [[deprecated("Replaced by create")]]
+  static UniquePtr createUnique(
+      std::shared_ptr<Executor> parent = getCPUExecutor());
 
   /**
    * Add one task for execution in the parent executor
@@ -77,11 +100,23 @@ class SerialExecutor : public folly::Executor {
     return parent_->getNumPriorities();
   }
 
- private:
-  class TaskQueueImpl;
+ protected:
+  bool keepAliveAcquire() override;
 
-  std::shared_ptr<folly::Executor> parent_;
-  std::shared_ptr<TaskQueueImpl> taskQueueImpl_;
+  void keepAliveRelease() override;
+
+ private:
+  explicit SerialExecutor(KeepAlive<Executor> parent);
+  ~SerialExecutor() override;
+
+  void run();
+
+  KeepAlive<Executor> parent_;
+  std::mutex mutex_;
+  std::size_t scheduled_{0};
+  std::queue<Func> queue_;
+
+  std::atomic<ssize_t> keepAliveCounter_{1};
 };
 
 } // namespace folly

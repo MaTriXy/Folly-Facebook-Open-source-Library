@@ -1,5 +1,5 @@
 /*
- * Copyright 2004-present Facebook, Inc.
+ * Copyright 2014-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,12 @@
 #include <folly/io/async/HHWheelTimer.h>
 #include <folly/io/async/Request.h>
 
-#include <folly/BitIterator.h>
 #include <folly/Memory.h>
 #include <folly/Optional.h>
 #include <folly/ScopeGuard.h>
+#include <folly/container/BitIterator.h>
 
-#include <folly/Bits.h>
+#include <folly/lang/Bits.h>
 
 #include <cassert>
 
@@ -50,8 +50,9 @@ HHWheelTimer::Callback::~Callback() {
   }
 }
 
-void HHWheelTimer::Callback::setScheduled(HHWheelTimer* wheel,
-                                          std::chrono::milliseconds timeout) {
+void HHWheelTimer::Callback::setScheduled(
+    HHWheelTimer* wheel,
+    std::chrono::milliseconds timeout) {
   assert(wheel_ == nullptr);
   assert(expiration_ == decltype(expiration_){});
 
@@ -88,7 +89,7 @@ HHWheelTimer::HHWheelTimer(
       count_(0),
       startTime_(getCurTime()),
       processingCallbacksGuard_(nullptr) {
-  bitmap_.resize((WHEEL_SIZE / sizeof(uint64_t)) / 8, 0);
+  bitmap_.resize((WHEEL_SIZE / sizeof(std::size_t)) / 8, 0);
 }
 
 HHWheelTimer::~HHWheelTimer() {
@@ -108,8 +109,9 @@ HHWheelTimer::~HHWheelTimer() {
   cancelAll();
 }
 
-void HHWheelTimer::scheduleTimeoutImpl(Callback* callback,
-                                       std::chrono::milliseconds timeout) {
+void HHWheelTimer::scheduleTimeoutImpl(
+    Callback* callback,
+    std::chrono::milliseconds timeout) {
   auto nextTick = calcNextTick();
   int64_t due = timeToWheelTicks(timeout) + nextTick;
   int64_t diff = due - nextTick;
@@ -140,8 +142,9 @@ void HHWheelTimer::scheduleTimeoutImpl(Callback* callback,
   list->push_back(*callback);
 }
 
-void HHWheelTimer::scheduleTimeout(Callback* callback,
-                                   std::chrono::milliseconds timeout) {
+void HHWheelTimer::scheduleTimeout(
+    Callback* callback,
+    std::chrono::milliseconds timeout) {
   // Cancel the callback if it happens to be scheduled already.
   callback->cancelTimeout();
 
@@ -246,7 +249,7 @@ size_t HHWheelTimer::cancelAll() {
   size_t count = 0;
 
   if (count_ != 0) {
-    const uint64_t numElements = WHEEL_BUCKETS * WHEEL_SIZE;
+    const std::size_t numElements = WHEEL_BUCKETS * WHEEL_SIZE;
     auto maxBuckets = std::min(numElements, count_);
     auto buckets = std::make_unique<CallbackList[]>(maxBuckets);
     size_t countBuckets = 0;

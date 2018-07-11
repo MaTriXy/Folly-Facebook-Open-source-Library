@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2017-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -66,7 +66,7 @@ IOThreadPoolExecutor::IOThreadPoolExecutor(
     std::shared_ptr<ThreadFactory> threadFactory,
     EventBaseManager* ebm,
     bool waitForAll)
-    : ThreadPoolExecutor(numThreads, std::move(threadFactory), waitForAll),
+    : ThreadPoolExecutor(numThreads, 0, std::move(threadFactory), waitForAll),
       nextThread_(0),
       eventBaseManager_(ebm) {
   setNumThreads(numThreads);
@@ -84,7 +84,8 @@ void IOThreadPoolExecutor::add(
     Func func,
     std::chrono::milliseconds expiration,
     Func expireCallback) {
-  RWSpinLock::ReadHolder r{&threadListLock_};
+  ensureActiveThreads();
+  SharedMutex::ReadHolder r{&threadListLock_};
   if (threadList_.get().empty()) {
     throw std::runtime_error("No threads available");
   }
@@ -124,7 +125,8 @@ IOThreadPoolExecutor::pickThread() {
 }
 
 EventBase* IOThreadPoolExecutor::getEventBase() {
-  RWSpinLock::ReadHolder r{&threadListLock_};
+  ensureActiveThreads();
+  SharedMutex::ReadHolder r{&threadListLock_};
   return pickThread()->eventBase;
 }
 
@@ -203,9 +205,8 @@ void IOThreadPoolExecutor::stopThreads(size_t n) {
 }
 
 // threadListLock_ is readlocked
-uint64_t IOThreadPoolExecutor::getPendingTaskCountImpl(
-    const folly::RWSpinLock::ReadHolder&) {
-  uint64_t count = 0;
+size_t IOThreadPoolExecutor::getPendingTaskCountImpl() {
+  size_t count = 0;
   for (const auto& thread : threadList_.get()) {
     auto ioThread = std::static_pointer_cast<IOThread>(thread);
     size_t pendingTasks = ioThread->pendingTasks;

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 Facebook, Inc.
+ * Copyright 2011-present Facebook, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -64,7 +64,10 @@ char32_t utf8ToCodePoint(
    * 1111110x 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx 10xxxxxx
    */
 
-  auto skip = [&] { ++p; return U'\ufffd'; };
+  const auto skip = [&] {
+    ++p;
+    return U'\ufffd';
+  };
 
   if (p >= e) {
     if (skipOnError) {
@@ -99,7 +102,7 @@ char32_t utf8ToCodePoint(
   fst <<= 1;
 
   for (unsigned int i = 1; i != 3 && p + i < e; ++i) {
-    unsigned char tmp = p[i];
+    const unsigned char tmp = p[i];
 
     if ((tmp & 0xC0) != 0x80) {
       if (skipOnError) {
