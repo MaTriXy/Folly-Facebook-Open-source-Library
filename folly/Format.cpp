@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,8 +16,11 @@
 
 #include <folly/Format.h>
 
+#include <cassert>
+
 #include <folly/ConstexprMath.h>
 #include <folly/CppAttributes.h>
+#include <folly/Portability.h>
 #include <folly/container/Array.h>
 
 #include <double-conversion/double-conversion.h>
@@ -47,9 +50,9 @@ struct format_table_conv_make_item {
   static_assert(Base <= 36, "Base is unrepresentable");
   struct make_item {
     std::size_t index{};
-    constexpr explicit make_item(std::size_t index_) : index(index_) {} // gcc49
     constexpr char alpha(std::size_t ord) const {
-      return ord < 10 ? '0' + ord : (Upper ? 'A' : 'a') + (ord - 10);
+      return static_cast<char>(
+          ord < 10 ? '0' + ord : (Upper ? 'A' : 'a') + (ord - 10));
     }
     constexpr char operator()(std::size_t offset) const {
       return alpha(index / constexpr_pow(Base, Size - offset - 1) % Base);
@@ -113,102 +116,105 @@ void FormatValue<double>::formatHelper(
 
   // 2+: for null terminator and optional sign shenanigans.
   constexpr int bufLen =
-      2 + constexpr_max(
-              2 + DoubleToStringConverter::kMaxFixedDigitsBeforePoint +
-                  DoubleToStringConverter::kMaxFixedDigitsAfterPoint,
-              constexpr_max(8 + DoubleToStringConverter::kMaxExponentialDigits,
-                            7 + DoubleToStringConverter::kMaxPrecisionDigits));
+      2 +
+      constexpr_max(
+          2 + DoubleToStringConverter::kMaxFixedDigitsBeforePoint +
+              DoubleToStringConverter::kMaxFixedDigitsAfterPoint,
+          constexpr_max(
+              8 + DoubleToStringConverter::kMaxExponentialDigits,
+              7 + DoubleToStringConverter::kMaxPrecisionDigits));
   char buf[bufLen];
   StringBuilder builder(buf + 1, bufLen - 1);
 
   char plusSign;
   switch (arg.sign) {
-  case FormatArg::Sign::PLUS_OR_MINUS:
-    plusSign = '+';
-    break;
-  case FormatArg::Sign::SPACE_OR_MINUS:
-    plusSign = ' ';
-    break;
-  default:
-    plusSign = '\0';
-    break;
-  };
+    case FormatArg::Sign::PLUS_OR_MINUS:
+      plusSign = '+';
+      break;
+    case FormatArg::Sign::SPACE_OR_MINUS:
+      plusSign = ' ';
+      break;
+    case FormatArg::Sign::DEFAULT:
+    case FormatArg::Sign::MINUS:
+    case FormatArg::Sign::INVALID:
+    default:
+      plusSign = '\0';
+      break;
+  }
 
-  auto flags =
-      DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN |
+  auto flags = DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN |
       (arg.trailingDot ? DoubleToStringConverter::EMIT_TRAILING_DECIMAL_POINT
                        : 0);
 
   double val = val_;
   switch (arg.presentation) {
-  case '%':
-    val *= 100;
-    FOLLY_FALLTHROUGH;
-  case 'f':
-  case 'F':
-    {
-      if (arg.precision >
-          DoubleToStringConverter::kMaxFixedDigitsAfterPoint) {
+    case '%':
+      val *= 100;
+      [[fallthrough]];
+    case 'f':
+    case 'F': {
+      if (arg.precision > DoubleToStringConverter::kMaxFixedDigitsAfterPoint) {
         arg.precision = DoubleToStringConverter::kMaxFixedDigitsAfterPoint;
       }
-      DoubleToStringConverter conv(flags,
-                                   infinitySymbol,
-                                   nanSymbol,
-                                   exponentSymbol,
-                                   -4,
-                                   arg.precision,
-                                   0,
-                                   0);
-      arg.enforce(conv.ToFixed(val, arg.precision, &builder),
-                  "fixed double conversion failed");
+      DoubleToStringConverter conv(
+          flags,
+          infinitySymbol,
+          nanSymbol,
+          exponentSymbol,
+          -4,
+          arg.precision,
+          0,
+          0);
+      arg.enforce(
+          conv.ToFixed(val, arg.precision, &builder),
+          "fixed double conversion failed");
+      break;
     }
-    break;
-  case 'e':
-  case 'E':
-    {
+    case 'e':
+    case 'E': {
       if (arg.precision > DoubleToStringConverter::kMaxExponentialDigits) {
         arg.precision = DoubleToStringConverter::kMaxExponentialDigits;
       }
 
-      DoubleToStringConverter conv(flags,
-                                   infinitySymbol,
-                                   nanSymbol,
-                                   exponentSymbol,
-                                   -4,
-                                   arg.precision,
-                                   0,
-                                   0);
+      DoubleToStringConverter conv(
+          flags,
+          infinitySymbol,
+          nanSymbol,
+          exponentSymbol,
+          -4,
+          arg.precision,
+          0,
+          0);
       arg.enforce(conv.ToExponential(val, arg.precision, &builder));
+      break;
     }
-    break;
-  case 'n':  // should be locale-aware, but isn't
-  case 'g':
-  case 'G':
-    {
+    case 'n': // should be locale-aware, but isn't
+    case 'g':
+    case 'G': {
       if (arg.precision < DoubleToStringConverter::kMinPrecisionDigits) {
         arg.precision = DoubleToStringConverter::kMinPrecisionDigits;
-      } else if (arg.precision >
-                 DoubleToStringConverter::kMaxPrecisionDigits) {
+      } else if (arg.precision > DoubleToStringConverter::kMaxPrecisionDigits) {
         arg.precision = DoubleToStringConverter::kMaxPrecisionDigits;
       }
-      DoubleToStringConverter conv(flags,
-                                   infinitySymbol,
-                                   nanSymbol,
-                                   exponentSymbol,
-                                   -4,
-                                   arg.precision,
-                                   0,
-                                   0);
+      DoubleToStringConverter conv(
+          flags,
+          infinitySymbol,
+          nanSymbol,
+          exponentSymbol,
+          -4,
+          arg.precision,
+          0,
+          0);
       arg.enforce(conv.ToShortest(val, &builder));
+      break;
     }
-    break;
-  default:
-    arg.error("invalid specifier '", arg.presentation, "'");
+    default:
+      arg.error("invalid specifier '", arg.presentation, "'");
   }
 
-  int len = builder.position();
+  auto len = builder.position();
   builder.Finalize();
-  DCHECK_GT(len, 0);
+  assert(len > 0);
 
   // Add '+' or ' ' sign if needed
   char* p = buf + 1;
@@ -224,7 +230,6 @@ void FormatValue<double>::formatHelper(
 
   piece = fbstring(p, size_t(len));
 }
-
 
 void FormatArg::initSlow() {
   auto b = fullArgString.begin();
@@ -248,15 +253,16 @@ void FormatArg::initSlow() {
     Align a;
     if (p + 1 != end &&
         (a = formatAlignTable[static_cast<unsigned char>(p[1])]) !=
-        Align::INVALID) {
+            Align::INVALID) {
       fill = *p;
       align = a;
       p += 2;
       if (p == end) {
         return;
       }
-    } else if ((a = formatAlignTable[static_cast<unsigned char>(*p)]) !=
-               Align::INVALID) {
+    } else if (
+        (a = formatAlignTable[static_cast<unsigned char>(*p)]) !=
+        Align::INVALID) {
       align = a;
       if (++p == end) {
         return;
@@ -264,7 +270,7 @@ void FormatArg::initSlow() {
     }
 
     Sign s;
-    unsigned char uSign = static_cast<unsigned char>(*p);
+    auto uSign = static_cast<unsigned char>(*p);
     if ((s = formatSignTable[uSign]) != Sign::INVALID) {
       sign = s;
       if (++p == end) {
@@ -358,32 +364,34 @@ void FormatArg::initSlow() {
 void FormatArg::validate(Type type) const {
   enforce(keyEmpty(), "index not allowed");
   switch (type) {
-  case Type::INTEGER:
-    enforce(precision == kDefaultPrecision,
-            "precision not allowed on integers");
-    break;
-  case Type::FLOAT:
-    enforce(!basePrefix,
-            "base prefix ('#') specifier only allowed on integers");
-    enforce(!thousandsSeparator,
-            "thousands separator (',') only allowed on integers");
-    break;
-  case Type::OTHER:
-    enforce(align != Align::PAD_AFTER_SIGN,
-            "'='alignment only allowed on numbers");
-    enforce(sign == Sign::DEFAULT,
-            "sign specifier only allowed on numbers");
-    enforce(!basePrefix,
-            "base prefix ('#') specifier only allowed on integers");
-    enforce(!thousandsSeparator,
-            "thousands separator (',') only allowed on integers");
-    break;
+    case Type::INTEGER:
+      enforce(
+          precision == kDefaultPrecision, "precision not allowed on integers");
+      break;
+    case Type::FLOAT:
+      enforce(
+          !basePrefix, "base prefix ('#') specifier only allowed on integers");
+      enforce(
+          !thousandsSeparator,
+          "thousands separator (',') only allowed on integers");
+      break;
+    case Type::OTHER:
+      enforce(
+          align != Align::PAD_AFTER_SIGN,
+          "'='alignment only allowed on numbers");
+      enforce(sign == Sign::DEFAULT, "sign specifier only allowed on numbers");
+      enforce(
+          !basePrefix, "base prefix ('#') specifier only allowed on integers");
+      enforce(
+          !thousandsSeparator,
+          "thousands separator (',') only allowed on integers");
+      break;
   }
 }
 
 namespace detail {
 void insertThousandsGroupingUnsafe(char* start_buffer, char** end_buffer) {
-  uint32_t remaining_digits = uint32_t(*end_buffer - start_buffer);
+  auto remaining_digits = uint32_t(*end_buffer - start_buffer);
   uint32_t separator_size = (remaining_digits - 1) / 3;
   uint32_t result_size = remaining_digits + separator_size;
   *end_buffer = *end_buffer + separator_size;
@@ -397,8 +405,8 @@ void insertThousandsGroupingUnsafe(char* start_buffer, char** end_buffer) {
   uint32_t next_group_size = 3;
 
   while (!done) {
-    uint32_t current_group_size = std::max<uint32_t>(1,
-      std::min<uint32_t>(remaining_digits, next_group_size));
+    uint32_t current_group_size = std::max<uint32_t>(
+        1, std::min<uint32_t>(remaining_digits, next_group_size));
 
     // write out the current group's digits to the buffer index
     for (uint32_t i = 0; i < current_group_size; i++) {
@@ -419,13 +427,5 @@ void insertThousandsGroupingUnsafe(char* start_buffer, char** end_buffer) {
 
 FormatKeyNotFoundException::FormatKeyNotFoundException(StringPiece key)
     : std::out_of_range(kMessagePrefix.str() + key.str()) {}
-
-constexpr StringPiece const FormatKeyNotFoundException::kMessagePrefix;
-
-namespace detail {
-[[noreturn]] void throwFormatKeyNotFoundException(StringPiece key) {
-  throw FormatKeyNotFoundException(key);
-}
-} // namespace detail
 
 } // namespace folly

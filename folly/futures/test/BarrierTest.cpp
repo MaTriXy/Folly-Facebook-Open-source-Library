@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,12 +20,14 @@
 #include <condition_variable>
 #include <mutex>
 
+#include <glog/logging.h>
+
 #include <folly/Random.h>
 #include <folly/portability/GTest.h>
 
-#include <glog/logging.h>
-
-namespace folly { namespace futures { namespace test {
+namespace folly {
+namespace futures {
+namespace test {
 
 TEST(BarrierTest, Simple) {
   constexpr uint32_t numThreads = 10;
@@ -43,26 +45,24 @@ TEST(BarrierTest, Simple) {
   std::vector<std::thread> threads;
   threads.reserve(numThreads);
   for (uint32_t i = 0; i < numThreads; ++i) {
-    threads.emplace_back([&] () {
+    threads.emplace_back([&]() {
       barrier.wait()
-        .then(
-            [&] (bool v) {
-              std::unique_lock<std::mutex> lock(mutex);
-              b1TrueSeen += uint32_t(v);
-              if (++b1Passed == numThreads) {
-                b1DoneCond.notify_one();
-              }
-              return barrier.wait();
-            })
-        .then(
-            [&] (bool v) {
-              std::unique_lock<std::mutex> lock(mutex);
-              b2TrueSeen += uint32_t(v);
-              if (++b2Passed == numThreads) {
-                b2DoneCond.notify_one();
-              }
-            })
-        .get();
+          .thenValue([&](bool v) {
+            std::unique_lock<std::mutex> lock(mutex);
+            b1TrueSeen += uint32_t(v);
+            if (++b1Passed == numThreads) {
+              b1DoneCond.notify_one();
+            }
+            return barrier.wait();
+          })
+          .thenValue([&](bool v) {
+            std::unique_lock<std::mutex> lock(mutex);
+            b2TrueSeen += uint32_t(v);
+            if (++b2Passed == numThreads) {
+              b2DoneCond.notify_one();
+            }
+          })
+          .get();
     });
   }
 
@@ -116,7 +116,7 @@ TEST(BarrierTest, Random) {
   auto numThreads = folly::Random::rand32(30, 91);
 
   struct ThreadInfo {
-    ThreadInfo() { }
+    ThreadInfo() {}
     std::thread thread;
     uint32_t iteration = 0;
     uint32_t numFutures;

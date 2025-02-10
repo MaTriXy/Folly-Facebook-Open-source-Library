@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,7 +17,7 @@
 #pragma once
 
 #include <folly/SharedMutex.h>
-#include <folly/stats/detail/DigestBuilder.h>
+#include <folly/stats/DigestBuilder.h>
 #include <folly/stats/detail/SlidingWindow.h>
 
 namespace folly {
@@ -44,21 +44,33 @@ class BufferedStat {
 
   void append(double value, TimePoint now = ClockT::now());
 
+  void flush();
+
  protected:
   // https://www.mail-archive.com/llvm-bugs@lists.llvm.org/msg18280.html
   // Wrap the time point in something with a noexcept constructor.
-  struct TimePointHolder {
+  class AtomicTimePoint {
+   private:
+    using Duration = typename TimePoint::duration;
+    using TimePointRep = typename TimePoint::rep;
+
+    std::atomic<TimePointRep> rep_;
+
    public:
-    TimePointHolder() noexcept {}
+    explicit AtomicTimePoint(TimePoint value)
+        : rep_{value.time_since_epoch().count()} {}
 
-    TimePointHolder(TimePoint t) : tp(t) {}
-
-    TimePoint tp;
+    TimePoint load(std::memory_order order) const {
+      return TimePoint(Duration(rep_.load(order)));
+    }
+    void store(TimePoint value, std::memory_order order) {
+      rep_.store(value.time_since_epoch().count(), order);
+    }
   };
 
   const typename ClockT::duration bufferDuration_;
-  std::atomic<TimePointHolder> expiry_;
-  SharedMutex mutex_;
+  AtomicTimePoint expiry_;
+  mutable SharedMutex mutex_;
 
   virtual void onNewDigest(
       DigestT digest,
@@ -66,12 +78,27 @@ class BufferedStat {
       TimePoint oldExpiry,
       const std::unique_lock<SharedMutex>& g) = 0;
 
+  // Update digest if now > expiry
   std::unique_lock<SharedMutex> updateIfExpired(TimePoint now);
+
+  // Update digest unconditionally
+  std::unique_lock<SharedMutex> update();
 
  private:
   DigestBuilder<DigestT> digestBuilder_;
 
-  void doUpdate(TimePoint now, const std::unique_lock<SharedMutex>& g);
+  // Controls how digest updates happen in doUpdate
+  enum class UpdateMode {
+    OnExpiry,
+    Now,
+  };
+
+  // Update digest. If updateMode == UpdateMode::Now digest is updated
+  // unconditionally, else digest is updated only if expiry has passed.
+  void doUpdate(
+      TimePoint now,
+      const std::unique_lock<SharedMutex>& g,
+      UpdateMode updateMode);
 
   TimePoint roundUp(TimePoint t);
 };
@@ -130,3 +157,5 @@ class BufferedSlidingWindow : public BufferedStat<DigestT, ClockT> {
 
 } // namespace detail
 } // namespace folly
+
+#include <folly/stats/detail/BufferedStat-inl.h>

@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <folly/logging/AsyncFileWriter.h>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+
 #include <thread>
 
 #include <folly/Conv.h>
@@ -21,12 +28,10 @@
 #include <folly/FileUtil.h>
 #include <folly/String.h>
 #include <folly/Synchronized.h>
-#include <folly/experimental/TestUtil.h>
 #include <folly/futures/Future.h>
 #include <folly/futures/Promise.h>
 #include <folly/init/Init.h>
 #include <folly/lang/SafeAssert.h>
-#include <folly/logging/AsyncFileWriter.h>
 #include <folly/logging/Init.h>
 #include <folly/logging/LoggerDB.h>
 #include <folly/logging/xlog.h>
@@ -38,6 +43,7 @@
 #include <folly/system/ThreadId.h>
 #include <folly/system/ThreadName.h>
 #include <folly/test/TestUtils.h>
+#include <folly/testing/TestUtil.h>
 
 DEFINE_int64(
     async_discard_num_normal_writers,
@@ -88,7 +94,7 @@ TEST(AsyncFileWriter, simpleMessages) {
     AsyncFileWriter writer{folly::File{tmpFile.fd(), false}};
     for (int n = 0; n < 10; ++n) {
       writer.writeMessage(folly::to<std::string>("message ", n, "\n"));
-      sched_yield();
+      std::this_thread::yield();
     }
   }
   tmpFile.close();
@@ -115,9 +121,7 @@ namespace {
 static std::vector<std::string>* internalWarnings;
 
 void handleLoggingError(
-    StringPiece /* file */,
-    int /* lineNumber */,
-    std::string&& msg) {
+    StringPiece /* file */, int /* lineNumber */, std::string&& msg) {
   internalWarnings->emplace_back(std::move(msg));
 }
 } // namespace
@@ -130,12 +134,12 @@ TEST(AsyncFileWriter, ioError) {
 
   // Create an AsyncFileWriter that refers to a pipe whose read end is closed
   std::array<int, 2> fds;
-  auto rc = pipe(fds.data());
+  auto rc = fileops::pipe(fds.data());
   folly::checkUnixError(rc, "failed to create pipe");
 #ifndef _WIN32
   signal(SIGPIPE, SIG_IGN);
 #endif
-  ::close(fds[0]);
+  fileops::close(fds[0]);
 
   // Log a bunch of messages to the writer
   size_t numMessages = 100;
@@ -143,7 +147,7 @@ TEST(AsyncFileWriter, ioError) {
     AsyncFileWriter writer{folly::File{fds[1], true}};
     for (size_t n = 0; n < numMessages; ++n) {
       writer.writeMessage(folly::to<std::string>("message ", n, "\n"));
-      sched_yield();
+      std::this_thread::yield();
     }
   }
 
@@ -155,7 +159,7 @@ TEST(AsyncFileWriter, ioError) {
   //
   // GTest on Windows doesn't support alternation in the regex syntax -_-....
   const std::string kExpectedErrorMessage =
-#if _WIN32
+#ifdef _WIN32
       // The `pipe` call above is actually implemented via sockets, so we get
       // a different error message.
       "An established connection was aborted by the software in your host machine\\.";
@@ -216,7 +220,7 @@ TEST(AsyncFileWriter, flush) {
   // Set up a pipe(), then write data to the write endpoint until it fills up
   // and starts blocking.
   std::array<int, 2> fds;
-  auto rc = pipe(fds.data());
+  auto rc = fileops::pipe(fds.data());
   folly::checkUnixError(rc, "failed to create pipe");
   File readPipe{fds[0], true};
   File writePipe{fds[1], true};
@@ -234,8 +238,9 @@ TEST(AsyncFileWriter, flush) {
   Promise<Unit> promise;
   auto future = promise.getFuture();
   auto flushFunction = [&] { writer.flush(); };
-  std::thread flushThread{
-      [&]() { promise.setTry(makeTryWith(flushFunction)); }};
+  std::thread flushThread{[&]() {
+    promise.setTry(makeTryWith(flushFunction));
+  }};
   // Detach the flush thread now rather than joining it at the end of the
   // function.  This way if something goes wrong during the test we will fail
   // with the real error, rather than crashing due to the std::thread
@@ -253,10 +258,11 @@ TEST(AsyncFileWriter, flush) {
   // Now read from the pipe
   std::vector<char> buf;
   buf.resize(paddingSize);
-  readFull(readPipe.fd(), buf.data(), buf.size());
+  auto bytesRead = readFull(readPipe.fd(), buf.data(), buf.size());
+  EXPECT_EQ(bytesRead, paddingSize);
 
   // Make sure flush completes successfully now
-  std::move(future).get(10ms);
+  std::move(future).get(50ms);
 }
 
 // A large-ish message suffix, just to consume space and help fill up
@@ -267,17 +273,21 @@ static constexpr StringPiece kMsgSuffix{
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"};
 
+namespace {
+std::atomic<size_t> totalDiscarded;
+void discardCallback(size_t n) {
+  totalDiscarded += n;
+}
+} // namespace
+
 class ReadStats {
  public:
   ReadStats()
-      : deadline_{steady_clock::now() +
-                  milliseconds{FLAGS_async_discard_timeout_msec}},
+      : deadline_{steady_clock::now() + milliseconds{FLAGS_async_discard_timeout_msec}},
         readSleepUS_{static_cast<uint64_t>(
             std::min(int64_t{0}, FLAGS_async_discard_read_sleep_usec))} {}
 
-  void clearSleepDuration() {
-    readSleepUS_.store(0);
-  }
+  void clearSleepDuration() { readSleepUS_.store(0); }
   std::chrono::microseconds getSleepUS() const {
     return std::chrono::microseconds{readSleepUS_.load()};
   }
@@ -307,7 +317,7 @@ class ReadStats {
     data.flags = flags;
   }
 
-  void check() {
+  void check(size_t nDiscarded) {
     auto writeDataMap = perThreadWriteData_.wlock();
 
     EXPECT_EQ("", trailingData_);
@@ -350,10 +360,11 @@ class ReadStats {
     // Fail the test if we didn't actually trigger any discards before we timed
     // out.
     EXPECT_GT(numDiscarded_, 0);
+    EXPECT_EQ(nDiscarded, numDiscarded_);
 
-    XLOG(DBG1) << totalMessagesWritten << " messages written, "
-               << totalMessagesRead << " messages read, " << numDiscarded_
-               << " messages discarded";
+    XLOG(DBG1)
+        << totalMessagesWritten << " messages written, " << totalMessagesRead
+        << " messages read, " << numDiscarded_ << " messages discarded";
   }
 
   void messageReceived(StringPiece msg) {
@@ -370,7 +381,7 @@ class ReadStats {
     size_t messageIndex = 0;
     try {
       parseMessage(msg, &threadID, &messageIndex);
-    } catch (const std::exception& ex) {
+    } catch (const std::exception&) {
       ++numUnableToParse_;
       XLOG(ERR, "unable to parse log message: ", msg);
       return;
@@ -387,9 +398,7 @@ class ReadStats {
     }
   }
 
-  void trailingData(StringPiece data) {
-    trailingData_ = data.str();
-  }
+  void trailingData(StringPiece data) { trailingData_ = data.str(); }
 
  private:
   struct ReaderData {
@@ -548,10 +557,7 @@ void readThread(folly::File&& file, ReadStats* stats) {
  * writeThread() writes a series of messages to the AsyncFileWriter
  */
 void writeThread(
-    AsyncFileWriter* writer,
-    size_t id,
-    uint32_t flags,
-    ReadStats* readStats) {
+    AsyncFileWriter* writer, size_t id, uint32_t flags, ReadStats* readStats) {
   size_t msgID = 0;
   while (true) {
     ++msgID;
@@ -579,12 +585,15 @@ void writeThread(
  * - The number of messages received plus the number reported in discard
  *   notifications matches the number of messages sent.
  */
+
 TEST(AsyncFileWriter, discard) {
   std::array<int, 2> fds;
-  auto pipeResult = pipe(fds.data());
+  auto pipeResult = fileops::pipe(fds.data());
   folly::checkUnixError(pipeResult, "pipe failed");
   folly::File readPipe{fds[0], true};
   folly::File writePipe{fds[1], true};
+
+  AsyncFileWriter::setDiscardCallback(discardCallback);
 
   ReadStats readStats;
   std::thread reader(readThread, std::move(readPipe), &readStats);
@@ -613,15 +622,20 @@ TEST(AsyncFileWriter, discard) {
   // Clear the read sleep duration so the reader will finish quickly now
   readStats.clearSleepDuration();
   reader.join();
-  readStats.check();
+  readStats.check(totalDiscarded);
+
+  AsyncFileWriter::setDiscardCallback(nullptr);
 }
 
+#ifndef _WIN32
 /**
  * Test that AsyncFileWriter operates correctly after a fork() in both the
  * parent and child processes.
  */
 TEST(AsyncFileWriter, fork) {
 #if FOLLY_HAVE_PTHREAD_ATFORK
+  SKIP_IF(folly::kIsSanitizeThread) << "Not supported for TSAN";
+
   TemporaryFile tmpFile{"logging_test"};
 
   // The number of messages to send before the fork and from each process
@@ -724,6 +738,8 @@ TEST(AsyncFileWriter, fork) {
  */
 TEST(AsyncFileWriter, crazyForks) {
 #if FOLLY_HAVE_PTHREAD_ATFORK
+  SKIP_IF(folly::kIsSanitizeThread) << "Not supported for TSAN";
+
   constexpr size_t numAsyncWriterThreads = 10;
   constexpr size_t numForkThreads = 5;
   constexpr size_t numForkIterations = 20;
@@ -801,3 +817,4 @@ TEST(AsyncFileWriter, crazyForks) {
   SKIP() << "pthread_atfork() is not supported on this platform";
 #endif // FOLLY_HAVE_PTHREAD_ATFORK
 }
+#endif // !_WIN32

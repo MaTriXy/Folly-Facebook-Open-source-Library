@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <memory>
@@ -31,10 +32,10 @@ class StackCacheEntry;
 class GuardPageAllocator {
  public:
   /**
-   * @param useGuardPages if true, protect limited amount of stacks with guard
-   *                      pages, otherwise acts as std::allocator.
+   * @param guardPagesPerStack  Protect a small number of fiber stacks
+   *   with this many guard pages.  If 0, acts as std::allocator.
    */
-  explicit GuardPageAllocator(bool useGuardPages);
+  explicit GuardPageAllocator(size_t guardPagesPerStack);
   ~GuardPageAllocator();
 
   /**
@@ -50,7 +51,7 @@ class GuardPageAllocator {
  private:
   std::unique_ptr<StackCacheEntry> stackCache_;
   std::allocator<unsigned char> fallbackAllocator_;
-  bool useGuardPages_{true};
+  size_t guardPagesPerStack_{0};
 };
 } // namespace fibers
 } // namespace folly

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,7 @@
 #pragma once
 
 #include <assert.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -24,8 +25,7 @@
 #include <type_traits>
 #include <utility>
 
-#include <boost/noncopyable.hpp>
-#include <glog/logging.h>
+#include <folly/Portability.h>
 
 namespace folly {
 
@@ -46,8 +46,11 @@ namespace folly {
  * DelayedDestructionBase does not perform any locking.  It is intended to be
  * used only from a single thread.
  */
-class DelayedDestructionBase : private boost::noncopyable {
+class DelayedDestructionBase {
  public:
+  DelayedDestructionBase(const DelayedDestructionBase&) = delete;
+  DelayedDestructionBase& operator=(const DelayedDestructionBase&) = delete;
+
   virtual ~DelayedDestructionBase() = default;
 
   /**
@@ -59,9 +62,9 @@ class DelayedDestructionBase : private boost::noncopyable {
    * object, causing problems when the callback function returns and the
    * guarded object's method resumes execution.
    */
-  class DestructorGuard {
+  class FOLLY_NODISCARD DestructorGuard {
    public:
-    explicit DestructorGuard(DelayedDestructionBase* dd = nullptr) : dd_(dd) {
+    explicit DestructorGuard(DelayedDestructionBase* dd) : dd_(dd) {
       if (dd_ != nullptr) {
         ++dd_->guardCount_;
         assert(dd_->guardCount_ > 0); // check for wrapping
@@ -70,9 +73,8 @@ class DelayedDestructionBase : private boost::noncopyable {
 
     DestructorGuard(const DestructorGuard& dg) : DestructorGuard(dg.dd_) {}
 
-    DestructorGuard(DestructorGuard&& dg) noexcept : dd_(dg.dd_) {
-      dg.dd_ = nullptr;
-    }
+    DestructorGuard(DestructorGuard&& dg) noexcept
+        : dd_(std::exchange(dg.dd_, nullptr)) {}
 
     DestructorGuard& operator=(DestructorGuard dg) noexcept {
       std::swap(dd_, dg.dd_);
@@ -94,13 +96,9 @@ class DelayedDestructionBase : private boost::noncopyable {
       }
     }
 
-    DelayedDestructionBase* get() const {
-      return dd_;
-    }
+    DelayedDestructionBase* get() const { return dd_; }
 
-    explicit operator bool() const {
-      return dd_ != nullptr;
-    }
+    explicit operator bool() const { return dd_ != nullptr; }
 
    private:
     DelayedDestructionBase* dd_;
@@ -170,25 +168,17 @@ class DelayedDestructionBase : private boost::noncopyable {
       return *this;
     }
 
-    void reset(AliasType* dd = nullptr) {
-      *this = dd;
-    }
+    void reset(AliasType* dd = nullptr) { *this = dd; }
 
     AliasType* get() const {
       return static_cast<AliasType*>(DestructorGuard::get());
     }
 
-    AliasType& operator*() const {
-      return *get();
-    }
+    AliasType& operator*() const { return *get(); }
 
-    AliasType* operator->() const {
-      return get();
-    }
+    AliasType* operator->() const { return get(); }
 
-    explicit operator bool() const {
-      return DestructorGuard::operator bool();
-    }
+    explicit operator bool() const { return DestructorGuard::operator bool(); }
   };
 
  protected:
@@ -200,9 +190,7 @@ class DelayedDestructionBase : private boost::noncopyable {
    * This is primarily intended for debugging purposes, such as asserting
    * that an object has at least 1 guard.
    */
-  uint32_t getDestructorGuardCount() const {
-    return guardCount_;
-  }
+  uint32_t getDestructorGuardCount() const { return guardCount_; }
 
   /**
    * Implement onDelayedDestroy in subclasses.
@@ -239,23 +227,19 @@ inline bool operator!=(
   return left.get() != right.get();
 }
 inline bool operator==(
-    const DelayedDestructionBase::DestructorGuard& left,
-    std::nullptr_t) {
+    const DelayedDestructionBase::DestructorGuard& left, std::nullptr_t) {
   return left.get() == nullptr;
 }
 inline bool operator==(
-    std::nullptr_t,
-    const DelayedDestructionBase::DestructorGuard& right) {
+    std::nullptr_t, const DelayedDestructionBase::DestructorGuard& right) {
   return nullptr == right.get();
 }
 inline bool operator!=(
-    const DelayedDestructionBase::DestructorGuard& left,
-    std::nullptr_t) {
+    const DelayedDestructionBase::DestructorGuard& left, std::nullptr_t) {
   return left.get() != nullptr;
 }
 inline bool operator!=(
-    std::nullptr_t,
-    const DelayedDestructionBase::DestructorGuard& right) {
+    std::nullptr_t, const DelayedDestructionBase::DestructorGuard& right) {
   return nullptr != right.get();
 }
 

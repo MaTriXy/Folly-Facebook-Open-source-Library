@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,7 +26,6 @@
  * Helper functions for compression codecs.
  */
 namespace folly {
-namespace io {
 namespace compression {
 namespace detail {
 
@@ -41,7 +40,7 @@ dataStartsWithLE(const IOBuf* data, T prefix, uint64_t n = sizeof(T)) {
   DCHECK_GT(n, 0);
   DCHECK_LE(n, sizeof(T));
   T value;
-  Cursor cursor{data};
+  io::Cursor cursor{data};
   if (!cursor.tryReadLE(value)) {
     return false;
   }
@@ -63,5 +62,4 @@ prefixToStringLE(T prefix, uint64_t n = sizeof(T)) {
 
 } // namespace detail
 } // namespace compression
-} // namespace io
 } // namespace folly

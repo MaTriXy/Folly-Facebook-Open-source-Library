@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/LoggerDB.h>
 
 #include <set>
@@ -59,7 +60,7 @@ FOLLY_ATTR_WEAK void initializeLoggerDB(LoggerDB& db) {
   auto defaultHandlerConfig =
       LogHandlerConfig("stream", {{"stream", "stderr"}, {"async", "false"}});
   auto rootCategoryConfig =
-      LogCategoryConfig(LogLevel::WARNING, false, {"default"});
+      LogCategoryConfig(kDefaultLogLevel, false, {"default"});
   LogConfig config(
       /* handlerConfigs */ {{"default", defaultHandlerConfig}},
       /* categoryConfig */ {{"", rootCategoryConfig}});
@@ -68,67 +69,20 @@ FOLLY_ATTR_WEAK void initializeLoggerDB(LoggerDB& db) {
   db.updateConfig(config);
 }
 
-namespace {
-class LoggerDBSingleton {
- public:
-  explicit LoggerDBSingleton(LoggerDB* FOLLY_NONNULL db) : db_{db} {
-    // Call initializeLoggerDB() to apply some basic initial configuration.
-    initializeLoggerDB(*db_);
-  }
-
-  ~LoggerDBSingleton() {
-    // We intentionally leak the LoggerDB object on normal destruction.
-    // We want Logger objects to remain valid for the entire lifetime of the
-    // program, without having to worry about destruction ordering issues, or
-    // making the Logger perform reference counting on the LoggerDB.
-    //
-    // Therefore the main LoggerDB object, and all of the LogCategory objects
-    // it contains, are always intentionally leaked.
-    //
-    // However, we do call db_->cleanupHandlers() to destroy any registered
-    // LogHandler objects.  The LogHandlers can be user-defined objects and may
-    // hold resources that should be cleaned up.  This also ensures that the
-    // LogHandlers flush all outstanding messages before we exit.
-    db_->cleanupHandlers();
-
-    // Store the released pointer in a static variable just to prevent ASAN
-    // from complaining that we are leaking data.
-    static LoggerDB* db = db_.release();
-    (void)db;
-  }
-
-  LoggerDB& getDB() const {
-    return *db_;
-  }
-
- private:
-  // Store LoggerDB as a unique_ptr so it will be automatically destroyed if
-  // initializeLoggerDB() throws in the constructor.  We will explicitly
-  // release this during the normal destructor.
-  std::unique_ptr<LoggerDB> db_;
-};
-} // namespace
-
-LoggerDB& LoggerDB::get() {
-  // Intentionally leaky singleton
-  static LoggerDBSingleton singleton{new LoggerDB()};
-  return singleton.getDB();
-}
-
 LoggerDB::LoggerDB() {
-  // Create the root log category, and set the level to ERR by default
+  // Create the root log category and set its log level
   auto rootUptr = std::make_unique<LogCategory>(this);
   LogCategory* root = rootUptr.get();
   auto ret =
       loggersByName_.wlock()->emplace(root->getName(), std::move(rootUptr));
   DCHECK(ret.second);
 
-  root->setLevelLocked(LogLevel::ERR, false);
+  root->setLevelLocked(kDefaultLogLevel, false);
 }
 
 LoggerDB::LoggerDB(TestConstructorArg) : LoggerDB() {}
 
-LoggerDB::~LoggerDB() {}
+LoggerDB::~LoggerDB() = default;
 
 LogCategory* LoggerDB::getCategory(StringPiece name) {
   return getOrCreateCategoryLocked(*loggersByName_.wlock(), name);
@@ -224,6 +178,8 @@ LogConfig LoggerDB::getConfigImpl(bool includeAllCategories) const {
 
       LogCategoryConfig categoryConfig(
           levelInfo.first, levelInfo.second, handlerNames);
+      categoryConfig.propagateLevelMessagesToParent =
+          category->getPropagateLevelMessagesToParentRelaxed();
       categoryConfigs.emplace(category->getName(), std::move(categoryConfig));
     }
   }
@@ -261,7 +217,7 @@ void LoggerDB::startConfigUpdate(
 
     LogHandlerConfig updatedConfig;
     const LogHandlerConfig* handlerConfig;
-    if (entry.second.type.hasValue()) {
+    if (entry.second.type.has_value()) {
       handlerConfig = &entry.second;
     } else {
       // This configuration is intended to update an existing LogHandler
@@ -271,7 +227,7 @@ void LoggerDB::startConfigUpdate(
       }
 
       updatedConfig = oldHandler->getConfig();
-      if (!updatedConfig.type.hasValue()) {
+      if (!updatedConfig.type.has_value()) {
         // This normally should not happen unless someone improperly manually
         // constructed a LogHandler object.  All existing LogHandler objects
         // should indicate their type.
@@ -304,7 +260,7 @@ void LoggerDB::startConfigUpdate(
         handler = factory->createHandler(handlerConfig->options);
       }
     } catch (const std::exception& ex) {
-      // Errors creating or updating the the log handler are generally due to
+      // Errors creating or updating the log handler are generally due to
       // bad configuration options.  It is useful to update the exception
       // message to include the name of the log handler we were trying to
       // update or create.
@@ -323,7 +279,7 @@ void LoggerDB::startConfigUpdate(
   // Before we start making any LogCategory changes, confirm that all handlers
   // named in the category configs are known handlers.
   for (const auto& entry : config.getCategoryConfigs()) {
-    if (!entry.second.handlers.hasValue()) {
+    if (!entry.second.handlers.has_value()) {
       continue;
     }
     for (const auto& handlerName : entry.second.handlers.value()) {
@@ -418,7 +374,7 @@ void LoggerDB::updateConfig(const LogConfig& config) {
         getOrCreateCategoryLocked(*loggersByName, entry.first);
 
     // Update the log handlers
-    if (entry.second.handlers.hasValue()) {
+    if (entry.second.handlers.has_value()) {
       auto catHandlers = buildCategoryHandlerList(
           handlers, entry.first, entry.second.handlers.value());
       category->replaceHandlers(std::move(catHandlers));
@@ -427,6 +383,10 @@ void LoggerDB::updateConfig(const LogConfig& config) {
     // Update the level settings
     category->setLevelLocked(
         entry.second.level, entry.second.inheritParentLevel);
+
+    // Update the propagation settings
+    category->setPropagateLevelMessagesToParent(
+        entry.second.propagateLevelMessagesToParent);
   }
 
   finishConfigUpdate(handlerInfo, &handlers, &oldToNewHandlerMap);
@@ -466,7 +426,7 @@ void LoggerDB::resetConfig(const LogConfig& config) {
         category->clearHandlers();
 
         if (category == rootCategory) {
-          category->setLevelLocked(LogLevel::ERR, false);
+          category->setLevelLocked(kDefaultLogLevel, false);
         } else {
           category->setLevelLocked(LogLevel::MAX_LEVEL, true);
         }
@@ -482,7 +442,7 @@ void LoggerDB::resetConfig(const LogConfig& config) {
       // If the handler list is not set in the config, clear out any existing
       // handlers rather than leaving it as-is.
       std::vector<std::shared_ptr<LogHandler>> catHandlers;
-      if (catConfig.handlers.hasValue()) {
+      if (catConfig.handlers.has_value()) {
         catHandlers = buildCategoryHandlerList(
             handlers, entry.first, catConfig.handlers.value());
       }
@@ -494,8 +454,7 @@ void LoggerDB::resetConfig(const LogConfig& config) {
 }
 
 LogCategory* LoggerDB::getOrCreateCategoryLocked(
-    LoggerNameMap& loggersByName,
-    StringPiece name) {
+    LoggerNameMap& loggersByName, StringPiece name) {
   auto it = loggersByName.find(name);
   if (it != loggersByName.end()) {
     return it->second.get();
@@ -507,9 +466,7 @@ LogCategory* LoggerDB::getOrCreateCategoryLocked(
 }
 
 LogCategory* LoggerDB::createCategoryLocked(
-    LoggerNameMap& loggersByName,
-    StringPiece name,
-    LogCategory* parent) {
+    LoggerNameMap& loggersByName, StringPiece name, LogCategory* parent) {
   auto uptr = std::make_unique<LogCategory>(name, parent);
   LogCategory* logger = uptr.get();
   auto ret = loggersByName.emplace(logger->getName(), std::move(uptr));
@@ -570,8 +527,7 @@ size_t LoggerDB::flushAllHandlers() {
 }
 
 void LoggerDB::registerHandlerFactory(
-    std::unique_ptr<LogHandlerFactory> factory,
-    bool replaceExisting) {
+    std::unique_ptr<LogHandlerFactory> factory, bool replaceExisting) {
   auto type = factory->getType();
   auto handlerInfo = handlerInfo_.wlock();
   if (replaceExisting) {
@@ -639,12 +595,94 @@ LogCategory* LoggerDB::xlogInitCategory(
   return category;
 }
 
+class LoggerDB::ContextCallbackList::CallbacksObj {
+  using StorageBlock = std::array<ContextCallback, 16>;
+
+ public:
+  CallbacksObj() : end_(block_.begin()) {}
+
+  template <typename F>
+  void forEach(F&& f) const {
+    auto end = end_.load(std::memory_order_acquire);
+
+    for (auto it = block_.begin(); it != end; it = std::next(it)) {
+      f(*it);
+    }
+  }
+
+  /**
+   * Callback list is implemented as an unsynchronized array, so an atomic
+   * end flag is used for list readers to get a synchronized view of the
+   * list with concurrent writers, protecting the underlying array.
+   * There can be also race condition between list writers, because the end
+   * flag is firstly tested before written, which should be serialized with
+   * another global mutex to prevent TOCTOU bug.
+   */
+  void push(ContextCallback callback) {
+    auto end = end_.load(std::memory_order_relaxed);
+    if (end == block_.end()) {
+      folly::throw_exception(std::length_error(
+          "Exceeding limit for the number of pushed context callbacks."));
+    }
+    *end = std::move(callback);
+    end_.store(std::next(end), std::memory_order_release);
+  }
+
+ private:
+  StorageBlock block_;
+  std::atomic<StorageBlock::iterator> end_;
+};
+
+LoggerDB::ContextCallbackList::~ContextCallbackList() {
+  auto callback = callbacks_.load(std::memory_order_relaxed);
+  if (callback != nullptr) {
+    delete callback;
+  }
+}
+
+void LoggerDB::ContextCallbackList::addCallback(ContextCallback callback) {
+  std::lock_guard<std::mutex> g(writeMutex_);
+  auto callbacks = callbacks_.load(std::memory_order_relaxed);
+  if (!callbacks) {
+    callbacks = new CallbacksObj();
+    callbacks_.store(callbacks, std::memory_order_relaxed);
+  }
+  callbacks->push(std::move(callback));
+}
+
+std::string LoggerDB::ContextCallbackList::getContextString() const {
+  auto callbacks = callbacks_.load(std::memory_order_relaxed);
+  if (callbacks == nullptr) {
+    return {};
+  }
+
+  std::string ret;
+  callbacks->forEach([&](const auto& callback) {
+    try {
+      auto ctx = callback();
+      if (ctx.empty()) {
+        return;
+      }
+      folly::toAppend(' ', std::move(ctx), &ret);
+    } catch (const std::exception& e) {
+      folly::toAppend("[error:", folly::exceptionStr(e), "]", &ret);
+    }
+  });
+  return ret;
+}
+
+void LoggerDB::addContextCallback(ContextCallback callback) {
+  contextCallbacks_.addCallback(std::move(callback));
+}
+
+std::string LoggerDB::getContextString() const {
+  return contextCallbacks_.getContextString();
+}
+
 std::atomic<LoggerDB::InternalWarningHandler> LoggerDB::warningHandler_;
 
 void LoggerDB::internalWarningImpl(
-    folly::StringPiece filename,
-    int lineNumber,
-    std::string&& msg) noexcept {
+    folly::StringPiece filename, int lineNumber, std::string&& msg) noexcept {
   auto handler = warningHandler_.load();
   if (handler) {
     handler(filename, lineNumber, std::move(msg));
@@ -677,9 +715,7 @@ void LoggerDB::setInternalWarningHandler(InternalWarningHandler handler) {
 }
 
 void LoggerDB::defaultInternalWarningImpl(
-    folly::StringPiece filename,
-    int lineNumber,
-    std::string&& msg) noexcept {
+    folly::StringPiece filename, int lineNumber, std::string&& msg) noexcept {
   // Rate limit to 10 messages every 5 seconds.
   //
   // We intentonally use a leaky Meyer's singleton here over folly::Singleton:

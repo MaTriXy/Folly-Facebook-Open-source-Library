@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -378,10 +378,8 @@ void QueueTest::destroyCallback() {
   // This way one consumer will be destroyed from inside its messageAvailable()
   // callback, and one consume will be destroyed when it isn't inside
   // messageAvailable().
-  std::unique_ptr<DestroyTestConsumer, DelayedDestruction::Destructor>
-      consumer1(new DestroyTestConsumer);
-  std::unique_ptr<DestroyTestConsumer, DelayedDestruction::Destructor>
-      consumer2(new DestroyTestConsumer);
+  auto consumer1 = makeDelayedDestructionUniquePtr<DestroyTestConsumer>();
+  auto consumer2 = makeDelayedDestructionUniquePtr<DestroyTestConsumer>();
   std::function<void(int)> fn = [&](int) {
     consumer1 = nullptr;
     consumer2 = nullptr;
@@ -501,7 +499,6 @@ TEST(NotificationQueueTest, ConsumeUntilDrainedStress) {
   }
 }
 
-#ifdef FOLLY_HAVE_EVENTFD
 TEST(NotificationQueueTest, SendOneEventFD) {
   QueueTest qt(0, IntQueue::FdType::EVENTFD);
   qt.sendOne();
@@ -531,7 +528,6 @@ TEST(NotificationQueueTest, DestroyCallbackEventFD) {
   QueueTest qt(0, IntQueue::FdType::EVENTFD);
   qt.destroyCallback();
 }
-#endif
 
 TEST(NotificationQueueTest, SendOnePipe) {
   QueueTest qt(0, IntQueue::FdType::PIPE);
@@ -589,8 +585,9 @@ TEST(NotificationQueueTest, UseAfterFork) {
   {
     // Start a separate thread consuming from the queue
     ScopedEventBaseThread t1;
-    t1.getEventBase()->runInEventBaseThread(
-        [&] { consumer.startConsuming(t1.getEventBase(), &queue); });
+    t1.getEventBase()->runInEventBaseThread([&] {
+      consumer.startConsuming(t1.getEventBase(), &queue);
+    });
 
     // Send a message to it, just for sanity checking
     queue.putMessage(1234);
@@ -643,8 +640,9 @@ TEST(NotificationQueueConsumer, make) {
   EventBase evb;
   NotificationQueue<int> queue(32);
 
-  auto consumer =
-      decltype(queue)::Consumer::make([&](int&& msg) noexcept { value = msg; });
+  auto consumer = decltype(queue)::Consumer::make([&](int&& msg) noexcept {
+    value = msg;
+  });
 
   consumer->startConsuming(&evb, &queue);
 

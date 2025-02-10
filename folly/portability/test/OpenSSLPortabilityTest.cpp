@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -96,16 +96,11 @@ TEST(OpenSSLPortabilityTest, TestX509RevokedApi) {
 
   EXPECT_EQ(0, ASN1_INTEGER_cmp(serial, retrieved_serial));
 
-#if FOLLY_HAVE_OPENSSL_ASN1_TIME_DIFF
   int diff_days;
   int diff_secs;
   ASN1_TIME_diff(&diff_days, &diff_secs, revocation_date, retrieved_date);
   EXPECT_EQ(0, diff_days);
   EXPECT_EQ(0, diff_secs);
-#else
-  (void)revocation_date;
-  (void)retrieved_date;
-#endif
 
   ASN1_INTEGER_free(serial);
   ASN1_TIME_free(revocation_date);

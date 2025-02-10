@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -38,15 +38,18 @@ class AtomicLinkedList {
   AtomicLinkedList(const AtomicLinkedList&) = delete;
   AtomicLinkedList& operator=(const AtomicLinkedList&) = delete;
   AtomicLinkedList(AtomicLinkedList&& other) noexcept = default;
-  AtomicLinkedList& operator=(AtomicLinkedList&& other) = default;
+  AtomicLinkedList& operator=(AtomicLinkedList&& other) noexcept {
+    list_.reverseSweepAndAssign(std::move(other.list_), [](Wrapper* node) {
+      delete node;
+    });
+    return *this;
+  }
 
   ~AtomicLinkedList() {
     sweep([](T&&) {});
   }
 
-  bool empty() const {
-    return list_.empty();
-  }
+  bool empty() const { return list_.empty(); }
 
   /**
    * Atomically insert t at the head of the list.
@@ -69,6 +72,23 @@ class AtomicLinkedList {
     list_.sweep([&](Wrapper* wrapperPtr) mutable {
       std::unique_ptr<Wrapper> wrapper(wrapperPtr);
 
+      func(std::move(wrapper->data));
+    });
+  }
+
+  /**
+   * Sweeps the list a single time, as a single point in time swap with the
+   * current contents of the list.
+   *
+   * Unlike sweep() it does not loop to ensure the list is empty at some point
+   * after the last invocation.
+   *
+   * Returns false if the list is empty.
+   */
+  template <typename F>
+  bool sweepOnce(F&& func) {
+    return list_.sweepOnce([&](Wrapper* wrappedPtr) {
+      std::unique_ptr<Wrapper> wrapper(wrappedPtr);
       func(std::move(wrapper->data));
     });
   }

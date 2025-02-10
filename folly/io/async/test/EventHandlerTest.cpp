@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#include <folly/io/async/EventHandler.h>
+
+#include <sys/eventfd.h>
+
 #include <bitset>
 #include <future>
 #include <thread>
@@ -21,11 +25,9 @@
 #include <folly/MPMCQueue.h>
 #include <folly/ScopeGuard.h>
 #include <folly/io/async/EventBase.h>
-#include <folly/io/async/EventHandler.h>
 #include <folly/portability/GMock.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/Sockets.h>
-#include <sys/eventfd.h>
 
 using namespace std;
 using namespace folly;
@@ -47,9 +49,10 @@ void runInThreadsAndWait(vector<function<void()>> cbs) {
 
 class EventHandlerMock : public EventHandler {
  public:
-  EventHandlerMock(EventBase* eb, int fd) : EventHandler(eb, fd) {}
+  EventHandlerMock(EventBase* eb, int fd)
+      : EventHandler(eb, NetworkSocket::fromFd(fd)) {}
   // gmock can't mock noexcept methods, so we need an intermediary
-  MOCK_METHOD1(_handlerReady, void(uint16_t));
+  MOCK_METHOD(void, _handlerReady, (uint16_t));
   void handlerReady(uint16_t events) noexcept override {
     _handlerReady(events);
   }
@@ -66,18 +69,16 @@ class EventHandlerTest : public Test {
 
   void TearDown() override {
     if (efd > 0) {
-      close(efd);
+      fileops::close(efd);
     }
     efd = 0;
   }
 
-  void efd_write(uint64_t val) {
-    write(efd, &val, sizeof(val));
-  }
+  void efd_write(uint64_t val) { fileops::write(efd, &val, sizeof(val)); }
 
   uint64_t efd_read() {
     uint64_t val = 0;
-    read(efd, &val, sizeof(val));
+    fileops::read(efd, &val, sizeof(val));
     return val;
   }
 };
@@ -198,32 +199,33 @@ class EventHandlerOobTest : public ::testing::Test {
   // clientOps(fd) where fd is the connection file descriptor
   //
   void runClient(std::function<void(int fd)> clientOps) {
-    clientThread = std::thread([serverPortFuture = serverReady.get_future(),
-                                clientOps]() mutable {
-      int clientFd = socket(AF_INET, SOCK_STREAM, 0);
-      SCOPE_EXIT {
-        close(clientFd);
-      };
-      struct hostent* he{nullptr};
-      struct sockaddr_in server;
+    clientThread = std::thread(
+        [serverPortFuture = serverReady.get_future(), clientOps]() mutable {
+          int clientFd = socket(AF_INET, SOCK_STREAM, 0);
+          SCOPE_EXIT {
+            fileops::close(clientFd);
+          };
+          struct hostent* he{nullptr};
+          struct sockaddr_in server;
 
-      std::array<const char, 10> hostname = {"localhost"};
-      he = gethostbyname(hostname.data());
-      PCHECK(he);
+          std::array<const char, 10> hostname = {"localhost"};
+          he = gethostbyname(hostname.data());
+          PCHECK(he);
 
-      memcpy(&server.sin_addr, he->h_addr_list[0], he->h_length);
-      server.sin_family = AF_INET;
+          memcpy(&server.sin_addr, he->h_addr_list[0], he->h_length);
+          server.sin_family = AF_INET;
 
-      // block here until port is known
-      server.sin_port = serverPortFuture.get();
-      LOG(INFO) << "Server is ready";
+          // block here until port is known
+          server.sin_port = serverPortFuture.get();
+          LOG(INFO) << "Server is ready";
 
-      PCHECK(
-          ::connect(clientFd, (struct sockaddr*)&server, sizeof(server)) == 0);
-      LOG(INFO) << "Server connection available";
+          PCHECK(
+              ::connect(clientFd, (struct sockaddr*)&server, sizeof(server)) ==
+              0);
+          LOG(INFO) << "Server connection available";
 
-      clientOps(clientFd);
-    });
+          clientOps(clientFd);
+        });
   }
 
   //
@@ -234,7 +236,7 @@ class EventHandlerOobTest : public ::testing::Test {
     // make the server.
     int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     SCOPE_EXIT {
-      close(listenfd);
+      fileops::close(listenfd);
     };
     PCHECK(listenfd != -1) << "unable to open socket";
 
@@ -262,7 +264,7 @@ class EventHandlerOobTest : public ::testing::Test {
 
   void TearDown() override {
     clientThread.join();
-    close(serverFd);
+    fileops::close(serverFd);
   }
 
   EventBase eb;
@@ -277,7 +279,7 @@ class EventHandlerOobTest : public ::testing::Test {
 TEST_F(EventHandlerOobTest, EPOLLPRI) {
   auto clientOps = [](int fd) {
     char buffer[] = "banana";
-    int n = send(fd, buffer, strlen(buffer) + 1, MSG_OOB);
+    const auto n = send(fd, buffer, strlen(buffer) + 1, MSG_OOB);
     LOG(INFO) << "Client send finished";
     PCHECK(n > 0);
   };
@@ -286,12 +288,13 @@ TEST_F(EventHandlerOobTest, EPOLLPRI) {
   acceptConn();
 
   struct SockEvent : public EventHandler {
-    SockEvent(EventBase* eb, int fd) : EventHandler(eb, fd), fd_(fd) {}
+    SockEvent(EventBase* eb, int fd)
+        : EventHandler(eb, NetworkSocket::fromFd(fd)), fd_(fd) {}
 
     void handlerReady(uint16_t events) noexcept override {
       EXPECT_TRUE(EventHandler::EventFlags::PRI & events);
       std::array<char, 255> buffer;
-      int n = read(fd_, buffer.data(), buffer.size());
+      auto n = fileops::read(fd_, buffer.data(), buffer.size());
       //
       // NB: we sent 7 bytes, but only received 6. The last byte
       // has been stored in the OOB buffer.
@@ -320,13 +323,13 @@ TEST_F(EventHandlerOobTest, OOB_AND_NORMAL_DATA) {
     {
       // OOB buffer can only hold one byte in most implementations
       std::array<char, 2> buffer = {"X"};
-      int n = send(sockfd, buffer.data(), 1, MSG_OOB);
+      const auto n = send(sockfd, buffer.data(), 1, MSG_OOB);
       PCHECK(n > 0);
     }
 
     {
       std::array<char, 7> buffer = {"banana"};
-      int n = send(sockfd, buffer.data(), buffer.size(), 0);
+      const auto n = send(sockfd, buffer.data(), buffer.size(), 0);
       PCHECK(n > 0);
     }
   };
@@ -335,12 +338,13 @@ TEST_F(EventHandlerOobTest, OOB_AND_NORMAL_DATA) {
   acceptConn();
 
   struct SockEvent : public EventHandler {
-    SockEvent(EventBase* eb, int fd) : EventHandler(eb, fd), eb_(eb), fd_(fd) {}
+    SockEvent(EventBase* eb, int fd)
+        : EventHandler(eb, NetworkSocket::fromFd(fd)), eb_(eb), fd_(fd) {}
 
     void handlerReady(uint16_t events) noexcept override {
       std::array<char, 255> buffer;
       if (events & EventHandler::EventFlags::PRI) {
-        int n = recv(fd_, buffer.data(), buffer.size(), MSG_OOB);
+        const auto n = recv(fd_, buffer.data(), buffer.size(), MSG_OOB);
         EXPECT_EQ(1, n);
         EXPECT_EQ("X", std::string(buffer.data(), 1));
         registerHandler(EventHandler::EventFlags::READ);
@@ -348,7 +352,7 @@ TEST_F(EventHandlerOobTest, OOB_AND_NORMAL_DATA) {
       }
 
       if (events & EventHandler::EventFlags::READ) {
-        int n = recv(fd_, buffer.data(), buffer.size(), 0);
+        const auto n = recv(fd_, buffer.data(), buffer.size(), 0);
         EXPECT_EQ(7, n);
         EXPECT_EQ("banana", std::string(buffer.data()));
         eb_->terminateLoopSoon();
@@ -373,13 +377,13 @@ TEST_F(EventHandlerOobTest, SWALLOW_OOB) {
   auto clientOps = [](int sockfd) {
     {
       std::array<char, 2> buffer = {"X"};
-      int n = send(sockfd, buffer.data(), 1, MSG_OOB);
+      const auto n = send(sockfd, buffer.data(), 1, MSG_OOB);
       PCHECK(n > 0);
     }
 
     {
       std::array<char, 7> buffer = {"banana"};
-      int n = send(sockfd, buffer.data(), buffer.size(), 0);
+      const auto n = send(sockfd, buffer.data(), buffer.size(), 0);
       PCHECK(n > 0);
     }
   };
@@ -388,12 +392,13 @@ TEST_F(EventHandlerOobTest, SWALLOW_OOB) {
   acceptConn();
 
   struct SockEvent : public EventHandler {
-    SockEvent(EventBase* eb, int fd) : EventHandler(eb, fd), fd_(fd) {}
+    SockEvent(EventBase* eb, int fd)
+        : EventHandler(eb, NetworkSocket::fromFd(fd)), fd_(fd) {}
 
     void handlerReady(uint16_t events) noexcept override {
       std::array<char, 255> buffer;
       ASSERT_TRUE(events & EventHandler::EventFlags::READ);
-      int n = recv(fd_, buffer.data(), buffer.size(), 0);
+      const auto n = recv(fd_, buffer.data(), buffer.size(), 0);
       EXPECT_EQ(7, n);
       EXPECT_EQ("banana", std::string(buffer.data()));
     }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,15 +16,17 @@
 
 #pragma once
 
-#include <glog/logging.h>
 #include <sys/types.h>
+
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <string>
 #include <type_traits>
 
-#include <folly/Format.h>
+#include <glog/logging.h>
+
+#include <fmt/core.h>
 #include <folly/detail/IPAddress.h>
 
 // BSDish platforms don't provide standard access to s6_addr16
@@ -45,8 +47,7 @@ struct Bytes {
   // mask the values from two byte arrays, returning a new byte array
   template <std::size_t N>
   static std::array<uint8_t, N> mask(
-      const std::array<uint8_t, N>& a,
-      const std::array<uint8_t, N>& b) {
+      const std::array<uint8_t, N>& a, const std::array<uint8_t, N>& b) {
     static_assert(N > 0, "Can't mask an empty ByteArray");
     std::size_t asize = a.size();
     std::array<uint8_t, N> ba{{0}};
@@ -74,7 +75,7 @@ struct Bytes {
         0xff // /8
     }};
     if (oneMask > kBitCount || twoMask > kBitCount) {
-      throw std::invalid_argument(sformat(
+      throw std::invalid_argument(fmt::format(
           "Invalid mask length: {}. Mask length must be <= {}",
           std::max(oneMask, twoMask),
           kBitCount));
@@ -99,8 +100,8 @@ struct Bytes {
     // kMasks array holds the mask for masking the MSb in this byte.
     // We could instead make it hold so that no 0th entry masks no
     // bits but thats a useless iteration.
-    while (bitIndex < mask &&
-           ((one[bI] & kMasks[bM]) == (two[bI] & kMasks[bM]))) {
+    while (
+        bitIndex < mask && ((one[bI] & kMasks[bM]) == (two[bI] & kMasks[bM]))) {
       ba[bI] = uint8_t(one[bI] & kMasks[bM]);
       ++bitIndex;
       bI = uint8_t(bitIndex / 8);

@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,23 +14,20 @@
  * limitations under the License.
  */
 
-#include <folly/stats/BucketedTimeSeries-defs.h>
-#include <folly/stats/BucketedTimeSeries.h>
-#include <folly/stats/MultiLevelTimeSeries-defs.h>
-#include <folly/stats/MultiLevelTimeSeries.h>
-#include <folly/stats/detail/Bucket.h>
-
 #include <array>
 
 #include <glog/logging.h>
 
 #include <folly/container/Foreach.h>
 #include <folly/portability/GTest.h>
+#include <folly/stats/BucketedTimeSeries.h>
+#include <folly/stats/MultiLevelTimeSeries.h>
+#include <folly/stats/detail/Bucket.h>
 
-using std::chrono::seconds;
+using folly::BucketedTimeSeries;
 using std::string;
 using std::vector;
-using folly::BucketedTimeSeries;
+using std::chrono::seconds;
 
 using Bucket = folly::detail::Bucket<int64_t>;
 using StatsClock = folly::LegacyStatsClock<std::chrono::seconds>;
@@ -444,7 +441,9 @@ TEST(BucketedTimeSeries, avgTypeConversion) {
     // but the average fits in an int64_t
     BucketedTimeSeries<double> ts(60, seconds(600));
     uint64_t value = 0x3fffffffffffffff;
-    FOR_EACH_RANGE (i, 0, 16) { ts.addValue(seconds(0), value); }
+    FOR_EACH_RANGE (i, 0, 16) {
+      ts.addValue(seconds(0), value);
+    }
 
     EXPECT_DOUBLE_EQ(value, ts.avg());
     EXPECT_DOUBLE_EQ(value, ts.avg<float>());
@@ -457,7 +456,9 @@ TEST(BucketedTimeSeries, avgTypeConversion) {
   {
     // Test BucketedTimeSeries with a smaller integer type
     BucketedTimeSeries<int16_t> ts(60, seconds(600));
-    FOR_EACH_RANGE (i, 0, 101) { ts.addValue(seconds(0), i); }
+    FOR_EACH_RANGE (i, 0, 101) {
+      ts.addValue(seconds(0), i);
+    }
 
     EXPECT_DOUBLE_EQ(50.0, ts.avg());
     EXPECT_DOUBLE_EQ(50.0, ts.avg<float>());
@@ -510,9 +511,10 @@ TEST(BucketedTimeSeries, forEachBucket) {
     BucketedTimeSeries<int64_t> ts(data.numBuckets, seconds(data.duration));
 
     vector<BucketInfo> info;
-    auto fn = [&](const BucketSeries& bucket,
-                  TimePoint bucketStart,
-                  TimePoint bucketEnd) -> bool {
+    auto fn =
+        [&](const BucketSeries& bucket,
+            TimePoint bucketStart,
+            TimePoint bucketEnd) -> bool {
       info.emplace_back(&bucket, bucketStart, bucketEnd);
       return true;
     };
@@ -1071,7 +1073,18 @@ TEST(MinuteHourTimeSeries, QueryByInterval) {
   };
 
   int expectedCounts[12] = {
-      60, 3600, 7200, 3540, 7140, 3600, 30, 3000, 7180, 2000, 6200, 3600,
+      60,
+      3600,
+      7200,
+      3540,
+      7140,
+      3600,
+      30,
+      3000,
+      7180,
+      2000,
+      6200,
+      3600,
   };
 
   for (int i = 0; i < 12; ++i) {
@@ -1093,10 +1106,9 @@ TEST(MinuteHourTimeSeries, QueryByInterval) {
   }
 }
 
-TEST(MultiLevelTimeSeries, Basic) {
-  // using constructor with initializer_list parameter
-  folly::MultiLevelTimeSeries<int> mhts(
-      60, {seconds(60), seconds(3600), seconds(0)});
+namespace {
+
+void runBasicTest(folly::MultiLevelTimeSeries<int>& mhts) {
   EXPECT_EQ(mhts.numLevels(), 3);
 
   EXPECT_EQ(mhts.sum(seconds(60)), 0);
@@ -1209,6 +1221,29 @@ TEST(MultiLevelTimeSeries, Basic) {
   EXPECT_EQ(mhts.sum(seconds(0)), 0);
 }
 
+} // namespace
+
+TEST(MultiLevelTimeSeries, BasicInitializerArray) {
+  std::chrono::seconds levelDurations[] = {
+      seconds(60), seconds(3600), seconds(0)};
+  folly::MultiLevelTimeSeries<int> mhts(60, 3, levelDurations);
+  runBasicTest(mhts);
+}
+
+TEST(MultiLevelTimeSeries, BasicInitializerList) {
+  folly::MultiLevelTimeSeries<int> mhts(
+      60, {seconds(60), seconds(3600), seconds(0)});
+  runBasicTest(mhts);
+}
+
+TEST(MultiLevelTimeSeries, BasicVector) {
+  folly::MultiLevelTimeSeries<int> mhts(
+      60,
+      std::vector<std::chrono::seconds>{
+          seconds(60), seconds(3600), seconds(0)});
+  runBasicTest(mhts);
+}
+
 TEST(MultiLevelTimeSeries, QueryByInterval) {
   folly::MultiLevelTimeSeries<int> mhts(
       60, {seconds(60), seconds(3600), seconds(0)});
@@ -1248,18 +1283,19 @@ TEST(MultiLevelTimeSeries, QueryByInterval) {
       {curTime - seconds(7200), curTime - seconds(3600)},
   }};
 
-  std::array<int, 12> expectedSums = {{6000,
-                                       41400,
-                                       32400,
-                                       35400,
-                                       32130,
-                                       16200,
-                                       3000,
-                                       33600,
-                                       32310,
-                                       20000,
-                                       27900,
-                                       16200}};
+  std::array<int, 12> expectedSums = {
+      {6000,
+       41400,
+       32400,
+       35400,
+       32130,
+       16200,
+       3000,
+       33600,
+       32310,
+       20000,
+       27900,
+       16200}};
 
   std::array<int, 12> expectedCounts = {
       {60, 3600, 7200, 3540, 7140, 3600, 30, 3000, 7180, 2000, 6200, 3600}};

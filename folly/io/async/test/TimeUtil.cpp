@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,16 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
 #endif
 
 #include <folly/io/async/test/TimeUtil.h>
 
-#include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#include <cerrno>
 #ifdef __linux__
 #include <sys/utsname.h>
 #endif
@@ -31,38 +33,40 @@
 #include <ostream>
 #include <stdexcept>
 
+#include <glog/logging.h>
+
 #include <folly/Conv.h>
+#include <folly/Portability.h>
 #include <folly/ScopeGuard.h>
+#include <folly/String.h>
 #include <folly/portability/Unistd.h>
 #include <folly/system/ThreadId.h>
-
-#include <glog/logging.h>
 
 using std::string;
 using namespace std::chrono;
 
 namespace folly {
 
+#ifdef __linux__
 static int getLinuxVersion(StringPiece release) {
-  auto dot1 = release.find('.');
+  const auto dot1 = release.find('.');
   if (dot1 == StringPiece::npos) {
     throw std::invalid_argument("could not find first dot");
   }
-  auto v1 = folly::to<int>(release.subpiece(0, dot1));
+  const auto v1 = folly::to<int>(release.subpiece(0, dot1));
 
-  auto dot2 = release.find('.', dot1 + 1);
+  const auto dot2 = release.find('.', dot1 + 1);
   if (dot2 == StringPiece::npos) {
     throw std::invalid_argument("could not find second dot");
   }
-  auto v2 = folly::to<int>(release.subpiece(dot1 + 1, dot2 - (dot1 + 1)));
+  const auto v2 = folly::to<int>(release.subpiece(dot1 + 1, dot2 - (dot1 + 1)));
 
-  int dash = release.find('-', dot2 + 1);
-  auto v3 = folly::to<int>(release.subpiece(dot2 + 1, dash - (dot2 + 1)));
+  const auto dash = release.find('-', dot2 + 1);
+  const auto v3 = folly::to<int>(release.subpiece(dot2 + 1, dash - (dot2 + 1)));
 
   return ((v1 * 1000 + v2) * 1000) + v3;
 }
 
-#ifdef __linux__
 /**
  * Determine the time units used in /proc/<pid>/schedstat
  *
@@ -73,7 +77,7 @@ static int64_t determineSchedstatUnits() {
   struct utsname unameInfo;
   if (uname(&unameInfo) != 0) {
     LOG(ERROR) << "unable to determine jiffies/second: uname failed: %s"
-               << strerror(errno);
+               << errnoStr(errno);
     return -1;
   }
 
@@ -179,12 +183,12 @@ static nanoseconds getSchedTimeWaiting(pid_t tid) {
     }
 
     char buf[512];
-    ssize_t bytesReadRet = read(fd, buf, sizeof(buf) - 1);
+    ssize_t bytesReadRet = fileops::read(fd, buf, sizeof(buf) - 1);
     if (bytesReadRet <= 0) {
       throw std::runtime_error(
           folly::to<string>("failed to read process schedstat file", errno));
     }
-    size_t bytesRead = size_t(bytesReadRet);
+    auto bytesRead = size_t(bytesReadRet);
 
     if (buf[bytesRead - 1] != '\n') {
       throw std::runtime_error("expected newline at end of schedstat data");
@@ -205,11 +209,11 @@ static nanoseconds getSchedTimeWaiting(pid_t tid) {
       throw std::runtime_error("failed to parse schedstat data");
     }
 
-    close(fd);
+    fileops::close(fd);
     return nanoseconds(waitingJiffies * timeUnits);
   } catch (const std::runtime_error& e) {
     if (fd >= 0) {
-      close(fd);
+      fileops::close(fd);
     }
     LOG(ERROR) << "error determining process wait time: %s" << e.what();
     return nanoseconds(0);
@@ -275,14 +279,17 @@ bool checkTimeout(
     effectiveElapsedTime = elapsedTime - timeExcluded;
   }
 
+  if (!kIsLinux) {
+    // We can only compute timeExcluded accurately on Linux.
+    // On other platforms, just increase the amount of tolerance allowed to
+    // account for time possibly spent waiting to be scheduled.
+    tolerance += 20ms;
+  }
+
   // On x86 Linux, sleep calls generally have precision only to the nearest
   // millisecond.  The tolerance parameter lets users allow a few ms of slop.
   auto overrun = effectiveElapsedTime - expected;
-  if (overrun > tolerance) {
-    return false;
-  }
-
-  return true;
+  return overrun <= tolerance;
 }
 
 } // namespace folly

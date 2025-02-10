@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,10 +15,12 @@
  */
 
 #include <folly/io/async/HHWheelTimer.h>
+
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/test/UndelayedDestruction.h>
 #include <folly/io/async/test/Util.h>
 #include <folly/portability/GTest.h>
+#include <folly/portability/Unistd.h>
 
 using namespace folly;
 using std::chrono::milliseconds;
@@ -49,13 +51,6 @@ class TestTimeout : public HHWheelTimer::Callback {
   std::deque<TimePoint> timestamps;
   std::deque<TimePoint> canceledTimestamps;
   std::function<void()> fn;
-};
-
-class TestTimeoutDelayed : public TestTimeout {
- protected:
-  std::chrono::steady_clock::time_point getCurTime() override {
-    return std::chrono::steady_clock::now() - milliseconds(5);
-  }
 };
 
 struct HHWheelTimerTest : public ::testing::Test {
@@ -99,18 +94,59 @@ TEST_F(HHWheelTimerTest, FireOnce) {
   T_CHECK_TIMEOUT(start, end, milliseconds(10));
 }
 
+TEST_F(HHWheelTimerTest, NoRequestContextLeak) {
+  StackWheelTimer t(&eventBase, milliseconds(1));
+  std::set<int> destructed;
+
+  class TestData : public RequestData {
+   public:
+    TestData(int data, std::set<int>& destructed)
+        : data_(data), destructed_(destructed) {}
+    ~TestData() override { destructed_.insert(data_); }
+
+    bool hasCallback() override { return false; }
+
+   private:
+    int data_;
+    std::set<int>& destructed_;
+  };
+
+  folly::Optional<TestTimeout> t1 = TestTimeout{};
+  folly::Optional<TestTimeout> t2 = TestTimeout{};
+
+  {
+    RequestContextScopeGuard g;
+    RequestContext::get()->setContextData(
+        "k", std::make_unique<TestData>(1, destructed));
+    t.scheduleTimeout(&*t1, milliseconds(5));
+  }
+
+  {
+    RequestContextScopeGuard g;
+    RequestContext::get()->setContextData(
+        "k", std::make_unique<TestData>(2, destructed));
+    t.scheduleTimeout(&*t2, milliseconds(5));
+  }
+
+  EXPECT_EQ(0, destructed.size());
+  t1.reset();
+  EXPECT_EQ(1, destructed.count(1));
+  EXPECT_EQ(0, destructed.count(2));
+}
+
 /*
  * Test scheduling a timeout from another timeout callback.
  */
 TEST_F(HHWheelTimerTest, TestSchedulingWithinCallback) {
   HHWheelTimer& t = eventBase.timer();
 
-  TestTimeout t1;
-  // Delayed to simulate the steady_clock counter lagging
-  TestTimeoutDelayed t2;
+  TestTimeout t1, t2;
 
   t.scheduleTimeout(&t1, milliseconds(500));
-  t1.fn = [&] { t.scheduleTimeout(&t2, milliseconds(1)); };
+  t1.fn = [&] {
+    t.scheduleTimeout(&t2, milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  };
   // If t is in an inconsistent state, detachEventBase should fail.
   t2.fn = [&] { t.detachEventBase(); };
 
@@ -260,7 +296,6 @@ TEST_F(HHWheelTimerTest, DestroyTimeoutSet) {
 /*
  * Test an event scheduled before the last event fires on time
  */
-
 TEST_F(HHWheelTimerTest, SlowFast) {
   StackWheelTimer t(&eventBase, milliseconds(1));
 
@@ -282,9 +317,8 @@ TEST_F(HHWheelTimerTest, SlowFast) {
   ASSERT_EQ(t2.timestamps.size(), 1);
   ASSERT_EQ(t.count(), 0);
 
-  // Check that the timeout was delayed by sleep
-  T_CHECK_TIMEOUT(start, t1.timestamps[0], milliseconds(10), milliseconds(1));
-  T_CHECK_TIMEOUT(start, t2.timestamps[0], milliseconds(5), milliseconds(1));
+  T_CHECK_TIMEOUT(start, t1.timestamps[0], milliseconds(10));
+  T_CHECK_TIMEOUT(start, t2.timestamps[0], milliseconds(5));
 }
 
 TEST_F(HHWheelTimerTest, ReschedTest) {
@@ -313,8 +347,8 @@ TEST_F(HHWheelTimerTest, ReschedTest) {
   ASSERT_EQ(t2.timestamps.size(), 1);
   ASSERT_EQ(t.count(), 0);
 
-  T_CHECK_TIMEOUT(start, t1.timestamps[0], milliseconds(128), milliseconds(1));
-  T_CHECK_TIMEOUT(start2, t2.timestamps[0], milliseconds(255), milliseconds(1));
+  T_CHECK_TIMEOUT(start, t1.timestamps[0], milliseconds(128));
+  T_CHECK_TIMEOUT(start2, t2.timestamps[0], milliseconds(255));
 }
 
 TEST_F(HHWheelTimerTest, DeleteWheelInTimeout) {
@@ -341,7 +375,7 @@ TEST_F(HHWheelTimerTest, DeleteWheelInTimeout) {
   ASSERT_EQ(t1.timestamps.size(), 1);
   ASSERT_EQ(t2.timestamps.size(), 0);
 
-  T_CHECK_TIMEOUT(start, t1.timestamps[0], milliseconds(128), milliseconds(1));
+  T_CHECK_TIMEOUT(start, t1.timestamps[0], milliseconds(128));
 }
 
 /*
@@ -399,10 +433,19 @@ TEST_F(HHWheelTimerTest, lambdaThrows) {
 
 TEST_F(HHWheelTimerTest, cancelAll) {
   StackWheelTimer t(&eventBase, milliseconds(1));
-  TestTimeout tt;
-  t.scheduleTimeout(&tt, std::chrono::minutes(1));
-  EXPECT_EQ(1, t.cancelAll());
-  EXPECT_EQ(1, tt.canceledTimestamps.size());
+  TestTimeout t1;
+  TestTimeout t2;
+  t.scheduleTimeout(&t1, std::chrono::milliseconds(1));
+  t.scheduleTimeout(&t2, std::chrono::milliseconds(1));
+  size_t canceled = 0;
+  t1.fn = [&] { canceled += t.cancelAll(); };
+  t2.fn = [&] { canceled += t.cancelAll(); };
+  // Sleep 20ms to ensure both timeouts will fire in a single event (in case
+  // they ended up in different slots)
+  ::usleep(20000);
+  eventBase.loop();
+  EXPECT_EQ(1, t1.canceledTimestamps.size() + t2.canceledTimestamps.size());
+  EXPECT_EQ(1, canceled);
 }
 
 TEST_F(HHWheelTimerTest, IntrusivePtr) {
@@ -465,4 +508,107 @@ TEST_F(HHWheelTimerTest, GetTimeRemaining) {
 
   ASSERT_EQ(t.count(), 0);
   T_CHECK_TIMEOUT(start, end, milliseconds(10));
+}
+
+TEST_F(HHWheelTimerTest, prematureTimeout) {
+  StackWheelTimer t(&eventBase, milliseconds(10));
+  TestTimeout t1;
+  TestTimeout t2;
+  // Schedule the timeout for the nextTick of timer
+  t.scheduleTimeout(&t1, std::chrono::milliseconds(1));
+  // Make sure that time is past that tick.
+  ::usleep(10000);
+  // Schedule the timeout for the +255 tick, due to sleep above it will overlap
+  // with what would be ran on the next timeoutExpired of the timer.
+  auto timeout = std::chrono::milliseconds(2555);
+  t.scheduleTimeout(&t2, std::chrono::milliseconds(2555));
+  auto start = std::chrono::steady_clock::now();
+  eventBase.loop();
+  ASSERT_EQ(t2.timestamps.size(), 1);
+  auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+      t2.timestamps[0].getTime() - start);
+  EXPECT_GE(elapsedMs.count(), timeout.count());
+}
+
+TEST_F(HHWheelTimerTest, Level1) {
+  StackWheelTimer t(&eventBase, milliseconds(1));
+  TestTimeout tt;
+  // Schedule the timeout for the tick in a next epoch.
+  t.scheduleTimeout(&tt, std::chrono::milliseconds(500));
+  TimePoint start;
+  eventBase.loop();
+  TimePoint end;
+  ASSERT_EQ(tt.timestamps.size(), 1);
+  T_CHECK_TIMEOUT(start, end, milliseconds(500));
+}
+
+// Test that we handle negative timeouts properly (i.e. treat them as 0)
+TEST_F(HHWheelTimerTest, NegativeTimeout) {
+  StackWheelTimer t(&eventBase, milliseconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  TestTimeout tt1;
+  TestTimeout tt2;
+  // Make sure we have event scheduled.
+  t.scheduleTimeout(&tt1, std::chrono::milliseconds(1));
+  // Schedule another timeout that would appear to be earlier than
+  // the already scheduled one.
+  t.scheduleTimeout(&tt2, std::chrono::milliseconds(-500000000));
+  TimePoint start;
+  eventBase.loop();
+  TimePoint end;
+  ASSERT_EQ(tt2.timestamps.size(), 1);
+  T_CHECK_TIMEOUT(start, end, milliseconds(1));
+}
+
+TEST(HHWheelTimerDetailsTest, Divider) {
+  auto no_overflow_add = [](uint64_t& base, int offset) -> bool {
+    if (offset >= 0 || static_cast<unsigned int>(-offset) < base) {
+      base += offset;
+      return true;
+    }
+    return false;
+  };
+
+  for (uint64_t denShift = 1; denShift <= 60; denShift++) {
+    for (int denOffset = -10; denOffset <= 10; denOffset++) {
+      uint64_t den = uint64_t(1) << denShift;
+
+      if (!no_overflow_add(den, denOffset)) {
+        continue;
+      }
+
+      folly::detail::HHWheelTimerDurationInterval<
+          std::chrono::milliseconds>::Divider divider{den};
+      for (uint64_t numShift = 3; numShift <= 58; numShift++) {
+        for (int numOffset = -10; numOffset <= 10; numOffset++) {
+          uint64_t num = (1LLU << numShift);
+          if (!no_overflow_add(num, numOffset)) {
+            continue;
+          }
+          int allowedError = 0;
+          if (numShift >= 32 || denShift >= 32) {
+            allowedError = 1;
+          }
+          auto expected = num / den;
+          auto calc = divider.divide(num);
+
+          // either it is accurate or the result is overstated by allowedError
+          EXPECT_TRUE(
+              expected == calc ||
+              (calc >= expected && calc <= expected + allowedError))
+              << "expected=" << expected << " calc=" << calc << " allowedError="
+              << allowedError << ": " << num << "/" << den << " ns=" << numShift
+              << " + " << numOffset << " ds=" << denShift << " + " << denOffset;
+        }
+      }
+    }
+  }
+
+  for (uint64_t den = 1; den <= 10000; den++) {
+    folly::detail::HHWheelTimerDurationInterval<
+        std::chrono::milliseconds>::Divider divider{den};
+    for (uint64_t num = 0; num <= 10000; num++) {
+      EXPECT_EQ(num / den, divider.divide(num)) << num << "/" << den;
+    }
+  }
 }

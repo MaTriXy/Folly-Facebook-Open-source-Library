@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,14 +24,15 @@
 
 #include <folly/Benchmark.h>
 #include <folly/Conv.h>
+#include <folly/portability/Atomic.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/SysTime.h>
 
-using std::vector;
-using std::string;
-using folly::AtomicHashMap;
 using folly::AtomicHashArray;
+using folly::AtomicHashMap;
 using folly::StringPiece;
+using std::string;
+using std::vector;
 
 // Tunables:
 DEFINE_double(targetLoadFactor, 0.75, "Target memory utilization fraction.");
@@ -40,23 +41,24 @@ DEFINE_int32(numThreads, 8, "Threads to use for concurrency tests.");
 DEFINE_int64(numBMElements, 12 * 1000 * 1000, "Size of maps for benchmarks.");
 
 const double LF = FLAGS_maxLoadFactor / FLAGS_targetLoadFactor;
-const int maxBMElements = int(FLAGS_numBMElements * LF); // hit our target LF.
+const auto maxBMElements =
+    size_t(FLAGS_numBMElements * LF); // hit our target LF.
 
-static int64_t nowInUsec() {
+static uint64_t nowInUsec() {
   timeval tv;
   gettimeofday(&tv, nullptr);
-  return int64_t(tv.tv_sec) * 1000 * 1000 + tv.tv_usec;
+  return uint64_t(tv.tv_sec) * 1000 * 1000 + tv.tv_usec;
 }
 
 TEST(Ahm, BasicStrings) {
-  typedef AtomicHashMap<int64_t,string> AHM;
+  typedef AtomicHashMap<uint64_t, string> AHM;
   AHM myMap(1024);
   EXPECT_TRUE(myMap.begin() == myMap.end());
 
-  for (int i = 0; i < 100; ++i) {
+  for (size_t i = 0; i < 100; ++i) {
     myMap.insert(make_pair(i, folly::to<string>(i)));
   }
-  for (int i = 0; i < 100; ++i) {
+  for (size_t i = 0; i < 100; ++i) {
     EXPECT_EQ(myMap.find(i)->second, folly::to<string>(i));
   }
 
@@ -69,50 +71,49 @@ TEST(Ahm, BasicStrings) {
   EXPECT_EQ(myMap.find(999)->first, 999);
 }
 
-
 TEST(Ahm, BasicNoncopyable) {
-  typedef AtomicHashMap<int64_t,std::unique_ptr<int>> AHM;
+  typedef AtomicHashMap<uint64_t, std::unique_ptr<size_t>> AHM;
   AHM myMap(1024);
   EXPECT_TRUE(myMap.begin() == myMap.end());
 
-  for (int i = 0; i < 50; ++i) {
-    myMap.insert(make_pair(i, std::make_unique<int>(i)));
+  for (size_t i = 0; i < 50; ++i) {
+    myMap.insert(make_pair(i, std::make_unique<size_t>(i)));
   }
-  for (int i = 50; i < 100; ++i) {
-    myMap.insert(i, std::make_unique<int>(i));
+  for (size_t i = 50; i < 100; ++i) {
+    myMap.insert(i, std::make_unique<size_t>(i));
   }
-  for (int i = 100; i < 150; ++i) {
-    myMap.emplace(i, new int (i));
+  for (size_t i = 100; i < 150; ++i) {
+    myMap.emplace(i, new size_t(i));
   }
-  for (int i = 150; i < 200; ++i) {
-    myMap.emplace(i, new int (i), std::default_delete<int>());
+  for (size_t i = 150; i < 200; ++i) {
+    myMap.emplace(i, new size_t(i), std::default_delete<size_t>());
   }
-  for (int i = 0; i < 200; ++i) {
+  for (size_t i = 0; i < 200; ++i) {
     EXPECT_EQ(*(myMap.find(i)->second), i);
   }
-  for (int i = 0; i < 200; i+=4) {
+  for (size_t i = 0; i < 200; i += 4) {
     myMap.erase(i);
   }
-  for (int i = 0; i < 200; i+=4) {
+  for (size_t i = 0; i < 200; i += 4) {
     EXPECT_EQ(myMap.find(i), myMap.end());
   }
 }
 
-typedef int32_t     KeyT;
-typedef int32_t     ValueT;
+typedef uint32_t KeyT;
+typedef uint32_t ValueT;
 
-typedef AtomicHashMap<KeyT,ValueT> AHMapT;
+typedef AtomicHashMap<KeyT, ValueT> AHMapT;
 typedef AHMapT::value_type RecordT;
-typedef AtomicHashArray<KeyT,ValueT> AHArrayT;
+typedef AtomicHashArray<KeyT, ValueT> AHArrayT;
 AHArrayT::Config config;
-typedef folly::QuadraticProbingAtomicHashMap<KeyT,ValueT> QPAHMapT;
+typedef folly::QuadraticProbingAtomicHashMap<KeyT, ValueT> QPAHMapT;
 QPAHMapT::Config qpConfig;
 static AHArrayT::SmartPtr globalAHA(nullptr);
 static std::unique_ptr<AHMapT> globalAHM;
 static std::unique_ptr<QPAHMapT> globalQPAHM;
 
 // Generate a deterministic value based on an input key
-static int genVal(int key) {
+static size_t genVal(size_t key) {
   return key / 3;
 }
 
@@ -126,8 +127,8 @@ struct EqTraits {
     return legalKey(a) && (a[0] != '\0') && (a[0] == b);
   }
   bool operator()(const char* a, const StringPiece b) {
-    return legalKey(a) &&
-      (strlen(a) == b.size()) && (strcmp(a, b.begin()) == 0);
+    return legalKey(a) && (strlen(a) == b.size()) &&
+        (strcmp(a, b.begin()) == 0);
   }
 };
 
@@ -139,9 +140,7 @@ struct HashTraits {
     }
     return result;
   }
-  size_t operator()(const char& a) {
-    return static_cast<size_t>(a);
-  }
+  size_t operator()(const char& a) { return static_cast<size_t>(a); }
   size_t operator()(const StringPiece a) {
     size_t result = 0;
     for (const auto& ch : a) {
@@ -151,13 +150,12 @@ struct HashTraits {
   }
 };
 
-typedef AtomicHashMap<const char*, int64_t, HashTraits, EqTraits> AHMCstrInt;
+typedef AtomicHashMap<const char*, uint64_t, HashTraits, EqTraits> AHMCstrInt;
 AHMCstrInt::Config cstrIntCfg;
 
 static bool legalKey(const char* a) {
-  return a != cstrIntCfg.emptyKey &&
-    a != cstrIntCfg.lockedKey &&
-    a != cstrIntCfg.erasedKey;
+  return a != cstrIntCfg.emptyKey && a != cstrIntCfg.lockedKey &&
+      a != cstrIntCfg.erasedKey;
 }
 
 TEST(Ahm, BasicLookup) {
@@ -184,12 +182,13 @@ TEST(Ahm, BasicLookup) {
 }
 
 TEST(Ahm, grow) {
-  VLOG(1) << "Overhead: " << sizeof(AHArrayT) << " (array) " <<
-    sizeof(AHMapT) + sizeof(AHArrayT) << " (map/set) Bytes.";
+  VLOG(1) << "Overhead: " << sizeof(AHArrayT) << " (array) "
+          << sizeof(AHMapT) + sizeof(AHArrayT) << " (map/set) Bytes.";
   uint64_t numEntries = 10000;
   float sizeFactor = 0.46f;
 
-  std::unique_ptr<AHMapT> m(new AHMapT(int(numEntries * sizeFactor), config));
+  std::unique_ptr<AHMapT> m(
+      new AHMapT(size_t(numEntries * sizeFactor), config));
 
   // load map - make sure we succeed and the index is accurate
   bool success = true;
@@ -203,14 +202,14 @@ TEST(Ahm, grow) {
   success = true;
   for (uint64_t i = 0; i < numEntries; i++) {
     auto ret = m->insert(RecordT(i, genVal(i * 2)));
-    success &= (ret.second == false);  // fail on collision
+    success &= (ret.second == false); // fail on collision
     success &= (ret.first->second == genVal(i)); // return the previous value
     success &= (m->findAt(ret.first.getIndex())->second == genVal(i));
   }
   EXPECT_TRUE(success);
 
   // check correctness
-  EXPECT_GT(m->numSubMaps(), 1);  // make sure we grew
+  EXPECT_GT(m->numSubMaps(), 1); // make sure we grew
   success = true;
   EXPECT_EQ(m->size(), numEntries);
   for (size_t i = 0; i < numEntries; i++) {
@@ -221,7 +220,7 @@ TEST(Ahm, grow) {
   // Check findAt
   success = true;
   AHMapT::const_iterator retIt;
-  for (int32_t i = 0; i < int32_t(numEntries); i++) {
+  for (uint32_t i = 0; i < uint32_t(numEntries); i++) {
     retIt = m->find(i);
     retIt = m->findAt(retIt.getIndex());
     success &= (retIt->second == genVal(i));
@@ -246,18 +245,19 @@ TEST(Ahm, grow) {
 }
 
 TEST(Ahm, iterator) {
-  int numEntries = 10000;
+  size_t numEntries = 10000;
   float sizeFactor = .46f;
-  std::unique_ptr<AHMapT> m(new AHMapT(int(numEntries * sizeFactor), config));
+  std::unique_ptr<AHMapT> m(
+      new AHMapT(size_t(numEntries * sizeFactor), config));
 
   // load map - make sure we succeed and the index is accurate
-  for (int i = 0; i < numEntries; i++) {
+  for (size_t i = 0; i < numEntries; i++) {
     m->insert(RecordT(i, genVal(i)));
   }
 
   bool success = true;
-  int count = 0;
-  FOR_EACH(it, *m) {
+  size_t count = 0;
+  FOR_EACH (it, *m) {
     success &= (it->second == genVal(it->first));
     ++count;
   }
@@ -267,15 +267,15 @@ TEST(Ahm, iterator) {
 
 class Counters {
  private:
-  // Note: Unfortunately can't currently put a std::atomic<int64_t> in
+  // Note: Unfortunately can't currently put a std::atomic<uint64_t> in
   // the value in ahm since it doesn't support types that are both non-copy
   // and non-move constructible yet.
-  AtomicHashMap<int64_t,int64_t> ahm;
+  AtomicHashMap<uint64_t, uint64_t> ahm;
 
  public:
   explicit Counters(size_t numCounters) : ahm(numCounters) {}
 
-  void increment(int64_t obj_id) {
+  void increment(uint64_t obj_id) {
     auto ret = ahm.insert(std::make_pair(obj_id, 1));
     if (!ret.second) {
       // obj_id already exists, increment count
@@ -283,7 +283,7 @@ class Counters {
     }
   }
 
-  int64_t getValue(int64_t obj_id) {
+  uint64_t getValue(uint64_t obj_id) {
     auto ret = ahm.find(obj_id);
     return ret != ahm.end() ? ret->second : 0;
   }
@@ -293,8 +293,7 @@ class Counters {
     string ret = "{\n";
     ret.reserve(ahm.size() * 32);
     for (const auto& e : ahm) {
-      ret += folly::to<string>(
-        "  [", e.first, ":", e.second, "]\n");
+      ret += folly::to<string>("  [", e.first, ":", e.second, "]\n");
     }
     ret += "}\n";
     return ret;
@@ -304,16 +303,16 @@ class Counters {
 // If you get an error "terminate called without an active exception", there
 // might be too many threads getting created - decrease numKeys and/or mult.
 TEST(Ahm, counter) {
-  const int numKeys = 10;
-  const int mult = 10;
+  const size_t numKeys = 10;
+  const size_t mult = 10;
   Counters c(numKeys);
-  vector<int64_t> keys;
-  FOR_EACH_RANGE(i, 1, numKeys) {
+  vector<uint64_t> keys;
+  FOR_EACH_RANGE (i, 1, numKeys) {
     keys.push_back(i);
   }
   vector<std::thread> threads;
   for (auto key : keys) {
-    FOR_EACH_RANGE(i, 0, key * mult) {
+    FOR_EACH_RANGE (i, 0, key * mult) {
       threads.push_back(std::thread([&, key] { c.increment(key); }));
     }
   }
@@ -322,16 +321,18 @@ TEST(Ahm, counter) {
   }
   string str = c.toString();
   for (auto key : keys) {
-    int val = key * mult;
+    size_t val = key * mult;
     EXPECT_EQ(val, c.getValue(key));
-    EXPECT_NE(string::npos, str.find(folly::to<string>("[",key,":",val,"]")));
+    EXPECT_NE(
+        string::npos, str.find(folly::to<string>("[", key, ":", val, "]")));
   }
 }
 
 class Integer {
-
  public:
   explicit Integer(KeyT v = 0) : v_(v) {}
+
+  Integer(const Integer&) = default;
 
   Integer& operator=(const Integer& a) {
     static bool throwException_ = false;
@@ -349,16 +350,16 @@ class Integer {
   KeyT v_;
 };
 
-TEST(Ahm, map_exception_safety) {
-  typedef AtomicHashMap<KeyT,Integer> MyMapT;
+TEST(Ahm, mapExceptionSafety) {
+  typedef AtomicHashMap<KeyT, Integer> MyMapT;
 
-  int numEntries = 10000;
+  size_t numEntries = 10000;
   float sizeFactor = 0.46f;
-  std::unique_ptr<MyMapT> m(new MyMapT(int(numEntries * sizeFactor)));
+  std::unique_ptr<MyMapT> m(new MyMapT(size_t(numEntries * sizeFactor)));
 
   bool success = true;
-  int count = 0;
-  for (int i = 0; i < numEntries; i++) {
+  size_t count = 0;
+  for (size_t i = 0; i < numEntries; i++) {
     try {
       m->insert(i, Integer(genVal(i)));
       success &= (m->find(i)->second == Integer(genVal(i)));
@@ -377,7 +378,7 @@ TEST(Ahm, basicErase) {
   std::unique_ptr<AHMapT> s(new AHMapT(numEntries, config));
   // Iterate filling up the map and deleting all keys a few times
   // to test more than one subMap.
-  for (int iterations = 0; iterations < 4; ++iterations) {
+  for (size_t iterations = 0; iterations < 4; ++iterations) {
     // Testing insertion of keys
     bool success = true;
     for (size_t i = 0; i < numEntries; ++i) {
@@ -389,7 +390,7 @@ TEST(Ahm, basicErase) {
     EXPECT_TRUE(success);
     EXPECT_EQ(s->size(), numEntries);
 
-    // Delete every key in the map and verify that the key is gone and the the
+    // Delete every key in the map and verify that the key is gone and the
     // size is correct.
     success = true;
     for (size_t i = 0; i < numEntries; ++i) {
@@ -405,20 +406,20 @@ TEST(Ahm, basicErase) {
 
 namespace {
 
-inline KeyT randomizeKey(int key) {
+inline KeyT randomizeKey(uint32_t key) {
   // We deterministically randomize the key to more accurately simulate
   // real-world usage, and to avoid pathalogical performance patterns (e.g.
-  // those related to std::hash<int64_t>()(1) == 1).
+  // those related to std::hash<uint64_t>()(1) == 1).
   //
   // Use a hash function we don't normally use for ints to avoid interactions.
   return folly::hash::jenkins_rev_mix32(key);
 }
 
-int numOpsPerThread = 0;
+size_t numOpsPerThread = 0;
 
 void* insertThread(void* jj) {
-  int64_t j = (int64_t) jj;
-  for (int i = 0; i < numOpsPerThread; ++i) {
+  auto j = (uint64_t)jj;
+  for (size_t i = 0; i < numOpsPerThread; ++i) {
     KeyT key = randomizeKey(i + j * numOpsPerThread);
     globalAHM->insert(key, genVal(key));
   }
@@ -426,8 +427,8 @@ void* insertThread(void* jj) {
 }
 
 void* qpInsertThread(void* jj) {
-  int64_t j = (int64_t) jj;
-  for (int i = 0; i < numOpsPerThread; ++i) {
+  auto j = (uint64_t)jj;
+  for (size_t i = 0; i < numOpsPerThread; ++i) {
     KeyT key = randomizeKey(i + j * numOpsPerThread);
     globalQPAHM->insert(key, genVal(key));
   }
@@ -435,8 +436,8 @@ void* qpInsertThread(void* jj) {
 }
 
 void* insertThreadArr(void* jj) {
-  int64_t j = (int64_t) jj;
-  for (int i = 0; i < numOpsPerThread; ++i) {
+  auto j = (uint64_t)jj;
+  for (size_t i = 0; i < numOpsPerThread; ++i) {
     KeyT key = randomizeKey(i + j * numOpsPerThread);
     globalAHA->insert(std::make_pair(key, genVal(key)));
   }
@@ -444,11 +445,11 @@ void* insertThreadArr(void* jj) {
 }
 
 std::atomic<bool> runThreadsCreatedAllThreads;
-void runThreads(void *(*mainFunc)(void*), int numThreads, void **statuses) {
+void runThreads(void* (*mainFunc)(void*), size_t numThreads, void** statuses) {
   folly::BenchmarkSuspender susp;
   runThreadsCreatedAllThreads.store(false);
   vector<std::thread> threads;
-  for (int64_t j = 0; j < numThreads; j++) {
+  for (uint64_t j = 0; j < numThreads; j++) {
     threads.emplace_back([statuses, mainFunc, j]() {
       auto ret = mainFunc((void*)j);
       if (statuses != nullptr) {
@@ -464,32 +465,33 @@ void runThreads(void *(*mainFunc)(void*), int numThreads, void **statuses) {
   }
 }
 
-void runThreads(void *(*mainFunc)(void*)) {
+void runThreads(void* (*mainFunc)(void*)) {
   runThreads(mainFunc, FLAGS_numThreads, nullptr);
 }
 
 } // namespace
 
-TEST(Ahm, collision_test) {
-  const int numInserts = 1000000 / 4;
+TEST(Ahm, collisionTest) {
+  const size_t numInserts = 1000000 / 4;
 
   // Doing the same number on each thread so we collide.
   numOpsPerThread = numInserts;
 
   float sizeFactor = 0.46f;
-  int entrySize = sizeof(KeyT) + sizeof(ValueT);
-  VLOG(1) << "Testing " << numInserts << " unique " << entrySize <<
-    " Byte entries replicated in " << FLAGS_numThreads <<
-    " threads with " << FLAGS_maxLoadFactor * 100.0 << "% max load factor.";
+  size_t entrySize = sizeof(KeyT) + sizeof(ValueT);
+  VLOG(1)
+      << "Testing " << numInserts << " unique " << entrySize
+      << " Byte entries replicated in " << FLAGS_numThreads << " threads with "
+      << FLAGS_maxLoadFactor * 100.0 << "% max load factor.";
 
-  globalAHM = std::make_unique<AHMapT>(int(numInserts * sizeFactor), config);
+  globalAHM = std::make_unique<AHMapT>(size_t(numInserts * sizeFactor), config);
 
   size_t sizeInit = globalAHM->capacity();
   VLOG(1) << "  Initial capacity: " << sizeInit;
 
   double start = nowInUsec();
   runThreads([](void*) -> void* { // collisionInsertThread
-    for (int i = 0; i < numOpsPerThread; ++i) {
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
       KeyT key = randomizeKey(i);
       globalAHM->insert(key, genVal(key));
     }
@@ -499,17 +501,17 @@ TEST(Ahm, collision_test) {
 
   size_t finalCap = globalAHM->capacity();
   size_t sizeAHM = globalAHM->size();
-  VLOG(1) << elapsed/sizeAHM << " usec per " << FLAGS_numThreads <<
-    " duplicate inserts (atomic).";
-  VLOG(1) << "  Final capacity: " << finalCap << " in " <<
-    globalAHM->numSubMaps() << " sub maps (" <<
-    sizeAHM * 100 / finalCap << "% load factor, " <<
-    (finalCap - sizeInit) * 100 / sizeInit << "% growth).";
+  VLOG(1) << elapsed / sizeAHM << " usec per " << FLAGS_numThreads
+          << " duplicate inserts (atomic).";
+  VLOG(1)
+      << "  Final capacity: " << finalCap << " in " << globalAHM->numSubMaps()
+      << " sub maps (" << sizeAHM * 100 / finalCap << "% load factor, "
+      << (finalCap - sizeInit) * 100 / sizeInit << "% growth).";
 
   // check correctness
   EXPECT_EQ(sizeAHM, numInserts);
   bool success = true;
-  for (int i = 0; i < numInserts; ++i) {
+  for (size_t i = 0; i < numInserts; ++i) {
     KeyT key = randomizeKey(i);
     success &= (globalAHM->find(key)->second == genVal(key));
   }
@@ -519,7 +521,7 @@ TEST(Ahm, collision_test) {
   start = nowInUsec();
   runThreads([](void*) -> void* { // collisionFindThread
     KeyT key(0);
-    for (int i = 0; i < numOpsPerThread; ++i) {
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
       globalAHM->find(key);
     }
     return nullptr;
@@ -527,65 +529,65 @@ TEST(Ahm, collision_test) {
 
   elapsed = nowInUsec() - start;
 
-  VLOG(1) << elapsed/sizeAHM << " usec per " << FLAGS_numThreads <<
-    " duplicate finds (atomic).";
+  VLOG(1) << elapsed / sizeAHM << " usec per " << FLAGS_numThreads
+          << " duplicate finds (atomic).";
 }
 
 namespace {
 
-const int kInsertPerThread = 100000;
-int raceFinalSizeEstimate;
-
-void* raceIterateThread(void*) {
-  int count = 0;
-
-  AHMapT::iterator it = globalAHM->begin();
-  AHMapT::iterator end = globalAHM->end();
-  for (; it != end; ++it) {
-    ++count;
-    if (count > raceFinalSizeEstimate) {
-      EXPECT_FALSE("Infinite loop in iterator.");
-      return nullptr;
+void raceIterateThread(std::atomic<bool>* shouldIterate, size_t maxSize) {
+  while (shouldIterate->load(std::memory_order_relaxed)) {
+    size_t count = 0;
+    AHMapT::iterator it = globalAHM->begin();
+    AHMapT::iterator end = globalAHM->end();
+    for (; it != end; ++it) {
+      ++count;
+      if (count > maxSize) {
+        EXPECT_FALSE("Infinite loop in iterator.");
+        return;
+      }
     }
   }
-  return nullptr;
 }
 
-void* raceInsertRandomThread(void*) {
-  for (int i = 0; i < kInsertPerThread; ++i) {
+void raceInsertRandomThread(
+    std::atomic<bool>* shouldInsert, size_t maxInserts) {
+  size_t i = 0;
+  while (shouldInsert->load(std::memory_order_relaxed) && i++ < maxInserts) {
     KeyT key = rand();
     globalAHM->insert(key, genVal(key));
   }
-  return nullptr;
 }
 
 } // namespace
 
 // Test for race conditions when inserting and iterating at the same time and
 // creating multiple submaps.
-TEST(Ahm, race_insert_iterate_thread_test) {
-  const int kInsertThreads = 20;
-  const int kIterateThreads = 20;
-  raceFinalSizeEstimate = kInsertThreads * kInsertPerThread;
+TEST(Ahm, raceInsertIterateThreadTest) {
+  const size_t kInsertThreads = 20;
+  const size_t kIterateThreads = 20;
+  const size_t kMaxInsertsPerThread = 100000;
+  size_t raceFinalSizeUpper = kInsertThreads * kMaxInsertsPerThread;
 
   VLOG(1) << "Testing iteration and insertion with " << kInsertThreads
-    << " threads inserting and " << kIterateThreads << " threads iterating.";
+          << " threads inserting and " << kIterateThreads
+          << " threads iterating.";
 
-  globalAHM = std::make_unique<AHMapT>(raceFinalSizeEstimate / 9, config);
+  globalAHM = std::make_unique<AHMapT>(100000, config);
 
-  vector<pthread_t> threadIds;
-  for (int j = 0; j < kInsertThreads + kIterateThreads; j++) {
-    pthread_t tid;
-    void *(*thread)(void*) =
-      (j < kInsertThreads ? raceInsertRandomThread : raceIterateThread);
-    if (pthread_create(&tid, nullptr, thread, nullptr) != 0) {
-      LOG(ERROR) << "Could not start thread";
-    } else {
-      threadIds.push_back(tid);
-    }
+  std::atomic<bool> loop{true};
+  vector<std::thread> threads;
+  for (auto j = 0u; j < kInsertThreads; ++j) {
+    threads.emplace_back(raceInsertRandomThread, &loop, kMaxInsertsPerThread);
   }
-  for (size_t i = 0; i < threadIds.size(); ++i) {
-    pthread_join(threadIds[i], nullptr);
+  for (auto j = 0u; j < kIterateThreads; ++j) {
+    threads.emplace_back(raceIterateThread, &loop, raceFinalSizeUpper);
+  }
+  // Before changing this test to be time-limited, it took at least 60 seconds.
+  /* sleep override */ std::this_thread::sleep_for(std::chrono::seconds(30));
+  loop.store(false);
+  for (auto& thread : threads) {
+    thread.join();
   }
   VLOG(1) << "Ended up with " << globalAHM->numSubMaps() << " submaps";
   VLOG(1) << "Final size of map " << globalAHM->size();
@@ -593,11 +595,11 @@ TEST(Ahm, race_insert_iterate_thread_test) {
 
 namespace {
 
-const int kTestEraseInsertions = 200000;
+const size_t kTestEraseInsertions = 200000;
 std::atomic<int32_t> insertedLevel;
 
 void* testEraseInsertThread(void*) {
-  for (int i = 0; i < kTestEraseInsertions; ++i) {
+  for (size_t i = 0; i < kTestEraseInsertions; ++i) {
     KeyT key = randomizeKey(i);
     globalAHM->insert(key, genVal(key));
     insertedLevel.store(i, std::memory_order_release);
@@ -607,7 +609,7 @@ void* testEraseInsertThread(void*) {
 }
 
 void* testEraseEraseThread(void*) {
-  for (int i = 0; i < kTestEraseInsertions; ++i) {
+  for (size_t i = 0; i < kTestEraseInsertions; ++i) {
     /*
      * Make sure that we don't get ahead of the insert thread, because
      * part of the condition for this unit test succeeding is that the
@@ -619,8 +621,8 @@ void* testEraseEraseThread(void*) {
      * race causing problems for the test (it's ok for real usage), we
      * lag behind the inserter by more than just element.
      */
-    const int lag = 10;
-    int currentLevel;
+    const size_t lag = 10;
+    size_t currentLevel;
     do {
       currentLevel = insertedLevel.load(std::memory_order_acquire);
       if (currentLevel == kTestEraseInsertions) {
@@ -642,21 +644,21 @@ void* testEraseEraseThread(void*) {
 
 // Here we have a single thread inserting some values, and several threads
 // racing to delete the values in the order they were inserted.
-TEST(Ahm, thread_erase_insert_race) {
-  const int kInsertThreads = 1;
-  const int kEraseThreads = 10;
+TEST(Ahm, threadEraseInsertRace) {
+  const size_t kInsertThreads = 1;
+  const size_t kEraseThreads = 10;
 
   VLOG(1) << "Testing insertion and erase with " << kInsertThreads
-    << " thread inserting and " << kEraseThreads << " threads erasing.";
+          << " thread inserting and " << kEraseThreads << " threads erasing.";
 
   globalAHM = std::make_unique<AHMapT>(kTestEraseInsertions / 4, config);
 
   vector<pthread_t> threadIds;
-  for (int64_t j = 0; j < kInsertThreads + kEraseThreads; j++) {
+  for (uint64_t j = 0; j < kInsertThreads + kEraseThreads; j++) {
     pthread_t tid;
-    void *(*thread)(void*) =
-      (j < kInsertThreads ? testEraseInsertThread : testEraseEraseThread);
-    if (pthread_create(&tid, nullptr, thread, (void*) j) != 0) {
+    void* (*thread)(void*) =
+        (j < kInsertThreads ? testEraseInsertThread : testEraseEraseThread);
+    if (pthread_create(&tid, nullptr, thread, (void*)j) != 0) {
       LOG(ERROR) << "Could not start thread";
     } else {
       threadIds.push_back(tid);
@@ -673,7 +675,7 @@ TEST(Ahm, thread_erase_insert_race) {
 }
 
 // Repro for T#483734: Duplicate AHM inserts due to incorrect AHA return value.
-typedef AtomicHashArray<int32_t, int32_t> AHA;
+typedef AtomicHashArray<uint32_t, uint32_t> AHA;
 AHA::Config configRace;
 auto atomicHashArrayInsertRaceArray = AHA::create(2, configRace);
 void* atomicHashArrayInsertRaceThread(void* /* j */) {
@@ -682,33 +684,33 @@ void* atomicHashArrayInsertRaceThread(void* /* j */) {
   while (!runThreadsCreatedAllThreads.load()) {
     ;
   }
-  for (int i = 0; i < 2; i++) {
+  for (size_t i = 0; i < 2; i++) {
     if (arr->insert(RecordT(randomizeKey(i), 0)).first != arr->end()) {
       numInserted++;
     }
   }
   return (void*)numInserted;
 }
-TEST(Ahm, atomic_hash_array_insert_race) {
+TEST(Ahm, atomicHashArrayInsertRace) {
   AHA* arr = atomicHashArrayInsertRaceArray.get();
-  int numIterations = 5000;
-  constexpr int numThreads = 4;
+  size_t numIterations = 5000;
+  constexpr size_t numThreads = 4;
   void* statuses[numThreads];
-  for (int i = 0; i < numIterations; i++) {
+  for (size_t i = 0; i < numIterations; i++) {
     arr->clear();
     runThreads(atomicHashArrayInsertRaceThread, numThreads, statuses);
     EXPECT_GE(arr->size(), 1);
-    for (int j = 0; j < numThreads; j++) {
+    for (size_t j = 0; j < numThreads; j++) {
       EXPECT_EQ(arr->size(), uintptr_t(statuses[j]));
     }
   }
 }
 
 // Repro for T#5841499. Race between erase() and find() on the same key.
-TEST(Ahm, erase_find_race) {
+TEST(Ahm, eraseFindRace) {
   const uint64_t limit = 10000;
   AtomicHashMap<uint64_t, uint64_t> map(limit + 10);
-  std::atomic<uint64_t> key {1};
+  std::atomic<uint64_t> key{1};
 
   // Invariant: all values are equal to their keys.
   // At any moment there is one or two consecutive keys in the map.
@@ -743,7 +745,7 @@ TEST(Ahm, erase_find_race) {
 }
 
 // Erase right after insert race bug repro (t9130653)
-TEST(Ahm, erase_after_insert_race) {
+TEST(Ahm, eraseAfterInsertRace) {
   const uint64_t limit = 10000;
   const size_t num_threads = 100;
   const size_t num_iters = 500;
@@ -753,14 +755,14 @@ TEST(Ahm, erase_after_insert_race) {
   std::vector<std::thread> ts;
   for (size_t i = 0; i < num_threads; ++i) {
     ts.emplace_back([&]() {
-        while (!go) {
-          continue;
-        }
-        for (size_t n = 0; n < num_iters; ++n) {
-          map.erase(1);
-          map.insert(1, 1);
-        }
-      });
+      while (!go) {
+        continue;
+      }
+      for (size_t n = 0; n < num_iters; ++n) {
+        map.erase(1);
+        map.insert(1, 1);
+      }
+    });
   }
 
   go = true;
@@ -771,7 +773,7 @@ TEST(Ahm, erase_after_insert_race) {
 }
 
 // Repro for a bug when iterator didn't skip empty submaps.
-TEST(Ahm, iterator_skips_empty_submaps) {
+TEST(Ahm, iteratorSkipsEmptySubmaps) {
   AtomicHashMap<uint64_t, uint64_t>::Config conf;
   conf.growthFactor = 1;
 
@@ -807,12 +809,12 @@ void loadGlobalAha() {
   uint64_t start = nowInUsec();
   globalAHA = AHArrayT::create(maxBMElements, config);
   numOpsPerThread = FLAGS_numBMElements / FLAGS_numThreads;
-  CHECK_EQ(0, FLAGS_numBMElements % FLAGS_numThreads) <<
-    "kNumThreads must evenly divide kNumInserts.";
+  CHECK_EQ(0, FLAGS_numBMElements % FLAGS_numThreads)
+      << "kNumThreads must evenly divide kNumInserts.";
   runThreads(insertThreadArr);
   uint64_t elapsed = nowInUsec() - start;
-  std::cout << "  took " << elapsed / 1000 << " ms (" <<
-    (elapsed * 1000 / FLAGS_numBMElements) << " ns/insert).\n";
+  std::cout << "  took " << elapsed / 1000 << " ms ("
+            << (elapsed * 1000 / FLAGS_numBMElements) << " ns/insert).\n";
   EXPECT_EQ(globalAHA->size(), FLAGS_numBMElements);
 }
 
@@ -824,8 +826,8 @@ void loadGlobalAhm() {
   numOpsPerThread = FLAGS_numBMElements / FLAGS_numThreads;
   runThreads(insertThread);
   uint64_t elapsed = nowInUsec() - start;
-  std::cout << "  took " << elapsed / 1000 << " ms (" <<
-    (elapsed * 1000 / FLAGS_numBMElements) << " ns/insert).\n";
+  std::cout << "  took " << elapsed / 1000 << " ms ("
+            << (elapsed * 1000 / FLAGS_numBMElements) << " ns/insert).\n";
   EXPECT_EQ(globalAHM->size(), FLAGS_numBMElements);
 }
 
@@ -837,8 +839,8 @@ void loadGlobalQPAhm() {
   numOpsPerThread = FLAGS_numBMElements / FLAGS_numThreads;
   runThreads(qpInsertThread);
   uint64_t elapsed = nowInUsec() - start;
-  std::cout << "  took " << elapsed / 1000 << " ms (" <<
-    (elapsed * 1000 / FLAGS_numBMElements) << " ns/insert).\n";
+  std::cout << "  took " << elapsed / 1000 << " ms ("
+            << (elapsed * 1000 / FLAGS_numBMElements) << " ns/insert).\n";
   EXPECT_EQ(globalQPAHM->size(), FLAGS_numBMElements);
 }
 
@@ -874,11 +876,11 @@ BENCHMARK(mt_ahm_miss, iters) {
   CHECK_LE(iters, FLAGS_numBMElements);
   numOpsPerThread = iters / FLAGS_numThreads;
   runThreads([](void* jj) -> void* {
-    int64_t j = (int64_t) jj;
+    auto j = (uint64_t)jj;
     while (!runThreadsCreatedAllThreads.load()) {
       ;
     }
-    for (int i = 0; i < numOpsPerThread; ++i) {
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
       KeyT key = i + j * numOpsPerThread * 100;
       folly::doNotOptimizeAway(globalAHM->find(key) == globalAHM->end());
     }
@@ -890,11 +892,11 @@ BENCHMARK(mt_qpahm_miss, iters) {
   CHECK_LE(iters, FLAGS_numBMElements);
   numOpsPerThread = iters / FLAGS_numThreads;
   runThreads([](void* jj) -> void* {
-    int64_t j = (int64_t) jj;
+    auto j = (uint64_t)jj;
     while (!runThreadsCreatedAllThreads.load()) {
       ;
     }
-    for (int i = 0; i < numOpsPerThread; ++i) {
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
       KeyT key = i + j * numOpsPerThread * 100;
       folly::doNotOptimizeAway(globalQPAHM->find(key) == globalQPAHM->end());
     }
@@ -922,12 +924,12 @@ BENCHMARK(mt_ahm_find_insert_mix, iters) {
   CHECK_LE(iters, FLAGS_numBMElements);
   numOpsPerThread = iters / FLAGS_numThreads;
   runThreads([](void* jj) -> void* {
-    int64_t j = (int64_t) jj;
+    uint64_t j = (uint64_t)jj;
     while (!runThreadsCreatedAllThreads.load()) {
       ;
     }
-    for (int i = 0; i < numOpsPerThread; ++i) {
-      if (i % 128) {  // ~1% insert mix
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
+      if (i % 128) { // ~1% insert mix
         KeyT key = randomizeKey(i + j * numOpsPerThread);
         folly::doNotOptimizeAway(globalAHM->find(key)->second);
       } else {
@@ -939,17 +941,16 @@ BENCHMARK(mt_ahm_find_insert_mix, iters) {
   });
 }
 
-
 BENCHMARK(mt_qpahm_find_insert_mix, iters) {
   CHECK_LE(iters, FLAGS_numBMElements);
   numOpsPerThread = iters / FLAGS_numThreads;
   runThreads([](void* jj) -> void* {
-    int64_t j = (int64_t) jj;
+    auto j = (uint64_t)jj;
     while (!runThreadsCreatedAllThreads.load()) {
       ;
     }
-    for (int i = 0; i < numOpsPerThread; ++i) {
-      if (i % 128) {  // ~1% insert mix
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
+      if (i % 128) { // ~1% insert mix
         KeyT key = randomizeKey(i + j * numOpsPerThread);
         folly::doNotOptimizeAway(globalQPAHM->find(key)->second);
       } else {
@@ -965,27 +966,27 @@ BENCHMARK(mt_aha_find, iters) {
   CHECK_LE(iters, FLAGS_numBMElements);
   numOpsPerThread = iters / FLAGS_numThreads;
   runThreads([](void* jj) -> void* {
-      int64_t j = (int64_t) jj;
-      while (!runThreadsCreatedAllThreads.load()) {
-        ;
-      }
-      for (int i = 0; i < numOpsPerThread; ++i) {
-        KeyT key = randomizeKey(i + j * numOpsPerThread);
-        folly::doNotOptimizeAway(globalAHA->find(key)->second);
-      }
-      return nullptr;
-    });
+    auto j = (uint64_t)jj;
+    while (!runThreadsCreatedAllThreads.load()) {
+      ;
+    }
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
+      KeyT key = randomizeKey(i + j * numOpsPerThread);
+      folly::doNotOptimizeAway(globalAHA->find(key)->second);
+    }
+    return nullptr;
+  });
 }
 
 BENCHMARK(mt_ahm_find, iters) {
   CHECK_LE(iters, FLAGS_numBMElements);
   numOpsPerThread = iters / FLAGS_numThreads;
   runThreads([](void* jj) -> void* {
-    int64_t j = (int64_t) jj;
+    auto j = (uint64_t)jj;
     while (!runThreadsCreatedAllThreads.load()) {
       ;
     }
-    for (int i = 0; i < numOpsPerThread; ++i) {
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
       KeyT key = randomizeKey(i + j * numOpsPerThread);
       folly::doNotOptimizeAway(globalAHM->find(key)->second);
     }
@@ -997,11 +998,11 @@ BENCHMARK(mt_qpahm_find, iters) {
   CHECK_LE(iters, FLAGS_numBMElements);
   numOpsPerThread = iters / FLAGS_numThreads;
   runThreads([](void* jj) -> void* {
-    int64_t j = (int64_t) jj;
+    auto j = (uint64_t)jj;
     while (!runThreadsCreatedAllThreads.load()) {
       ;
     }
-    for (int i = 0; i < numOpsPerThread; ++i) {
+    for (size_t i = 0; i < numOpsPerThread; ++i) {
       KeyT key = randomizeKey(i + j * numOpsPerThread);
       folly::doNotOptimizeAway(globalQPAHM->find(key)->second);
     }
@@ -1020,7 +1021,7 @@ BENCHMARK(st_baseline_modulus_and_random, iters) {
 
 BENCHMARK(mt_ahm_insert, iters) {
   BENCHMARK_SUSPEND {
-    globalAHM = std::make_unique<AHMapT>(int(iters * LF), config);
+    globalAHM = std::make_unique<AHMapT>(size_t(iters * LF), config);
     numOpsPerThread = iters / FLAGS_numThreads;
   }
   runThreads(insertThread);
@@ -1028,7 +1029,7 @@ BENCHMARK(mt_ahm_insert, iters) {
 
 BENCHMARK(mt_qpahm_insert, iters) {
   BENCHMARK_SUSPEND {
-    globalQPAHM = std::make_unique<QPAHMapT>(int(iters * LF), qpConfig);
+    globalQPAHM = std::make_unique<QPAHMapT>(size_t(iters * LF), qpConfig);
     numOpsPerThread = iters / FLAGS_numThreads;
   }
   runThreads(qpInsertThread);
@@ -1036,7 +1037,7 @@ BENCHMARK(mt_qpahm_insert, iters) {
 
 BENCHMARK(st_ahm_insert, iters) {
   folly::BenchmarkSuspender susp;
-  std::unique_ptr<AHMapT> ahm(new AHMapT(int(iters * LF), config));
+  std::unique_ptr<AHMapT> ahm(new AHMapT(size_t(iters * LF), config));
   susp.dismiss();
 
   for (size_t i = 0; i < iters; i++) {
@@ -1047,7 +1048,7 @@ BENCHMARK(st_ahm_insert, iters) {
 
 BENCHMARK(st_qpahm_insert, iters) {
   folly::BenchmarkSuspender susp;
-  std::unique_ptr<QPAHMapT> ahm(new QPAHMapT(int(iters * LF), qpConfig));
+  std::unique_ptr<QPAHMapT> ahm(new QPAHMapT(size_t(iters * LF), qpConfig));
   susp.dismiss();
 
   for (size_t i = 0; i < iters; i++) {
@@ -1060,34 +1061,33 @@ void benchmarkSetup() {
   config.maxLoadFactor = FLAGS_maxLoadFactor;
   qpConfig.maxLoadFactor = FLAGS_maxLoadFactor;
   configRace.maxLoadFactor = 0.5;
-  int numCores = sysconf(_SC_NPROCESSORS_ONLN);
+  size_t numCores = sysconf(_SC_NPROCESSORS_ONLN);
   loadGlobalAha();
   loadGlobalAhm();
   loadGlobalQPAhm();
   string numIters = folly::to<string>(
-    std::min(1000000, int(FLAGS_numBMElements)));
+      std::min(1000000UL, (unsigned long)FLAGS_numBMElements));
 
-  gflags::SetCommandLineOptionWithMode(
-    "bm_max_iters", numIters.c_str(), gflags::SET_FLAG_IF_DEFAULT
-  );
-  gflags::SetCommandLineOptionWithMode(
-    "bm_min_iters", numIters.c_str(), gflags::SET_FLAG_IF_DEFAULT
-  );
+  folly::gflags::SetCommandLineOptionWithMode(
+      "bm_max_iters", numIters.c_str(), folly::gflags::SET_FLAG_IF_DEFAULT);
+  folly::gflags::SetCommandLineOptionWithMode(
+      "bm_min_iters", numIters.c_str(), folly::gflags::SET_FLAG_IF_DEFAULT);
   string numCoresStr = folly::to<string>(numCores);
-  gflags::SetCommandLineOptionWithMode(
-    "numThreads", numCoresStr.c_str(), gflags::SET_FLAG_IF_DEFAULT
-  );
+  folly::gflags::SetCommandLineOptionWithMode(
+      "numThreads", numCoresStr.c_str(), folly::gflags::SET_FLAG_IF_DEFAULT);
 
-  std::cout << "\nRunning AHM benchmarks on machine with " << numCores
-    << " logical cores.\n"
-       "  num elements per map: " << FLAGS_numBMElements << "\n"
-    << "  num threads for mt tests: " << FLAGS_numThreads << "\n"
-    << "  AHM load factor: " << FLAGS_targetLoadFactor << "\n\n";
+  std::cout
+      << "\nRunning AHM benchmarks on machine with " << numCores
+      << " logical cores.\n"
+         "  num elements per map: "
+      << FLAGS_numBMElements << "\n"
+      << "  num threads for mt tests: " << FLAGS_numThreads << "\n"
+      << "  AHM load factor: " << FLAGS_targetLoadFactor << "\n\n";
 }
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   auto ret = RUN_ALL_TESTS();
   if (!ret && FLAGS_benchmark) {
     benchmarkSetup();
@@ -1097,6 +1097,11 @@ int main(int argc, char** argv) {
 }
 
 /*
+FUTURE READER: This benchmark is quite likely buggy!  Take these numbers
+with scoopfuls of salt.  For example, looking at `mt_ahm_miss` while
+increasing --bm_min_iters in 10x steps from 10,000 to 1,000,000 we see:
+62ns, 6.4ns, 760ps.  This suggests it is not measuring what it thinks.
+
 loading global AHA with 8 threads...
   took 487 ms (40 ns/insert).
 loading global AHM with 8 threads...

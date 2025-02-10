@@ -1,11 +1,11 @@
 /*
- * Copyright 2018-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,18 +16,18 @@
 
 #pragma once
 
+#include <type_traits>
+
+#include <folly/Traits.h>
+
 namespace folly {
 namespace detail {
 
-struct DefaultTag {};
+struct FOLLY_EXPORT DefaultTag {};
 
 template <typename T>
 struct DefaultMake {
-  // Required form until C++17, which permits returning objects of types which
-  // are neither copy-constructible nor move-constructible.
-  T* operator()(unsigned char (&buf)[sizeof(T)]) const {
-    return new (buf) T();
-  }
+  T operator()() const { return T(); }
 };
 
 } // namespace detail

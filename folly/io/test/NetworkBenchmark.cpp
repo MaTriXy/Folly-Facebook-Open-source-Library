@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,7 +23,6 @@
 
 using folly::IOBuf;
 using std::unique_ptr;
-using namespace folly::io;
 using namespace std;
 
 size_t buf_size = 0;
@@ -149,7 +148,7 @@ chainBenchmark                         100000  118.6 ms  1.186 us  823.2 k
 poolBenchmark                          100000   32.2 ms    322 ns  2.962 M
 */
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   setNumbers(10, 10);
   folly::runBenchmarks();

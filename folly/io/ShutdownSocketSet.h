@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,28 +16,30 @@
 
 #pragma once
 
-#include <atomic>
 #include <cstdlib>
 #include <memory>
 
-#include <boost/noncopyable.hpp>
-
 #include <folly/File.h>
+#include <folly/net/NetworkSocket.h>
+#include <folly/synchronization/RelaxedAtomic.h>
 
 namespace folly {
 
 /**
  * Set of sockets that allows immediate, take-no-prisoners abort.
  */
-class ShutdownSocketSet : private boost::noncopyable {
+class ShutdownSocketSet {
  public:
   /**
-   * Create a socket set that can handle file descriptors < maxFd.
+   * Create a socket set that can handle file descriptors within the capacity.
    * The default value (256Ki) is high enough for just about all
    * applications, even if you increased the number of file descriptors
    * on your system.
    */
-  explicit ShutdownSocketSet(int maxFd = 1 << 18);
+  explicit ShutdownSocketSet(size_t capacity = 1 << 18);
+
+  ShutdownSocketSet(const ShutdownSocketSet&) = delete;
+  ShutdownSocketSet& operator=(const ShutdownSocketSet&) = delete;
 
   /**
    * Add an already open socket to the list of sockets managed by
@@ -45,7 +47,7 @@ class ShutdownSocketSet : private boost::noncopyable {
    * ShutdownSocketSet::close (which will, as a side effect, also handle EINTR
    * properly) and not by calling close() on the file descriptor.
    */
-  void add(int fd);
+  void add(NetworkSocket fd);
 
   /**
    * Remove a socket from the list of sockets managed by ShutdownSocketSet.
@@ -53,13 +55,13 @@ class ShutdownSocketSet : private boost::noncopyable {
    * sleep()-ing) in the extremely rare case that the fd is currently
    * being shutdown().
    */
-  void remove(int fd);
+  void remove(NetworkSocket fd);
 
   /**
    * Close a socket managed by ShutdownSocketSet. Returns the same return code
    * as ::close() (and sets errno accordingly).
    */
-  int close(int fd);
+  int close(NetworkSocket fd);
 
   /**
    * Shut down a socket. If abortive is true, we perform an abortive
@@ -70,7 +72,7 @@ class ShutdownSocketSet : private boost::noncopyable {
    * read() and write() operations to the socket will fail. During normal
    * operation, just call ::shutdown() on the socket.
    */
-  void shutdown(int fd, bool abortive = false);
+  void shutdown(NetworkSocket fd, bool abortive = false);
 
   /**
    * Immediate shutdown of all connections. This is a hard-hitting hammer;
@@ -95,7 +97,7 @@ class ShutdownSocketSet : private boost::noncopyable {
   void shutdownAll(bool abortive = false);
 
  private:
-  void doShutdown(int fd, bool abortive);
+  void doShutdown(NetworkSocket fd, bool abortive);
 
   // State transitions:
   // add():
@@ -136,8 +138,8 @@ class ShutdownSocketSet : private boost::noncopyable {
     }
   };
 
-  const int maxFd_;
-  std::unique_ptr<std::atomic<uint8_t>[], Free> data_;
+  size_t const capacity_;
+  std::unique_ptr<relaxed_atomic<uint8_t>[], Free> data_;
   folly::File nullFile_;
 };
 

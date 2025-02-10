@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -41,22 +41,12 @@ class Err {
   Err& operator=(Err const&) = default;
   Err& operator=(Err&&) = default;
 
-  friend bool operator==(Err a, Err b) {
-    return a.type_ == b.type_;
-  }
-  friend bool operator!=(Err a, Err b) {
-    return a.type_ != b.type_;
-  }
+  friend bool operator==(Err a, Err b) { return a.type_ == b.type_; }
+  friend bool operator!=(Err a, Err b) { return a.type_ != b.type_; }
 
-  static constexpr Err bad() {
-    return Type::Bad;
-  }
-  static constexpr Err badder() {
-    return Type::Badder;
-  }
-  static constexpr Err baddest() {
-    return Type::Baddest;
-  }
+  static constexpr Err bad() { return Type::Bad; }
+  static constexpr Err badder() { return Type::Badder; }
+  static constexpr Err baddest() { return Type::Baddest; }
 };
 
 Expected<int, Err> f1() {
@@ -94,7 +84,7 @@ TEST(Expected, CoroutineSuccess) {
     EXPECT_EQ(2.0 * 7, y);
     auto z = co_await f3(x, y);
     EXPECT_EQ(int(2.0 * 7 + 7), *z);
-    co_return* z;
+    co_return *z;
   }();
   EXPECT_TRUE(r0.hasValue());
   EXPECT_EQ(21, *r0);
@@ -109,7 +99,63 @@ TEST(Expected, CoroutineFailure) {
     co_return z;
   }();
   EXPECT_TRUE(r1.hasError());
+  EXPECT_NE(Err::bad(), r1.error());
   EXPECT_EQ(Err::badder(), r1.error());
+  EXPECT_NE(Err::baddest(), r1.error());
+}
+
+TEST(Expected, CoroutineAwaitUnexpected) {
+  auto r1 = []() -> Expected<int, Err> {
+    co_await makeUnexpected(Err::badder());
+    throw std::logic_error("should have been unreachable");
+  }();
+  EXPECT_TRUE(r1.hasError());
+  EXPECT_EQ(Err::badder(), r1.error());
+}
+
+TEST(Expected, CoroutineReturnUnexpected) {
+  auto r1 = []() -> Expected<int, Err> {
+    co_return makeUnexpected(Err::badder());
+  }();
+  EXPECT_TRUE(r1.hasError());
+  EXPECT_EQ(Err::badder(), r1.error());
+}
+
+TEST(Expected, CoroutineReturnsVoid) {
+  int x = 0;
+  auto r = [&]() -> Expected<folly::Unit, Err> {
+    x = co_await f1();
+    co_return;
+  }();
+  EXPECT_TRUE(r.hasValue());
+  EXPECT_EQ(folly::unit, *r);
+  EXPECT_EQ(7, x);
+}
+
+TEST(Expected, CoroutineReturnsVoidThrows) {
+  auto fnThrows = [&]() -> Expected<folly::Unit, Err> {
+    throws();
+    co_return;
+  };
+  ASSERT_THROW(({ fnThrows(); }), Exn);
+}
+
+TEST(Expected, CoroutineReturnsVoidError) {
+  auto fnErr = [&]() -> Expected<folly::Unit, Err> {
+    return makeUnexpected(Err::bad());
+  };
+  auto r = [&]() -> Expected<folly::Unit, Err> { co_await fnErr(); }();
+  EXPECT_TRUE(r.hasError());
+  EXPECT_EQ(Err::bad(), r.error());
+}
+
+TEST(Expected, VoidCoroutineAwaitsError) {
+  auto r = []() -> Expected<folly::Unit, Err> {
+    co_await makeUnexpected(Err::badder());
+    ADD_FAILURE();
+  }();
+  EXPECT_TRUE(r.hasError());
+  EXPECT_EQ(Err::badder(), r.error());
 }
 
 TEST(Expected, CoroutineException) {

@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,8 +16,8 @@
 
 #pragma once
 
-#include <folly/portability/OpenSSL.h>
-#include <folly/ssl/OpenSSLPtrTypes.h>
+#include <string>
+#include <folly/Optional.h>
 
 namespace folly {
 
@@ -40,9 +40,14 @@ class AsyncTransportCertificate {
   virtual std::string getIdentity() const = 0;
 
   /**
-   * Returns an X509 structure associated with this Certificate. This may be
-   * null.
+   * Returns the DER representation of this certificate, if available.
+   *
+   * NOTE: Not every AsyncTransportCertificate implementation will
+   * have a DER representation. Whenever possible, applications should
+   * prefer to structure logic around the _identity_ that the
+   * certificate conveys (with `getIdentity()`), rather than
+   * certificate itself.
    */
-  virtual folly::ssl::X509UniquePtr getX509() const = 0;
+  virtual std::optional<std::string> getDER() const = 0;
 };
 } // namespace folly

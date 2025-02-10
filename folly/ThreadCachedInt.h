@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,38 +16,35 @@
 
 /**
  * Higher performance (up to 10x) atomic increment using thread caching.
- *
- * @author Spencer Ahrens (sahrens)
  */
 
 #pragma once
 
 #include <atomic>
 
-#include <boost/noncopyable.hpp>
-
 #include <folly/Likely.h>
 #include <folly/ThreadLocal.h>
 
 namespace folly {
 
-
 // Note that readFull requires holding a lock and iterating through all of the
 // thread local objects with the same Tag, so if you have a lot of
 // ThreadCachedInt's you should considering breaking up the Tag space even
 // further.
-template <class IntT, class Tag=IntT>
-class ThreadCachedInt : boost::noncopyable {
+template <class IntT, class Tag = IntT>
+class ThreadCachedInt {
   struct IntCache;
 
  public:
   explicit ThreadCachedInt(IntT initialVal = 0, uint32_t cacheSize = 1000)
-    : target_(initialVal), cacheSize_(cacheSize) {
-  }
+      : target_(initialVal), cacheSize_(cacheSize) {}
+
+  ThreadCachedInt(const ThreadCachedInt&) = delete;
+  ThreadCachedInt& operator=(const ThreadCachedInt&) = delete;
 
   void increment(IntT inc) {
     auto cache = cache_.get();
-    if (UNLIKELY(cache == nullptr)) {
+    if (FOLLY_UNLIKELY(cache == nullptr)) {
       cache = new IntCache(*this);
       cache_.reset(cache);
     }
@@ -56,9 +53,7 @@ class ThreadCachedInt : boost::noncopyable {
 
   // Quickly grabs the current value which may not include some cached
   // increments.
-  IntT readFast() const {
-    return target_.load(std::memory_order_relaxed);
-  }
+  IntT readFast() const { return target_.load(std::memory_order_relaxed); }
 
   // Reads the current value plus all the cached increments.  Requires grabbing
   // a lock, so this is significantly slower than readFast().
@@ -102,14 +97,21 @@ class ThreadCachedInt : boost::noncopyable {
     cacheSize_.store(newSize, std::memory_order_release);
   }
 
-  uint32_t getCacheSize() const {
-    return cacheSize_.load();
-  }
+  uint32_t getCacheSize() const { return cacheSize_.load(); }
 
-  ThreadCachedInt& operator+=(IntT inc) { increment(inc); return *this; }
-  ThreadCachedInt& operator-=(IntT inc) { increment(-inc); return *this; }
+  ThreadCachedInt& operator+=(IntT inc) {
+    increment(inc);
+    return *this;
+  }
+  ThreadCachedInt& operator-=(IntT inc) {
+    increment(-inc);
+    return *this;
+  }
   // pre-increment (we don't support post-increment)
-  ThreadCachedInt& operator++() { increment(1); return *this; }
+  ThreadCachedInt& operator++() {
+    increment(1);
+    return *this;
+  }
   ThreadCachedInt& operator--() {
     increment(IntT(-1));
     return *this;
@@ -142,20 +144,20 @@ class ThreadCachedInt : boost::noncopyable {
         : parent_(&parent), val_(0), numUpdates_(0), reset_(false) {}
 
     void increment(IntT inc) {
-      if (LIKELY(!reset_.load(std::memory_order_acquire))) {
+      if (FOLLY_LIKELY(!reset_.load(std::memory_order_acquire))) {
         // This thread is the only writer to val_, so it's fine do do
         // a relaxed load and do the addition non-atomically.
         val_.store(
-          val_.load(std::memory_order_relaxed) + inc,
-          std::memory_order_release
-        );
+            val_.load(std::memory_order_relaxed) + inc,
+            std::memory_order_release);
       } else {
         val_.store(inc, std::memory_order_relaxed);
         reset_.store(false, std::memory_order_release);
       }
       ++numUpdates_;
-      if (UNLIKELY(numUpdates_ >
-                   parent_->cacheSize_.load(std::memory_order_acquire))) {
+      if (FOLLY_UNLIKELY(
+              numUpdates_ >
+              parent_->cacheSize_.load(std::memory_order_acquire))) {
         flush();
       }
     }
@@ -166,9 +168,7 @@ class ThreadCachedInt : boost::noncopyable {
       numUpdates_ = 0;
     }
 
-    ~IntCache() {
-      flush();
-    }
+    ~IntCache() { flush(); }
   };
 };
 

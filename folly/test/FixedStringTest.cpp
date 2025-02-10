@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-//
-// Author: eniebler@fb.com
-
 #include <folly/FixedString.h>
+
+#include <string_view>
+
+#include <folly/Range.h>
 #include <folly/portability/GTest.h>
 
 #define FS(x) ::folly::makeFixedString(x)
@@ -108,6 +109,14 @@ TEST(FixedStringCtorTest, FromStringOffsetAndCount) {
   // constexpr folly::FixedString<5> s4{s, 6, 6};
 }
 
+TEST(FixedStringCtorTest, FromStringView) {
+  constexpr folly::FixedString<11> s{
+      std::string_view{"hello world"},
+  };
+  static_assert(s == "hello world", "");
+  static_assert(s.size() == 11u, "");
+}
+
 TEST(FixedStringCtorTest, FromInitializerList) {
   constexpr folly::FixedString<11> s{
       'h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd'};
@@ -159,7 +168,6 @@ TEST(FixedStringConcatTest, FromTwoStrings) {
   static_assert(res == "hello world!!!", "");
 }
 
-#if FOLLY_USE_CPP14_CONSTEXPR
 constexpr folly::FixedString<20> constexpr_swap_test() {
   folly::FixedString<10> tmp1{"hello"}, tmp2{"world!"};
   tmp2.swap(tmp1);
@@ -169,7 +177,6 @@ constexpr folly::FixedString<20> constexpr_swap_test() {
 TEST(FixedStringSwapTest, ConstexprSwap) {
   static_assert(constexpr_swap_test() == "world!hello", "");
 }
-#endif
 
 TEST(FixedStringSwapTest, RuntimeSwap) {
   folly::FixedString<10> tmp1{"hello"}, tmp2{"world!"};
@@ -177,7 +184,6 @@ TEST(FixedStringSwapTest, RuntimeSwap) {
   EXPECT_STREQ((tmp1 + tmp2).c_str(), "world!hello");
 }
 
-#if FOLLY_USE_CPP14_CONSTEXPR
 constexpr folly::FixedString<10> constexpr_assign_string_test_1() {
   folly::FixedString<10> tmp1, tmp2{"world!"};
   tmp1 = tmp2;
@@ -205,7 +211,6 @@ TEST(FixedStringAssignTest, ConstexprAssignString) {
   static_assert(constexpr_assign_string_test_3() == "db", "");
   static_assert(constexpr_assign_string_test_4() == "dbye", "");
 }
-#endif
 
 TEST(FixedStringAssignTest, RuntimeAssignString) {
   folly::FixedString<10> tmp1, tmp2{"world!"};
@@ -219,7 +224,6 @@ TEST(FixedStringAssignTest, RuntimeAssignString) {
   EXPECT_STREQ("dby", tmp1.c_str());
 }
 
-#if FOLLY_USE_CPP14_CONSTEXPR
 constexpr folly::FixedString<10> constexpr_assign_literal_test_1() {
   folly::FixedString<10> tmp{"aaaaaaaaaa"};
   tmp = "hello";
@@ -244,7 +248,6 @@ TEST(FixedStringAssignTest, ConstexprAssignLiteral) {
   static_assert(constexpr_assign_literal_test_2() == "hello", "");
   static_assert(constexpr_assign_literal_test_3() == "good", "");
 }
-#endif
 
 TEST(FixedStringAssignTest, RuntimeAssignLiteral) {
   folly::FixedString<10> tmp{"aaaaaaaaaa"};
@@ -263,11 +266,11 @@ TEST(FixedStringIndexTest, Index) {
   static_assert(digits[2] == '2', "");
   static_assert(digits[9] == '9', "");
   static_assert(digits[10] == '\0', "");
-  #ifdef NDEBUG
+#ifdef NDEBUG
   // This should be allowed and work in constexpr mode since the internal array
   // is actually big enough and op[] does no parameter validation:
   static_assert(digits[11] == '\0', "");
-  #endif
+#endif
 
   static_assert(digits.at(0) == '0', "");
   static_assert(digits.at(1) == '1', "");
@@ -287,9 +290,9 @@ TEST(FixedStringCompareTest, Compare) {
   static_assert(tmp1 <= tmp2, "");
   static_assert(tmp2 > tmp1, "");
   static_assert(tmp2 >= tmp1, "");
-  static_assert(tmp2 == tmp2, ""); // @nolint
-  static_assert(tmp2 <= tmp2, ""); // @nolint
-  static_assert(tmp2 >= tmp2, ""); // @nolint
+  static_assert(tmp2 == tmp2, "");
+  static_assert(tmp2 <= tmp2, "");
+  static_assert(tmp2 >= tmp2, "");
   static_assert(!(tmp2 < tmp2), "");
   static_assert(!(tmp2 > tmp2), "");
 
@@ -333,7 +336,6 @@ TEST(FixedStringCompareTest, CompareStdString) {
   EXPECT_TRUE(tmp2 >= tmp1);
 }
 
-#if FOLLY_USE_CPP14_CONSTEXPR
 constexpr folly::FixedString<20> constexpr_append_string_test() {
   folly::FixedString<20> a{"hello"}, b{"X world!"};
   a.append(1u, ' ');
@@ -345,7 +347,6 @@ constexpr folly::FixedString<20> constexpr_append_string_test() {
 TEST(FixedStringAssignTest, ConstexprAppendString) {
   static_assert(constexpr_append_string_test() == "hello world!", "");
 }
-#endif
 
 TEST(FixedStringAssignTest, RuntimeAppendString) {
   folly::FixedString<20> a{"hello"}, b{"X world!"};
@@ -355,25 +356,24 @@ TEST(FixedStringAssignTest, RuntimeAppendString) {
   EXPECT_STREQ("hello world!", a.c_str());
 }
 
-#if FOLLY_USE_CPP14_CONSTEXPR
 constexpr folly::FixedString<20> constexpr_append_literal_test() {
   folly::FixedString<20> a{"hello"};
   a.append(1u, ' ');
-  a.append("X world!" + 2u, 5u);
-  a.append("X world!" + 7u);
+  a.append("world foo bar baz", 5u);
+  a.append("!");
   return a;
 }
 
 TEST(FixedStringAssignTest, ConstexprAppendLiteral) {
   static_assert(constexpr_append_literal_test() == "hello world!", "");
 }
-#endif
 
 TEST(FixedStringAssignTest, RuntimeAppendLiteral) {
   folly::FixedString<20> a{"hello"};
   a.append(1u, ' ');
-  a.append("X world!" + 2u, 5u);
-  a.append("X world!" + 7u);
+  constexpr char s[] = "X world!";
+  a.append(&s[2u], 5u);
+  a.append(&s[7u]);
   EXPECT_STREQ("hello world!", a.c_str());
 }
 
@@ -393,7 +393,6 @@ TEST(FixedStringCAppendTest, CAppendLiteral) {
   static_assert(tmp3 == "hello world!", "");
 }
 
-#if FOLLY_USE_CPP14_CONSTEXPR
 constexpr folly::FixedString<10> constexpr_replace_string_test() {
   folly::FixedString<10> tmp{"abcdefghij"};
   tmp.replace(1, 5, FS("XX"));
@@ -404,7 +403,6 @@ TEST(FixedStringReplaceTest, ConstexprReplaceString) {
   static_assert(constexpr_replace_string_test().size() == 7u, "");
   static_assert(constexpr_replace_string_test() == "aXXghij", "");
 }
-#endif
 
 TEST(FixedStringReplaceTest, RuntimeReplaceString) {
   folly::FixedString<10> tmp{"abcdefghij"};
@@ -637,11 +635,10 @@ TEST(FixedStringConversionTest, ConversionToStdString) {
   EXPECT_STREQ("another string", str.c_str());
 }
 
-#if FOLLY_USE_CPP14_CONSTEXPR
 constexpr std::size_t countSpacesReverse(folly::FixedString<50> s) {
   std::size_t count = 0u;
   auto i = s.rbegin();
-  for( ; i != s.rend(); ++i, --i, i++, i--, i+=1, i-=1, i+=1 ) {
+  for (; i != s.rend(); ++i, --i, i++, i--, i += 1, i -= 1, i += 1) {
     if (' ' == *i) {
       ++count;
     }
@@ -652,7 +649,6 @@ constexpr std::size_t countSpacesReverse(folly::FixedString<50> s) {
 TEST(FixedStringReverseIteratorTest, Cpp14ConstexprReverseIteration) {
   static_assert(3 == countSpacesReverse("This is a string"), "");
 }
-#endif
 
 TEST(FixedStringReverseIteratorTest, ConstexprReverseIteration) {
   static constexpr auto alpha = FS("abcdefghijklmnopqrstuvwxyz");
@@ -662,38 +658,19 @@ TEST(FixedStringReverseIteratorTest, ConstexprReverseIteration) {
   static_assert((alpha.rend() - 2) == (alpha.rbegin() + 24), "");
 }
 
-namespace GCC61971 {
-  // FixedString runs afoul of GCC #61971 (spurious -Warray-bounds)
-  // in optimized builds. The following test case triggers it for gcc-4.x.
-  // Test that FixedString suppresses the warning correctly.
-  // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=61971
-  constexpr auto xyz = folly::makeFixedString("xyz");
-  constexpr auto dot = folly::makeFixedString(".");
-
-  template <typename T1>
-  constexpr auto concatStuff(const T1& component) noexcept {
-    return xyz + dot + component;
-  }
-  constexpr auto co = folly::makeFixedString("co");
-
-  struct S {
-    std::string s{concatStuff(co)};
-  };
-} // namespace GCC61971
-
-TEST(FixedStringGCC61971, GCC61971) {
-  GCC61971::S s;
-  (void)s;
-}
-
-#include <folly/Range.h>
-
 TEST(FixedStringConversionTest, ConversionToFollyRange) {
-  // The following declaraction is static for compilers that haven't implemented
+  // The following declaration is static for compilers that haven't implemented
   // the resolution of:
   // http://www.open-std.org/jtc1/sc22/wg21/docs/cwg_defects.html#1454
   static constexpr folly::FixedString<16> tmp{"This is a string"};
   constexpr folly::StringPiece piece = tmp;
   static_assert(tmp.begin() == piece.begin(), "");
   static_assert(tmp.end() == piece.end(), "");
+}
+
+TEST(FixedStringConversionTest, ConversionToStringView) {
+  static constexpr folly::FixedString<16> tmp{"This is a string"};
+  constexpr std::string_view view = tmp;
+  static_assert(tmp.data() == view.data(), "");
+  static_assert(tmp.size() == view.size(), "");
 }

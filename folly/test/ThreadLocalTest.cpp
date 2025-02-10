@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,23 +35,43 @@
 #include <thread>
 #include <unordered_map>
 
+#include <boost/thread/barrier.hpp>
 #include <glog/logging.h>
 
 #include <folly/Memory.h>
 #include <folly/experimental/io/FsUtil.h>
+#include <folly/lang/Keep.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/Unistd.h>
 #include <folly/synchronization/Baton.h>
 #include <folly/system/ThreadId.h>
+#include <folly/testing/TestUtil.h>
 
 using namespace folly;
 
+extern "C" FOLLY_KEEP int* check_thread_local_get(ThreadLocal<int>& o) {
+  return o.get();
+}
+
+extern "C" FOLLY_KEEP int* check_thread_local_get_existing(
+    ThreadLocal<int>& o) {
+  return o.get_existing();
+}
+
+template <typename>
+struct static_meta_of;
+
+template <template <typename...> class X, typename A0, typename... A>
+struct static_meta_of<X<A0, A...>> {
+  using type = folly::threadlocal_detail::StaticMeta<A...>;
+};
+
 struct Widget {
   static int totalVal_;
+  static int totalMade_;
   int val_;
-  ~Widget() {
-    totalVal_ += val_;
-  }
+  Widget() : val_(0) { totalMade_++; }
+  ~Widget() { totalVal_ += val_; }
 
   static void customDeleter(Widget* w, TLPDestructionMode mode) {
     totalVal_ += (mode == TLPDestructionMode::ALL_THREADS) ? 1000 : 1;
@@ -59,14 +79,32 @@ struct Widget {
   }
 };
 int Widget::totalVal_ = 0;
+int Widget::totalMade_ = 0;
+
+struct MultiWidget {
+  int val_{0};
+  MultiWidget() = default;
+  ~MultiWidget() {
+    // force a reallocation in the destructor by
+    // allocating more than elementsCapacity
+
+    using TL = ThreadLocal<size_t>;
+    using TLMeta = static_meta_of<TL>::type;
+    auto const numElements = TLMeta::instance().elementsCapacity() + 1;
+    std::vector<ThreadLocal<size_t>> elems(numElements);
+    for (auto& t : elems) {
+      *t += 1;
+    }
+  }
+};
 
 TEST(ThreadLocalPtr, BasicDestructor) {
   Widget::totalVal_ = 0;
   ThreadLocalPtr<Widget> w;
   std::thread([&w]() {
-      w.reset(new Widget());
-      w.get()->val_ += 10;
-    }).join();
+    w.reset(new Widget());
+    w.get()->val_ += 10;
+  }).join();
   EXPECT_EQ(10, Widget::totalVal_);
 }
 
@@ -75,9 +113,9 @@ TEST(ThreadLocalPtr, CustomDeleter1) {
   {
     ThreadLocalPtr<Widget> w;
     std::thread([&w]() {
-        w.reset(new Widget(), Widget::customDeleter);
-        w.get()->val_ += 10;
-      }).join();
+      w.reset(new Widget(), Widget::customDeleter);
+      w.get()->val_ += 10;
+    }).join();
     EXPECT_EQ(11, Widget::totalVal_);
   }
   EXPECT_EQ(11, Widget::totalVal_);
@@ -129,11 +167,11 @@ TEST(ThreadLocalPtr, TestRelease) {
   ThreadLocalPtr<Widget> w;
   std::unique_ptr<Widget> wPtr;
   std::thread([&w, &wPtr]() {
-      w.reset(new Widget());
-      w.get()->val_ += 10;
+    w.reset(new Widget());
+    w.get()->val_ += 10;
 
-      wPtr.reset(w.release());
-    }).join();
+    wPtr.reset(w.release());
+  }).join();
   EXPECT_EQ(0, Widget::totalVal_);
   wPtr.reset();
   EXPECT_EQ(10, Widget::totalVal_);
@@ -145,14 +183,13 @@ TEST(ThreadLocalPtr, CreateOnThreadExit) {
   ThreadLocalPtr<int> tl;
 
   std::thread([&] {
-    tl.reset(new int(1),
-             [&](int* ptr, TLPDestructionMode /* mode */) {
-               delete ptr;
-               // This test ensures Widgets allocated here are not leaked.
-               ++w.get()->val_;
-               ThreadLocal<Widget> wl;
-               ++wl.get()->val_;
-             });
+    tl.reset(new int(1), [&](int* ptr, TLPDestructionMode /* mode */) {
+      delete ptr;
+      // This test ensures Widgets allocated here are not leaked.
+      ++w.get()->val_;
+      ThreadLocal<Widget> wl;
+      ++wl.get()->val_;
+    });
   }).join();
   EXPECT_EQ(2, Widget::totalVal_);
 }
@@ -166,29 +203,29 @@ TEST(ThreadLocalPtr, CustomDeleter2) {
   enum class State {
     START,
     DONE,
-    EXIT
+    EXIT,
   };
   State state = State::START;
   {
     ThreadLocalPtr<Widget> w;
     t = std::thread([&]() {
-        w.reset(new Widget(), Widget::customDeleter);
-        w.get()->val_ += 10;
+      w.reset(new Widget(), Widget::customDeleter);
+      w.get()->val_ += 10;
 
-        // Notify main thread that we're done
-        {
-          std::unique_lock<std::mutex> lock(mutex);
-          state = State::DONE;
-          cv.notify_all();
-        }
+      // Notify main thread that we're done
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        state = State::DONE;
+        cv.notify_all();
+      }
 
-        // Wait for main thread to allow us to exit
-        {
-          std::unique_lock<std::mutex> lock(mutex);
-          while (state != State::EXIT) {
-            cv.wait(lock);
-          }
+      // Wait for main thread to allow us to exit
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        while (state != State::EXIT) {
+          cv.wait(lock);
         }
+      }
     });
 
     // Wait for main thread to start (and set w.get()->val_)
@@ -218,11 +255,91 @@ TEST(ThreadLocalPtr, CustomDeleter2) {
   EXPECT_EQ(1010, Widget::totalVal_);
 }
 
+TEST(ThreadLocalPtr, SharedPtr) {
+  ThreadLocalPtr<int> tlp;
+  auto sp = std::make_shared<int>(7);
+  EXPECT_EQ(1, sp.use_count());
+  tlp.reset(sp);
+  EXPECT_EQ(2, sp.use_count());
+  EXPECT_EQ(sp.get(), tlp.get());
+  tlp.reset();
+  EXPECT_EQ(1, sp.use_count());
+  EXPECT_EQ(static_cast<void*>(nullptr), tlp.get());
+}
+
+TEST(ThreadLocal, NotDefaultConstructible) {
+  struct Object {
+    int value;
+    explicit Object(int v) : value{v} {}
+  };
+  std::atomic<int> a{};
+  ThreadLocal<Object> o{[&a] { return Object(a++); }};
+  EXPECT_EQ(0, o->value);
+  std::thread([&] { EXPECT_EQ(1, o->value); }).join();
+}
+
+TEST(ThreadLocal, GetWithoutCreateUncreated) {
+  Widget::totalVal_ = 0;
+  Widget::totalMade_ = 0;
+  ThreadLocal<Widget> w;
+  std::thread([&w]() {
+    auto ptr = w.get_existing();
+    if (ptr) {
+      ptr->val_++;
+    }
+  }).join();
+  EXPECT_EQ(0, Widget::totalMade_);
+}
+
+TEST(ThreadLocal, GetWithoutCreateGets) {
+  Widget::totalVal_ = 0;
+  Widget::totalMade_ = 0;
+  ThreadLocal<Widget> w;
+  std::thread([&w]() {
+    w->val_++;
+    auto ptr = w.get_existing();
+    if (ptr) {
+      ptr->val_++;
+    }
+  }).join();
+  EXPECT_EQ(1, Widget::totalMade_);
+  EXPECT_EQ(2, Widget::totalVal_);
+}
+
 TEST(ThreadLocal, BasicDestructor) {
   Widget::totalVal_ = 0;
   ThreadLocal<Widget> w;
   std::thread([&w]() { w->val_ += 10; }).join();
   EXPECT_EQ(10, Widget::totalVal_);
+}
+
+TEST(ThreadLocal, MoveCtorFrom) {
+  int calls = 0;
+  ThreadLocal<int> src{[&] { return ++calls; }};
+  EXPECT_EQ(1, *src);
+  auto dst = static_cast<ThreadLocal<int>&&>(src);
+  EXPECT_THROW(*src, std::bad_function_call);
+  std::thread([&] { EXPECT_THROW(*src, std::bad_function_call); }).join();
+  EXPECT_EQ(1, *dst);
+  std::thread([&] { EXPECT_EQ(2, *dst); }).join();
+}
+
+TEST(ThreadLocal, MoveAssignFrom) {
+  int calls = 0;
+  ThreadLocal<int> src{[&] { return ++calls; }};
+  EXPECT_EQ(1, *src);
+  ThreadLocal<int> dst;
+  dst = static_cast<ThreadLocal<int>&&>(src);
+  EXPECT_THROW(*src, std::bad_function_call);
+  std::thread([&] { EXPECT_THROW(*src, std::bad_function_call); }).join();
+  EXPECT_EQ(1, *dst);
+  std::thread([&] { EXPECT_EQ(2, *dst); }).join();
+}
+
+// this should force a realloc of the ElementWrapper array
+TEST(ThreadLocal, ReallocDestructor) {
+  ThreadLocal<MultiWidget> w;
+  std::thread([&w]() { w->val_ += 10; }).join();
 }
 
 TEST(ThreadLocal, SimpleRepeatDestructor) {
@@ -265,7 +382,7 @@ TEST(ThreadLocal, InterleavedDestructors) {
       ++thIter;
     }
   });
-  FOR_EACH_RANGE(i, 0, wVersionMax) {
+  FOR_EACH_RANGE (i, 0, wVersionMax) {
     int thIterPrev = 0;
     {
       std::lock_guard<std::mutex> g(lock);
@@ -289,14 +406,11 @@ TEST(ThreadLocal, InterleavedDestructors) {
 }
 
 class SimpleThreadCachedInt {
-
   class NewTag;
-  ThreadLocal<int,NewTag> val_;
+  ThreadLocal<int, NewTag> val_;
 
  public:
-  void add(int val) {
-    *val_ += val;
-  }
+  void add(int val) { *val_ += val; }
 
   int read() {
     int ret = 0;
@@ -311,27 +425,29 @@ TEST(ThreadLocalPtr, AccessAllThreadsCounter) {
   const int kNumThreads = 256;
   SimpleThreadCachedInt stci[kNumThreads + 1];
   std::atomic<bool> run(true);
-  std::atomic<int> totalAtomic;
-  ;
+  std::atomic<int> totalAtomic{0};
   std::vector<std::thread> threads;
   // thread i will increment all the thread locals
   // in the range 0..i
   for (int i = 0; i < kNumThreads; ++i) {
-    threads.push_back(std::thread([i, // i needs to be captured by value
-                                   &stci,
-                                   &run,
-                                   &totalAtomic]() {
-      for (int j = 0; j <= i; j++) {
-        stci[j].add(1);
-      }
+    threads.push_back(std::thread(
+        [i, // i needs to be captured by value
+         &stci,
+         &run,
+         &totalAtomic]() {
+          for (int j = 0; j <= i; j++) {
+            stci[j].add(1);
+          }
 
-      totalAtomic.fetch_add(1);
-      while (run.load()) {
-        usleep(100);
-      }
-    }));
+          totalAtomic.fetch_add(1);
+          while (run.load()) {
+            usleep(100);
+          }
+        }));
   }
-  while (totalAtomic.load() != kNumThreads) { usleep(100); }
+  while (totalAtomic.load() != kNumThreads) {
+    usleep(100);
+  }
   for (int i = 0; i <= kNumThreads; i++) {
     EXPECT_EQ(kNumThreads - i, stci[i].read());
   }
@@ -414,14 +530,10 @@ class FillObject {
     }
   }
 
-  ~FillObject() {
-    ++gDestroyed;
-  }
+  ~FillObject() { ++gDestroyed; }
 
  private:
-  uint64_t val() const {
-    return (idx_ << 40) | folly::getCurrentThreadID();
-  }
+  uint64_t val() const { return (idx_ << 40) | folly::getCurrentThreadID(); }
 
   uint64_t idx_;
   uint64_t data_[kFillObjectSize];
@@ -460,15 +572,89 @@ TEST(ThreadLocal, Stress) {
   EXPECT_EQ(numFillObjects * numThreads * numReps, gDestroyed);
 }
 
+struct StressAccessTag {};
+using TLPInt = ThreadLocalPtr<int, Tag>;
+
+static void tlpIntCustomDeleter(int* p, TLPDestructionMode /*unused*/) {
+  delete p;
+}
+
+template <typename Op, typename Check>
+void StresAccessTest(Op op, Check check) {
+  static constexpr size_t kNumThreads = 16;
+  static constexpr size_t kNumLoops = 10000;
+
+  TLPInt ptr;
+  ptr.reset(new int(0));
+  std::atomic<bool> running{true};
+
+  boost::barrier barrier(kNumThreads + 1);
+
+  std::vector<std::thread> threads;
+
+  for (size_t k = 0; k < kNumThreads; ++k) {
+    threads.emplace_back([&] {
+      ptr.reset(new int(1));
+
+      barrier.wait();
+
+      while (running.load()) {
+        op(ptr);
+      }
+    });
+  }
+
+  // wait for the threads to be up and running
+  barrier.wait();
+
+  for (size_t n = 0; n < kNumLoops; n++) {
+    int sum = 0;
+    auto accessor = ptr.accessAllThreads();
+    for (auto& i : accessor) {
+      sum += i;
+    }
+
+    check(sum, kNumThreads);
+  }
+
+  running.store(false);
+  for (auto& t : threads) {
+    t.join();
+  }
+}
+
+TEST(ThreadLocal, StressAccessReset) {
+  StresAccessTest(
+      [](TLPInt& ptr) { ptr.reset(new int(1)); },
+      [](size_t sum, size_t numThreads) { EXPECT_EQ(sum, numThreads); });
+}
+
+TEST(ThreadLocal, StressAccessResetDeleter) {
+  StresAccessTest(
+      [](TLPInt& ptr) { ptr.reset(new int(1), tlpIntCustomDeleter); },
+      [](size_t sum, size_t numThreads) { EXPECT_EQ(sum, numThreads); });
+}
+
+TEST(ThreadLocal, StressAccessRelease) {
+  StresAccessTest(
+      [](TLPInt& ptr) {
+        auto* p = ptr.release();
+        delete p;
+        ptr.reset(new int(1));
+      },
+      [](size_t sum, size_t numThreads) { EXPECT_LE(sum, numThreads); });
+}
+
 // Yes, threads and fork don't mix
 // (http://cppwisdom.quora.com/Why-threads-and-fork-dont-mix) but if you're
 // stupid or desperate enough to try, we shouldn't stand in your way.
 namespace {
 class HoldsOne {
  public:
-  HoldsOne() : value_(1) { }
+  HoldsOne() : value_(1) {}
   // Do an actual access to catch the buggy case where this == nullptr
   int value() const { return value_; }
+
  private:
   int value_;
 };
@@ -489,27 +675,29 @@ int totalValue() {
 
 #ifdef FOLLY_HAVE_PTHREAD_ATFORK
 TEST(ThreadLocal, Fork) {
-  EXPECT_EQ(1, ptr->value());  // ensure created
+  EXPECT_EQ(1, ptr->value()); // ensure created
   EXPECT_EQ(1, totalValue());
   // Spawn a new thread
 
   std::mutex mutex;
   bool started = false;
   std::condition_variable startedCond;
-  bool stopped = false;
-  std::condition_variable stoppedCond;
+  std::atomic<bool> stopped = false;
 
-  std::thread t([&] () {
-    EXPECT_EQ(1, ptr->value());  // ensure created
+  std::thread t([&]() {
+    EXPECT_EQ(1, ptr->value()); // ensure created
     {
       std::unique_lock<std::mutex> lock(mutex);
       started = true;
       startedCond.notify_all();
     }
     {
-      std::unique_lock<std::mutex> lock(mutex);
       while (!stopped) {
-        stoppedCond.wait(lock);
+        // Keep invoking accessAllThreads which will acquire
+        // the StaticMeta internal locks. The child() after fork should
+        // not deadlock on the locks being inconsistent.
+        EXPECT_EQ(2, totalValue());
+        usleep(100); /* sleep override */
       }
     }
   });
@@ -531,8 +719,10 @@ TEST(ThreadLocal, Fork) {
     // exit successfully if v == 1 (one thread)
     // diagnostic error code otherwise :)
     switch (v) {
-    case 1: _exit(0);
-    case 0: _exit(1);
+      case 1:
+        _exit(0);
+      case 0:
+        _exit(1);
     }
     _exit(2);
   } else if (pid > 0) {
@@ -547,12 +737,7 @@ TEST(ThreadLocal, Fork) {
 
   EXPECT_EQ(2, totalValue());
 
-  {
-    std::unique_lock<std::mutex> lock(mutex);
-    stopped = true;
-    stoppedCond.notify_all();
-  }
-
+  stopped = true;
   t.join();
 
   EXPECT_EQ(1, totalValue());
@@ -603,17 +788,17 @@ TEST(ThreadLocal, Fork2) {
 #endif
 
 TEST(ThreadLocal, SHARED_LIBRARY_TEST_NAME) {
-  auto exe = fs::executable_path();
-  auto lib = exe.parent_path() / "thread_local_test_lib.so";
+  auto const lib =
+      folly::test::find_resource("folly/test/thread_local_test_lib.so");
   auto handle = dlopen(lib.string().c_str(), RTLD_LAZY);
   ASSERT_NE(nullptr, handle)
       << "unable to load " << lib.string() << ": " << dlerror();
 
   typedef void (*useA_t)();
   dlerror();
-  useA_t useA = (useA_t) dlsym(handle, "useA");
+  useA_t useA = (useA_t)dlsym(handle, "useA");
 
-  const char *dlsym_error = dlerror();
+  const char* dlsym_error = dlerror();
   EXPECT_EQ(nullptr, dlsym_error);
   ASSERT_NE(nullptr, useA);
 
@@ -622,16 +807,16 @@ TEST(ThreadLocal, SHARED_LIBRARY_TEST_NAME) {
   folly::Baton<> b11, b12, b21, b22;
 
   std::thread t1([&]() {
-      useA();
-      b11.post();
-      b12.wait();
-    });
+    useA();
+    b11.post();
+    b12.wait();
+  });
 
   std::thread t2([&]() {
-      useA();
-      b21.post();
-      b22.wait();
-    });
+    useA();
+    b21.post();
+    b22.wait();
+  });
 
   b11.wait();
   b21.wait();
@@ -646,17 +831,3 @@ TEST(ThreadLocal, SHARED_LIBRARY_TEST_NAME) {
 }
 
 #endif
-
-namespace folly { namespace threadlocal_detail {
-struct PthreadKeyUnregisterTester {
-  PthreadKeyUnregister p;
-  constexpr PthreadKeyUnregisterTester() = default;
-};
-} // namespace threadlocal_detail
-} // namespace folly
-
-TEST(ThreadLocal, UnregisterClassHasConstExprCtor) {
-  folly::threadlocal_detail::PthreadKeyUnregisterTester x;
-  // yep!
-  SUCCEED();
-}

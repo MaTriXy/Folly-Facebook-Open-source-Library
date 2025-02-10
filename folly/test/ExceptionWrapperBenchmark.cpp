@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/ExceptionWrapper.h>
 
 #include <atomic>
@@ -24,8 +25,58 @@
 #include <folly/Benchmark.h>
 #include <folly/portability/GFlags.h>
 
-DEFINE_int32(num_threads, 32, "Number of threads to run concurrency "
-                              "benchmarks");
+DEFINE_int32(
+    num_threads,
+    32,
+    "Number of threads to run concurrency "
+    "benchmarks");
+
+// `get_exception()` on an already-created wrapper is ~23ns.
+// Icelake, -bm_min_iters=1000000 -bm_max_secs=2
+BENCHMARK(get_exception, iters) {
+  folly::BenchmarkSuspender benchSuspender;
+  folly::exception_wrapper ew{std::runtime_error("test")};
+  std::exception* ep = nullptr;
+  benchSuspender.dismissing([&] {
+    while (iters--) {
+      ep = ew.get_exception();
+      folly::doNotOptimizeAway(ep);
+    }
+  });
+  CHECK_EQ("test", std::string(ep->what()));
+}
+
+BENCHMARK_DRAW_LINE();
+
+// Moving is 0.5ns.  Icelake, -bm_min_iters=1000000 -bm_max_secs=2
+BENCHMARK(move_exception_wrapper_twice, iters) {
+  folly::BenchmarkSuspender benchSuspender;
+  folly::exception_wrapper ew{std::runtime_error("test")};
+  benchSuspender.dismissing([&] {
+    while (iters--) {
+      folly::exception_wrapper moved = std::move(ew);
+      folly::doNotOptimizeAway(moved);
+      ew = std::move(moved);
+    }
+  });
+  CHECK_EQ("std::runtime_error: test", ew.what());
+}
+
+// Copying `exception_ptr` is 23ns: a few function calls plus an atomic
+// refcount increment.  Icelake, -bm_min_iters=1000000 -bm_max_secs=2
+BENCHMARK_RELATIVE(copy_exception_wrapper_twice, iters) {
+  folly::BenchmarkSuspender benchSuspender;
+  folly::exception_wrapper ew{std::runtime_error("test")};
+  benchSuspender.dismissing([&] {
+    while (iters--) {
+      folly::exception_wrapper copy = ew;
+      ew = copy;
+    }
+  });
+  CHECK_EQ("std::runtime_error: test", ew.what());
+}
+
+BENCHMARK_DRAW_LINE();
 
 /*
  * Use case 1: Library wraps errors in either exception_wrapper or
@@ -58,7 +109,8 @@ BENCHMARK(exception_ptr_create_and_test_concurrent, iters) {
   BENCHMARK_SUSPEND {
     for (int t = 0; t < FLAGS_num_threads; ++t) {
       threads.emplace_back([&go, iters] {
-        while (!go) { }
+        while (!go) {
+        }
         std::runtime_error e("payload");
         for (size_t i = 0; i < iters; ++i) {
           auto ep = std::make_exception_ptr(e);
@@ -80,7 +132,8 @@ BENCHMARK_RELATIVE(exception_wrapper_create_and_test_concurrent, iters) {
   BENCHMARK_SUSPEND {
     for (int t = 0; t < FLAGS_num_threads; ++t) {
       threads.emplace_back([&go, iters] {
-        while (!go) { }
+        while (!go) {
+        }
         std::runtime_error e("payload");
         for (size_t i = 0; i < iters; ++i) {
           auto ew = folly::make_exception_wrapper<std::runtime_error>(e);
@@ -142,7 +195,8 @@ BENCHMARK(exception_ptr_create_and_throw_concurrent, iters) {
   BENCHMARK_SUSPEND {
     for (int t = 0; t < FLAGS_num_threads; ++t) {
       threads.emplace_back([&go, iters] {
-        while (!go) { }
+        while (!go) {
+        }
         std::runtime_error e("payload");
         for (size_t i = 0; i < iters; ++i) {
           auto ep = std::make_exception_ptr(e);
@@ -166,7 +220,8 @@ BENCHMARK_RELATIVE(exception_wrapper_create_and_throw_concurrent, iters) {
   BENCHMARK_SUSPEND {
     for (int t = 0; t < FLAGS_num_threads; ++t) {
       threads.emplace_back([&go, iters] {
-        while (!go) { }
+        while (!go) {
+        }
         std::runtime_error e("payload");
         for (size_t i = 0; i < iters; ++i) {
           auto ew = folly::make_exception_wrapper<std::runtime_error>(e);
@@ -190,7 +245,8 @@ BENCHMARK_RELATIVE(exception_wrapper_create_and_cast_concurrent, iters) {
   BENCHMARK_SUSPEND {
     for (int t = 0; t < FLAGS_num_threads; ++t) {
       threads.emplace_back([&go, iters] {
-        while (!go) { }
+        while (!go) {
+        }
         std::runtime_error e("payload");
         for (size_t i = 0; i < iters; ++i) {
           auto ew = folly::make_exception_wrapper<std::runtime_error>(e);
@@ -206,8 +262,8 @@ BENCHMARK_RELATIVE(exception_wrapper_create_and_cast_concurrent, iters) {
   }
 }
 
-int main(int argc, char *argv[]) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+int main(int argc, char* argv[]) {
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }
@@ -217,6 +273,11 @@ _bin/folly/test/exception_wrapper_benchmark --bm_min_iters=100000
 ============================================================================
 folly/test/ExceptionWrapperBenchmark.cpp        relative  time/iter  iters/s
 ============================================================================
+get_exception                                              22.78ns    43.90M
+----------------------------------------------------------------------------
+move_exception_wrapper_twice                              936.25ps     1.07G
+copy_exception_wrapper_twice                    1.9884%    47.09ns    21.24M
+----------------------------------------------------------------------------
 exception_ptr_create_and_test                                2.03us  492.88K
 exception_wrapper_create_and_test               2542.59%    79.80ns   12.53M
 ----------------------------------------------------------------------------

@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <folly/Range.h>
@@ -64,6 +65,18 @@ class LogWriter {
   }
 
   /**
+   * Write a message synchronously.
+   *
+   * By default, a synchronous message write is simply a message write followed
+   * by a flush(), but different async log handlers may override this to create
+   * different synchronous write behaviours.
+   */
+  virtual void writeMessageSync(std::string&& buffer, uint32_t flags = 0) {
+    writeMessage(buffer, flags);
+    flush();
+  }
+
+  /**
    * Block until all messages that have already been sent to this LogWriter
    * have been written.
    *
@@ -72,5 +85,10 @@ class LogWriter {
    * will not necessarily be processed by the flush call.
    */
   virtual void flush() = 0;
+
+  /**
+   * Is the log writer writing to a tty or not.
+   */
+  virtual bool ttyOutput() const = 0;
 };
 } // namespace folly

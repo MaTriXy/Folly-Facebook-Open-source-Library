@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,17 +36,11 @@ struct SynchronizedPtrLockedElement {
   explicit SynchronizedPtrLockedElement(LockHolder&& holder)
       : holder_(std::move(holder)) {}
 
-  Element& operator*() const {
-    return **holder_;
-  }
+  Element& operator*() const { return **holder_; }
 
-  Element* operator->() const {
-    return &**holder_;
-  }
+  Element* operator->() const { return &**holder_; }
 
-  explicit operator bool() const {
-    return static_cast<bool>(*holder_);
-  }
+  explicit operator bool() const { return static_cast<bool>(*holder_); }
 
  private:
   LockHolder holder_;
@@ -91,9 +85,7 @@ class SynchronizedPtr {
     return function(*rlock());
   }
 
-  write_locked_element wlock() {
-    return write_locked_element(inner_.wlock());
-  }
+  write_locked_element wlock() { return write_locked_element(inner_.wlock()); }
 
   template <class Function>
   auto withWLock(Function&& function) {
@@ -104,9 +96,7 @@ class SynchronizedPtr {
   // it difficult to get a read-locked pointer because that provides read-locked
   // non-const access to the element, and the purpose of this class is to
   // discourage that.
-  write_locked_pointer wlockPointer() {
-    return inner_.wlock();
-  }
+  write_locked_pointer wlockPointer() { return inner_.wlock(); }
 
   template <class Function>
   auto withWLockPointer(Function&& function) {

@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,20 +29,75 @@
 
 #include <folly/ConstexprMath.h>
 #include <folly/Likely.h>
+#include <folly/Portability.h>
 #include <folly/Traits.h>
+#include <folly/Utility.h>
 #include <folly/functional/Invoke.h>
 #include <folly/lang/Align.h>
 #include <folly/lang/Exception.h>
+#include <folly/lang/Thunk.h>
+#include <folly/memory/Malloc.h>
 #include <folly/portability/Config.h>
+#include <folly/portability/Constexpr.h>
 #include <folly/portability/Malloc.h>
 
 namespace folly {
 
-#if _POSIX_C_SOURCE >= 200112L || _XOPEN_SOURCE >= 600 || \
-    (defined(__ANDROID__) && (__ANDROID_API__ > 15)) ||   \
-    (defined(__APPLE__) &&                                \
-     (__MAC_OS_X_VERSION_MIN_REQUIRED >= __MAC_10_6 ||    \
-      __IPHONE_OS_VERSION_MIN_REQUIRED >= __IPHONE_3_0))
+namespace access {
+
+/// to_address_fn
+/// to_address
+///
+/// mimic: std::to_address (C++20)
+///
+/// adapted from: https://en.cppreference.com/w/cpp/memory/to_address, CC-BY-SA
+struct to_address_fn {
+ private:
+  template <template <typename...> typename T, typename A, typename... B>
+  static tag_t<A> get_first_arg(tag_t<T<A, B...>>);
+  template <typename T>
+  using first_arg_of = type_list_element_t<0, decltype(get_first_arg(tag<T>))>;
+  template <typename T>
+  using detect_element_type = typename T::element_type;
+  template <typename T>
+  using element_type_of =
+      detected_or_t<first_arg_of<T>, detect_element_type, T>;
+
+  template <typename T>
+  using detect_to_address =
+      decltype(std::pointer_traits<T>::to_address(FOLLY_DECLVAL(T const&)));
+
+  template <typename T>
+  static inline constexpr bool use_pointer_traits_to_address = Conjunction<
+      is_detected<element_type_of, T>,
+      is_detected<detect_to_address, T>>::value;
+
+ public:
+  template <typename T>
+  constexpr T* operator()(T* p) const noexcept {
+    static_assert(!std::is_function_v<T>);
+    return p;
+  }
+
+  template <typename T>
+  constexpr auto operator()(T const& p) const noexcept {
+    if constexpr (use_pointer_traits_to_address<T>) {
+      static_assert(noexcept(std::pointer_traits<T>::to_address(p)));
+      return std::pointer_traits<T>::to_address(p);
+    } else {
+      static_assert(noexcept(operator()(p.operator->())));
+      return operator()(p.operator->());
+    }
+  }
+};
+inline constexpr to_address_fn to_address;
+
+} // namespace access
+
+#if (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 200112L) || \
+    (defined(_XOPEN_SOURCE) && _XOPEN_SOURCE >= 600) ||         \
+    (defined(__ANDROID__) && (__ANDROID_API__ > 16)) ||         \
+    (defined(__APPLE__)) || defined(__FreeBSD__) || defined(__wasm32__)
 
 inline void* aligned_malloc(size_t size, size_t align) {
   // use posix_memalign, but mimic the behaviour of memalign
@@ -77,6 +132,101 @@ inline void aligned_free(void* aligned_ptr) {
 
 #endif
 
+namespace detail {
+template <typename Alloc, size_t kAlign, bool kAllocate>
+void rawOverAlignedImpl(Alloc const& alloc, size_t n, void*& raw) {
+  static_assert((kAlign & (kAlign - 1)) == 0, "Align must be a power of 2");
+
+  using AllocTraits = std::allocator_traits<Alloc>;
+  using T = typename AllocTraits::value_type;
+
+  constexpr bool kCanBypass = std::is_same<Alloc, std::allocator<T>>::value;
+
+  // BaseType is a type that gives us as much alignment as we need if
+  // we can get it naturally, otherwise it is aligned as max_align_t.
+  // kBaseAlign is both the alignment and size of this type.
+  constexpr size_t kBaseAlign = constexpr_min(kAlign, alignof(max_align_t));
+  using BaseType = std::aligned_storage_t<kBaseAlign, kBaseAlign>;
+  using BaseAllocTraits =
+      typename AllocTraits::template rebind_traits<BaseType>;
+  using BaseAlloc = typename BaseAllocTraits::allocator_type;
+  static_assert(
+      sizeof(BaseType) == kBaseAlign && alignof(BaseType) == kBaseAlign, "");
+
+#if defined(__cpp_sized_deallocation)
+  if (kCanBypass && kAlign == kBaseAlign) {
+    // until std::allocator uses sized deallocation, it is worth the
+    // effort to bypass it when we are able
+    if (kAllocate) {
+      raw = ::operator new(n * sizeof(T));
+    } else {
+      ::operator delete(raw, n * sizeof(T));
+    }
+    return;
+  }
+#endif
+
+  if (kCanBypass && kAlign > kBaseAlign) {
+    // allocating as BaseType isn't sufficient to get alignment, but
+    // since we can bypass Alloc we can use something like posix_memalign.
+    if (kAllocate) {
+      raw = aligned_malloc(n * sizeof(T), kAlign);
+    } else {
+      aligned_free(raw);
+    }
+    return;
+  }
+
+  // we're not allowed to bypass Alloc, or we don't want to
+  BaseAlloc a(alloc);
+
+  // allocation size is counted in sizeof(BaseType)
+  size_t quanta = (n * sizeof(T) + kBaseAlign - 1) / sizeof(BaseType);
+  if (kAlign <= kBaseAlign) {
+    // rebinding Alloc to BaseType is sufficient to get us the alignment
+    // we want, happy path
+    if (kAllocate) {
+      raw = static_cast<void*>(
+          std::addressof(*BaseAllocTraits::allocate(a, quanta)));
+    } else {
+      BaseAllocTraits::deallocate(
+          a,
+          std::pointer_traits<typename BaseAllocTraits::pointer>::pointer_to(
+              *static_cast<BaseType*>(raw)),
+          quanta);
+    }
+    return;
+  }
+
+  // Overaligned and custom allocator, our only option is to
+  // overallocate and store a delta to the actual allocation just
+  // before the returned ptr.
+  //
+  // If we give ourselves kAlign extra bytes, then since
+  // sizeof(BaseType) divides kAlign we can meet alignment while
+  // getting a prefix of one BaseType.  If we happen to get a
+  // kAlign-aligned block, then we can return a pointer to underlying
+  // + kAlign, otherwise there will be at least kBaseAlign bytes in
+  // the unused prefix of the first kAlign-aligned block.
+  if (kAllocate) {
+    char* base = reinterpret_cast<char*>(std::addressof(
+        *BaseAllocTraits::allocate(a, quanta + kAlign / sizeof(BaseType))));
+    size_t byteDelta =
+        kAlign - (reinterpret_cast<uintptr_t>(base) & (kAlign - 1));
+    raw = static_cast<void*>(base + byteDelta);
+    static_cast<size_t*>(raw)[-1] = byteDelta;
+  } else {
+    size_t byteDelta = static_cast<size_t*>(raw)[-1];
+    char* base = static_cast<char*>(raw) - byteDelta;
+    BaseAllocTraits::deallocate(
+        a,
+        std::pointer_traits<typename BaseAllocTraits::pointer>::pointer_to(
+            *reinterpret_cast<BaseType*>(base)),
+        quanta + kAlign / sizeof(BaseType));
+  }
+}
+} // namespace detail
+
 // Works like std::allocator_traits<Alloc>::allocate, but handles
 // over-aligned types.  Feel free to manually specify any power of two as
 // the Align template arg.  Must be matched with deallocateOverAligned.
@@ -86,51 +236,13 @@ template <
     typename Alloc,
     size_t kAlign = alignof(typename std::allocator_traits<Alloc>::value_type)>
 typename std::allocator_traits<Alloc>::pointer allocateOverAligned(
-    Alloc const& alloc,
-    size_t n) {
-  static_assert((kAlign & (kAlign - 1)) == 0, "Align must be a power of 2");
-
-  using AllocTraits = std::allocator_traits<Alloc>;
-  using T = typename AllocTraits::value_type;
-
-  constexpr size_t kBaseAlign = constexpr_min(kAlign, alignof(max_align_t));
-  using BaseType = std::aligned_storage_t<kBaseAlign, kBaseAlign>;
-  using BaseAllocTraits =
-      typename AllocTraits::template rebind_traits<BaseType>;
-  using BaseAlloc = typename BaseAllocTraits::allocator_type;
-  static_assert(
-      sizeof(BaseType) == kBaseAlign && alignof(BaseType) == kBaseAlign, "");
-
-  void* rv;
-  if (kAlign > kBaseAlign && std::is_same<Alloc, std::allocator<T>>::value) {
-    // allocating as BaseType isn't sufficient, but it is safe to bypass
-    // std::allocator
-    rv = aligned_malloc(n * sizeof(T), kAlign);
-  } else {
-    BaseAlloc a(alloc);
-    size_t quanta = (n * sizeof(T) + kBaseAlign - 1) / kBaseAlign;
-    if (kAlign <= kBaseAlign) {
-      // not actually over-aligned, happy path
-      rv = static_cast<void*>(
-          std::addressof(*BaseAllocTraits::allocate(a, quanta)));
-    } else {
-      static_assert(kAlign == kBaseAlign || kBaseAlign >= sizeof(size_t), "");
-
-      // if we give ourselves kAlign extra bytes, then since kBaseAlign
-      // divides kAlign we can meet alignment while getting a prefix of
-      // one kBaseAlign.  We wouldn't be over-aligned unless kBaseAlign
-      // was already as big as possible, so this is enough space to store
-      // a size_t.
-      char* base = reinterpret_cast<char*>(std::addressof(
-          *BaseAllocTraits::allocate(a, quanta + kAlign / kBaseAlign)));
-      size_t delta =
-          kAlign - (reinterpret_cast<uintptr_t>(base) & (kAlign - 1));
-      rv = static_cast<void*>(base + delta);
-      static_cast<size_t*>(rv)[-1] = delta;
-    }
-  }
-  return std::pointer_traits<typename AllocTraits::pointer>::pointer_to(
-      *static_cast<T*>(rv));
+    Alloc const& alloc, size_t n) {
+  void* raw = nullptr;
+  detail::rawOverAlignedImpl<Alloc, kAlign, true>(alloc, n, raw);
+  return std::pointer_traits<typename std::allocator_traits<Alloc>::pointer>::
+      pointer_to(
+          *static_cast<typename std::allocator_traits<Alloc>::value_type*>(
+              raw));
 }
 
 template <
@@ -140,36 +252,8 @@ void deallocateOverAligned(
     Alloc const& alloc,
     typename std::allocator_traits<Alloc>::pointer ptr,
     size_t n) {
-  static_assert((kAlign & (kAlign - 1)) == 0, "Align must be a power of 2");
-
-  using AllocTraits = std::allocator_traits<Alloc>;
-  using T = typename AllocTraits::value_type;
-
-  constexpr size_t kBaseAlign = constexpr_min(kAlign, alignof(max_align_t));
-  using BaseType = std::aligned_storage_t<kBaseAlign, kBaseAlign>;
-  using BaseAllocTraits =
-      typename AllocTraits::template rebind_traits<BaseType>;
-  using BaseAlloc = typename BaseAllocTraits::allocator_type;
-  static_assert(
-      sizeof(BaseType) == kBaseAlign && alignof(BaseType) == kBaseAlign, "");
-
   void* raw = static_cast<void*>(std::addressof(*ptr));
-  if (kAlign > kBaseAlign && std::is_same<Alloc, std::allocator<T>>::value) {
-    aligned_free(raw);
-  } else {
-    BaseAlloc a(alloc);
-    size_t quanta = (n * sizeof(T) + kBaseAlign - 1) / kBaseAlign;
-    if (kAlign > kBaseAlign) {
-      size_t delta = static_cast<size_t*>(raw)[-1];
-      raw = static_cast<void*>(static_cast<char*>(raw) - delta);
-      quanta += kAlign / kBaseAlign;
-    }
-    BaseAllocTraits::deallocate(
-        a,
-        std::pointer_traits<typename BaseAllocTraits::pointer>::pointer_to(
-            *static_cast<BaseType*>(raw)),
-        quanta);
-  }
+  detail::rawOverAlignedImpl<Alloc, kAlign, false>(alloc, n, raw);
 }
 
 template <
@@ -195,41 +279,6 @@ size_t allocationBytesForOverAligned(size_t n) {
 }
 
 /**
- * For exception safety and consistency with make_shared. Erase me when
- * we have std::make_unique().
- *
- * @author Louis Brandy (ldbrandy@fb.com)
- * @author Xu Ning (xning@fb.com)
- */
-
-#if __cplusplus >= 201402L || __cpp_lib_make_unique >= 201304L || \
-    (__ANDROID__ && __cplusplus >= 201300L) || _MSC_VER >= 1900
-
-/* using override */ using std::make_unique;
-
-#else
-
-template <typename T, typename... Args>
-typename std::enable_if<!std::is_array<T>::value, std::unique_ptr<T>>::type
-make_unique(Args&&... args) {
-  return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
-}
-
-// Allows 'make_unique<T[]>(10)'. (N3690 s20.9.1.4 p3-4)
-template <typename T>
-typename std::enable_if<std::is_array<T>::value, std::unique_ptr<T>>::type
-make_unique(const size_t n) {
-  return std::unique_ptr<T>(new typename std::remove_extent<T>::type[n]());
-}
-
-// Disallows 'make_unique<T[10]>()'. (N3690 s20.9.1.4 p5)
-template <typename T, typename... Args>
-typename std::enable_if<std::extent<T>::value != 0, std::unique_ptr<T>>::type
-make_unique(Args&&...) = delete;
-
-#endif
-
-/**
  * static_function_deleter
  *
  * So you can write this:
@@ -251,9 +300,7 @@ make_unique(Args&&...) = delete;
 
 template <typename T, void (*f)(T*)>
 struct static_function_deleter {
-  void operator()(T* t) const {
-    f(t);
-  }
+  void operator()(T* t) const { f(t); }
 };
 
 /**
@@ -280,6 +327,14 @@ std::shared_ptr<T> to_shared_ptr(std::unique_ptr<T, D>&& ptr) {
 }
 
 /**
+ *  to_shared_ptr_aliasing
+ */
+template <typename T, typename U>
+std::shared_ptr<U> to_shared_ptr_aliasing(std::shared_ptr<T> const& r, U* ptr) {
+  return std::shared_ptr<U>(r, ptr);
+}
+
+/**
  *  to_weak_ptr
  *
  *  Make a weak_ptr and return it from a shared_ptr without specifying the
@@ -299,19 +354,149 @@ std::shared_ptr<T> to_shared_ptr(std::unique_ptr<T, D>&& ptr) {
  */
 template <typename T>
 std::weak_ptr<T> to_weak_ptr(const std::shared_ptr<T>& ptr) {
-  return std::weak_ptr<T>(ptr);
+  return ptr;
 }
 
+#if defined(__GLIBCXX__)
 namespace detail {
-template <typename T>
-struct lift_void_to_char {
-  using type = T;
+void weak_ptr_set_stored_ptr(std::weak_ptr<void>& w, void* ptr);
+
+template <typename Tag, void* std::__weak_ptr<void>::*WeakPtr_Ptr_Field>
+struct GenerateWeakPtrInternalsAccessor {
+  friend void weak_ptr_set_stored_ptr(std::weak_ptr<void>& w, void* ptr) {
+    w.*WeakPtr_Ptr_Field = ptr;
+  }
 };
-template <>
-struct lift_void_to_char<void> {
-  using type = char;
-};
+
+// Each template instantiation of GenerateWeakPtrInternalsAccessor must
+// be a new type, to avoid ODR problems.  We do this by tagging it with
+// a type from an anon namespace.
+namespace {
+struct MemoryAnonTag {};
+} // namespace
+
+template struct GenerateWeakPtrInternalsAccessor<
+    MemoryAnonTag,
+    &std::__weak_ptr<void>::_M_ptr>;
 } // namespace detail
+#endif
+
+/**
+ *  to_weak_ptr_aliasing
+ *
+ *  Like to_weak_ptr, but arranges that lock().get() on the returned
+ *  pointer points to ptr rather than r.get().
+ *
+ *  Equivalent to:
+ *
+ *      to_weak_ptr(std::shared_ptr<U>(r, ptr))
+ *
+ *  For libstdc++, ABI-specific tricks are used to optimize the
+ *  implementation.
+ */
+template <typename T, typename U>
+std::weak_ptr<U> to_weak_ptr_aliasing(const std::shared_ptr<T>& r, U* ptr) {
+#if defined(__GLIBCXX__)
+  std::weak_ptr<void> wv(r);
+  detail::weak_ptr_set_stored_ptr(wv, ptr);
+  FOLLY_PUSH_WARNING
+  FOLLY_GCC_DISABLE_WARNING("-Wstrict-aliasing")
+  return reinterpret_cast<std::weak_ptr<U>&&>(wv);
+  FOLLY_POP_WARNING
+#else
+  return std::shared_ptr<U>(r, ptr);
+#endif
+}
+
+/**
+ *  copy_to_unique_ptr
+ *
+ *  Move or copy the argument to the heap and return it owned by a unique_ptr.
+ *
+ *  Like std::make_unique, but deduces the type of the owned object.
+ */
+template <typename T>
+std::unique_ptr<remove_cvref_t<T>> copy_to_unique_ptr(T&& t) {
+  return std::make_unique<remove_cvref_t<T>>(static_cast<T&&>(t));
+}
+
+/**
+ *  copy_to_shared_ptr
+ *
+ *  Move or copy the argument to the heap and return it owned by a shared_ptr.
+ *
+ *  Like make_shared, but deduces the type of the owned object.
+ */
+template <typename T>
+std::shared_ptr<remove_cvref_t<T>> copy_to_shared_ptr(T&& t) {
+  return std::make_shared<remove_cvref_t<T>>(static_cast<T&&>(t));
+}
+
+/**
+ *  copy_through_unique_ptr
+ *
+ *  If the argument is nonnull, allocates a copy of its pointee.
+ */
+template <typename T>
+std::unique_ptr<T> copy_through_unique_ptr(const std::unique_ptr<T>& t) {
+  static_assert(
+      !std::is_polymorphic<T>::value || std::is_final<T>::value,
+      "possibly slicing");
+  return t ? std::make_unique<T>(*t) : nullptr;
+}
+
+//  erased_unique_ptr
+//
+//  A type-erased smart-ptr with unique ownership to a heap-allocated object.
+using erased_unique_ptr = std::unique_ptr<void, void (*)(void*)>;
+
+namespace detail {
+// for erased_unique_ptr with types that specialize default_delete
+template <typename T>
+void erased_unique_ptr_delete(void* ptr) {
+  std::default_delete<T>()(static_cast<T*>(ptr));
+}
+} // namespace detail
+
+//  to_erased_unique_ptr
+//
+//  Converts an owning pointer to an object to an erased_unique_ptr.
+template <typename T>
+erased_unique_ptr to_erased_unique_ptr(T* const ptr) noexcept {
+  return {ptr, detail::erased_unique_ptr_delete<T>};
+}
+
+//  to_erased_unique_ptr
+//
+//  Converts an owning std::unique_ptr to an erased_unique_ptr.
+template <typename T>
+erased_unique_ptr to_erased_unique_ptr(std::unique_ptr<T> ptr) noexcept {
+  return to_erased_unique_ptr(ptr.release());
+}
+
+//  make_erased_unique
+//
+//  Allocate an object of the T on the heap, constructed with a..., and return
+//  an owning erased_unique_ptr to it.
+template <typename T, typename... A>
+erased_unique_ptr make_erased_unique(A&&... a) {
+  return to_erased_unique_ptr(std::make_unique<T>(static_cast<A&&>(a)...));
+}
+
+//  copy_to_erased_unique_ptr
+//
+//  Copy an object to the heap and return an owning erased_unique_ptr to it.
+template <typename T>
+erased_unique_ptr copy_to_erased_unique_ptr(T&& obj) {
+  return to_erased_unique_ptr(copy_to_unique_ptr(static_cast<T&&>(obj)));
+}
+
+//  empty_erased_unique_ptr
+//
+//  Return an empty erased_unique_ptr.
+inline erased_unique_ptr empty_erased_unique_ptr() {
+  return {nullptr, nullptr};
+}
 
 /**
  * SysAllocator
@@ -327,24 +512,24 @@ class SysAllocator {
  public:
   using value_type = T;
 
+  constexpr SysAllocator() = default;
+
+  constexpr SysAllocator(SysAllocator const&) = default;
+
+  template <typename U, std::enable_if_t<!std::is_same<U, T>::value, int> = 0>
+  constexpr SysAllocator(SysAllocator<U> const&) noexcept {}
+
   T* allocate(size_t count) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    auto const p = std::malloc(sizeof(lifted) * count);
+    auto const p = std::malloc(sizeof(T) * count);
     if (!p) {
       throw_exception<std::bad_alloc>();
     }
     return static_cast<T*>(p);
   }
-  void deallocate(T* p, size_t /* count */) {
-    std::free(p);
-  }
+  void deallocate(T* p, size_t count) { sizedFree(p, count * sizeof(T)); }
 
-  friend bool operator==(Self const&, Self const&) noexcept {
-    return true;
-  }
-  friend bool operator!=(Self const&, Self const&) noexcept {
-    return false;
-  }
+  friend bool operator==(Self const&, Self const&) noexcept { return true; }
+  friend bool operator!=(Self const&, Self const&) noexcept { return false; }
 };
 
 class DefaultAlign {
@@ -357,9 +542,7 @@ class DefaultAlign {
     assert(!(align_ < sizeof(void*)) && bool("bad align: too small"));
     assert(!(align_ & (align_ - 1)) && bool("bad align: not power-of-two"));
   }
-  std::size_t operator()() const noexcept {
-    return align_;
-  }
+  std::size_t operator()() const noexcept { return align_; }
 
   friend bool operator==(Self const& a, Self const& b) noexcept {
     return a.align_ == b.align_;
@@ -377,16 +560,10 @@ class FixedAlign {
   using Self = FixedAlign<Align>;
 
  public:
-  constexpr std::size_t operator()() const noexcept {
-    return Align;
-  }
+  constexpr std::size_t operator()() const noexcept { return Align; }
 
-  friend bool operator==(Self const&, Self const&) noexcept {
-    return true;
-  }
-  friend bool operator!=(Self const&, Self const&) noexcept {
-    return false;
-  }
+  friend bool operator==(Self const&, Self const&) noexcept { return true; }
+  friend bool operator!=(Self const&, Self const&) noexcept { return false; }
 };
 
 /**
@@ -396,7 +573,8 @@ class FixedAlign {
  * aligned_free.
  *
  * Accepts a policy parameter for providing the alignment, which must:
- *   * be invocable as std::size_t() noexcept, returning the alignment
+ *   * be invocable as std::size_t(std::size_t) noexcept
+ *     * taking the type alignment and returning the allocation alignment
  *   * be noexcept-copy-constructible
  *   * have noexcept operator==
  *   * have noexcept operator!=
@@ -409,13 +587,14 @@ class AlignedSysAllocator : private Align {
  private:
   using Self = AlignedSysAllocator<T, Align>;
 
-  constexpr Align const& align() const {
-    return *this;
-  }
+  template <typename, typename>
+  friend class AlignedSysAllocator;
+
+  constexpr Align const& align() const { return *this; }
 
  public:
   static_assert(std::is_nothrow_copy_constructible<Align>::value, "");
-  static_assert(is_nothrow_invocable_r<std::size_t, Align>::value, "");
+  static_assert(is_nothrow_invocable_r_v<std::size_t, Align>, "");
 
   using value_type = T;
 
@@ -425,20 +604,22 @@ class AlignedSysAllocator : private Align {
 
   using Align::Align;
 
-  // TODO: remove this ctor, which is required only by gcc49
+  // TODO: remove this ctor, which is is no longer required as of under gcc7
   template <
       typename S = Align,
-      _t<std::enable_if<std::is_default_constructible<S>::value, int>> = 0>
+      std::enable_if_t<std::is_default_constructible<S>::value, int> = 0>
   constexpr AlignedSysAllocator() noexcept(noexcept(Align())) : Align() {}
 
-  template <typename U>
-  constexpr explicit AlignedSysAllocator(
+  constexpr AlignedSysAllocator(AlignedSysAllocator const&) = default;
+
+  template <typename U, std::enable_if_t<!std::is_same<U, T>::value, int> = 0>
+  constexpr AlignedSysAllocator(
       AlignedSysAllocator<U, Align> const& other) noexcept
       : Align(other.align()) {}
 
   T* allocate(size_t count) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    auto const p = aligned_malloc(sizeof(lifted) * count, align()());
+    auto const a = align()() < alignof(T) ? alignof(T) : align()();
+    auto const p = aligned_malloc(sizeof(T) * count, a);
     if (!p) {
       if (FOLLY_UNLIKELY(errno != ENOMEM)) {
         std::terminate();
@@ -447,9 +628,7 @@ class AlignedSysAllocator : private Align {
     }
     return static_cast<T*>(p);
   }
-  void deallocate(T* p, size_t /* count */) {
-    aligned_free(p);
-  }
+  void deallocate(T* p, size_t /* count */) { aligned_free(p); }
 
   friend bool operator==(Self const& a, Self const& b) noexcept {
     return a.align() == b.align();
@@ -470,15 +649,15 @@ class AlignedSysAllocator : private Align {
  *
  * Note that Inner is *not* a C++ Allocator.
  */
-template <typename T, class Inner>
-class CxxAllocatorAdaptor {
+template <typename T, class Inner, bool FallbackToStdAlloc = false>
+class CxxAllocatorAdaptor : private std::allocator<T> {
  private:
-  using Self = CxxAllocatorAdaptor<T, Inner>;
+  using Self = CxxAllocatorAdaptor<T, Inner, FallbackToStdAlloc>;
 
-  template <typename U, typename UAlloc>
+  template <typename U, typename UInner, bool UFallback>
   friend class CxxAllocatorAdaptor;
 
-  std::reference_wrapper<Inner> ref_;
+  Inner* inner_ = nullptr;
 
  public:
   using value_type = T;
@@ -487,27 +666,54 @@ class CxxAllocatorAdaptor {
   using propagate_on_container_move_assignment = std::true_type;
   using propagate_on_container_swap = std::true_type;
 
-  explicit CxxAllocatorAdaptor(Inner& ref) : ref_(ref) {}
+  template <bool X = FallbackToStdAlloc, std::enable_if_t<X, int> = 0>
+  constexpr explicit CxxAllocatorAdaptor() {}
 
-  template <typename U>
-  explicit CxxAllocatorAdaptor(CxxAllocatorAdaptor<U, Inner> const& other)
-      : ref_(other.ref_) {}
+  constexpr explicit CxxAllocatorAdaptor(Inner& ref) : inner_(&ref) {}
+
+  constexpr CxxAllocatorAdaptor(CxxAllocatorAdaptor const&) = default;
+
+  template <typename U, std::enable_if_t<!std::is_same<U, T>::value, int> = 0>
+  constexpr CxxAllocatorAdaptor(
+      CxxAllocatorAdaptor<U, Inner, FallbackToStdAlloc> const& other)
+      : inner_(other.inner_) {}
+
+  CxxAllocatorAdaptor& operator=(CxxAllocatorAdaptor const& other) = default;
+
+  template <typename U, std::enable_if_t<!std::is_same<U, T>::value, int> = 0>
+  CxxAllocatorAdaptor& operator=(
+      CxxAllocatorAdaptor<U, Inner, FallbackToStdAlloc> const& other) noexcept {
+    inner_ = other.inner_;
+    return *this;
+  }
 
   T* allocate(std::size_t n) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    return static_cast<T*>(ref_.get().allocate(sizeof(lifted) * n));
+    if (FallbackToStdAlloc && inner_ == nullptr) {
+      return std::allocator<T>::allocate(n);
+    }
+    return static_cast<T*>(inner_->allocate(sizeof(T) * n));
   }
+
   void deallocate(T* p, std::size_t n) {
-    using lifted = typename detail::lift_void_to_char<T>::type;
-    ref_.get().deallocate(p, sizeof(lifted) * n);
+    if (inner_ != nullptr) {
+      inner_->deallocate(p, sizeof(T) * n);
+    } else {
+      assert(FallbackToStdAlloc);
+      std::allocator<T>::deallocate(p, n);
+    }
   }
 
   friend bool operator==(Self const& a, Self const& b) noexcept {
-    return std::addressof(a.ref_.get()) == std::addressof(b.ref_.get());
+    return a.inner_ == b.inner_;
   }
   friend bool operator!=(Self const& a, Self const& b) noexcept {
-    return std::addressof(a.ref_.get()) != std::addressof(b.ref_.get());
+    return a.inner_ != b.inner_;
   }
+
+  template <typename U>
+  struct rebind {
+    using other = CxxAllocatorAdaptor<U, Inner, FallbackToStdAlloc>;
+  };
 };
 
 /*
@@ -533,19 +739,17 @@ class allocator_delete : private std::remove_reference<Alloc>::type {
   allocator_delete& operator=(allocator_delete const&) = default;
   allocator_delete& operator=(allocator_delete&&) = default;
 
-  explicit allocator_delete(const allocator_type& allocator)
-      : allocator_type(allocator) {}
+  explicit allocator_delete(const allocator_type& alloc)
+      : allocator_type(alloc) {}
 
-  explicit allocator_delete(allocator_type&& allocator)
-      : allocator_type(std::move(allocator)) {}
+  explicit allocator_delete(allocator_type&& alloc)
+      : allocator_type(std::move(alloc)) {}
 
   template <typename U>
   allocator_delete(const allocator_delete<U>& other)
       : allocator_type(other.get_allocator()) {}
 
-  allocator_type const& get_allocator() const {
-    return *this;
-  }
+  allocator_type const& get_allocator() const { return *this; }
 
   void operator()(pointer p) const {
     auto alloc = get_allocator();
@@ -558,25 +762,38 @@ class allocator_delete : private std::remove_reference<Alloc>::type {
  * allocate_unique, like std::allocate_shared but for std::unique_ptr
  */
 template <typename T, typename Alloc, typename... Args>
-std::unique_ptr<T, allocator_delete<Alloc>> allocate_unique(
-    Alloc const& alloc,
-    Args&&... args) {
-  using traits = std::allocator_traits<Alloc>;
-  auto copy = alloc;
+std::unique_ptr<
+    T,
+    allocator_delete<
+        typename std::allocator_traits<Alloc>::template rebind_alloc<T>>>
+allocate_unique(Alloc const& alloc, Args&&... args) {
+  using TAlloc =
+      typename std::allocator_traits<Alloc>::template rebind_alloc<T>;
+
+  using traits = std::allocator_traits<TAlloc>;
+  struct DeferCondDeallocate {
+    bool& cond;
+    TAlloc& copy;
+    T* p;
+    ~DeferCondDeallocate() {
+      if (FOLLY_UNLIKELY(!cond)) {
+        traits::deallocate(copy, p, 1);
+      }
+    }
+  };
+  auto copy = TAlloc(alloc);
   auto const p = traits::allocate(copy, 1);
-  try {
+  {
+    bool constructed = false;
+    DeferCondDeallocate handler{constructed, copy, p};
     traits::construct(copy, p, static_cast<Args&&>(args)...);
-    return {p, allocator_delete<Alloc>(std::move(copy))};
-  } catch (...) {
-    traits::deallocate(copy, p, 1);
-    throw;
+    constructed = true;
   }
+  return {p, allocator_delete<TAlloc>(std::move(copy))};
 }
 
 struct SysBufferDeleter {
-  void operator()(void* ptr) {
-    std::free(ptr);
-  }
+  void operator()(void* ptr) { std::free(ptr); }
 };
 using SysBufferUniquePtr = std::unique_ptr<void, SysBufferDeleter>;
 
@@ -608,12 +825,12 @@ struct AllocatorHasTrivialDeallocate<CxxAllocatorAdaptor<T, Alloc>>
 namespace detail {
 // note that construct and destroy here are methods, not short names for
 // the constructor and destructor
-FOLLY_CREATE_MEMBER_INVOKE_TRAITS(AllocatorConstruct_, construct);
-FOLLY_CREATE_MEMBER_INVOKE_TRAITS(AllocatorDestroy_, destroy);
+FOLLY_CREATE_MEMBER_INVOKER(AllocatorConstruct_, construct);
+FOLLY_CREATE_MEMBER_INVOKER(AllocatorDestroy_, destroy);
 
 template <typename Void, typename Alloc, typename... Args>
 struct AllocatorCustomizesConstruct_
-    : AllocatorConstruct_::template is_invocable<Alloc, Args...> {};
+    : folly::is_invocable<AllocatorConstruct_, Alloc, Args...> {};
 
 template <typename Alloc, typename... Args>
 struct AllocatorCustomizesConstruct_<
@@ -623,7 +840,7 @@ struct AllocatorCustomizesConstruct_<
 
 template <typename Void, typename Alloc, typename... Args>
 struct AllocatorCustomizesDestroy_
-    : AllocatorDestroy_::template is_invocable<Alloc, Args...> {};
+    : folly::is_invocable<AllocatorDestroy_, Alloc, Args...> {};
 
 template <typename Alloc, typename... Args>
 struct AllocatorCustomizesDestroy_<
@@ -679,93 +896,5 @@ struct AllocatorHasDefaultObjectDestroy
 template <typename Value, typename T>
 struct AllocatorHasDefaultObjectDestroy<std::allocator<Value>, T>
     : std::true_type {};
-
-/*
- * folly::enable_shared_from_this
- *
- * To be removed once C++17 becomes a minimum requirement for folly.
- */
-#if __cplusplus >= 201700L || __cpp_lib_enable_shared_from_this >= 201603L
-
-// Guaranteed to have std::enable_shared_from_this::weak_from_this(). Prefer
-// type alias over our own class.
-/* using override */ using std::enable_shared_from_this;
-
-#else
-
-/**
- * Extends std::enabled_shared_from_this. Offers weak_from_this() to pre-C++17
- * code. Use as drop-in replacement for std::enable_shared_from_this.
- *
- * C++14 has no direct means of creating a std::weak_ptr, one must always
- * create a (temporary) std::shared_ptr first. C++17 adds weak_from_this() to
- * std::enable_shared_from_this to avoid that overhead. Alas code that must
- * compile under different language versions cannot call
- * std::enable_shared_from_this::weak_from_this() directly. Hence this class.
- *
- * @example
- *   class MyClass : public folly::enable_shared_from_this<MyClass> {};
- *
- *   int main() {
- *     std::shared_ptr<MyClass> sp = std::make_shared<MyClass>();
- *     std::weak_ptr<MyClass> wp = sp->weak_from_this();
- *   }
- */
-template <typename T>
-class enable_shared_from_this : public std::enable_shared_from_this<T> {
- public:
-  constexpr enable_shared_from_this() noexcept = default;
-
-  std::weak_ptr<T> weak_from_this() noexcept {
-    return weak_from_this_<T>(this);
-  }
-
-  std::weak_ptr<T const> weak_from_this() const noexcept {
-    return weak_from_this_<T>(this);
-  }
-
- private:
-  // Uses SFINAE to detect and call
-  // std::enable_shared_from_this<T>::weak_from_this() if available. Falls
-  // back to std::enable_shared_from_this<T>::shared_from_this() otherwise.
-  template <typename U>
-  auto weak_from_this_(std::enable_shared_from_this<U>* base_ptr) noexcept
-      -> decltype(base_ptr->weak_from_this()) {
-    return base_ptr->weak_from_this();
-  }
-
-  template <typename U>
-  auto weak_from_this_(std::enable_shared_from_this<U> const* base_ptr) const
-      noexcept -> decltype(base_ptr->weak_from_this()) {
-    return base_ptr->weak_from_this();
-  }
-
-  template <typename U>
-  std::weak_ptr<U> weak_from_this_(...) noexcept {
-    try {
-      return this->shared_from_this();
-    } catch (std::bad_weak_ptr const&) {
-      // C++17 requires that weak_from_this() on an object not owned by a
-      // shared_ptr returns an empty weak_ptr. Sadly, in C++14,
-      // shared_from_this() on such an object is undefined behavior, and there
-      // is nothing we can do to detect and handle the situation in a portable
-      // manner. But in case a compiler is nice enough to implement C++17
-      // semantics of shared_from_this() and throws a bad_weak_ptr, we catch it
-      // and return an empty weak_ptr.
-      return std::weak_ptr<U>{};
-    }
-  }
-
-  template <typename U>
-  std::weak_ptr<U const> weak_from_this_(...) const noexcept {
-    try {
-      return this->shared_from_this();
-    } catch (std::bad_weak_ptr const&) {
-      return std::weak_ptr<U const>{};
-    }
-  }
-};
-
-#endif
 
 } // namespace folly

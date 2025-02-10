@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,26 +13,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <folly/io/async/test/AsyncSSLSocketTest.h>
+
+#include <folly/io/async/AsyncSSLSocket.h>
 
 #include <folly/futures/Promise.h>
 #include <folly/init/Init.h>
-#include <folly/io/async/AsyncSSLSocket.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/SSLContext.h>
 #include <folly/io/async/ScopedEventBaseThread.h>
+#include <folly/io/async/test/AsyncSSLSocketTest.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/PThread.h>
-#include <folly/ssl/Init.h>
 
 using std::cerr;
 using std::endl;
-using std::list;
-using std::min;
-using std::string;
-using std::vector;
 
-namespace folly {
+using namespace folly;
+using namespace folly::test;
 
 struct EvbAndContext {
   EvbAndContext() {
@@ -45,9 +42,7 @@ struct EvbAndContext {
     return AsyncSSLSocket::newSocket(ctx_, getEventBase());
   }
 
-  EventBase* getEventBase() {
-    return evb_.getEventBase();
-  }
+  EventBase* getEventBase() { return evb_.getEventBase(); }
 
   void attach(AsyncSSLSocket& socket) {
     socket.attachEventBase(getEventBase());
@@ -58,9 +53,10 @@ struct EvbAndContext {
   std::shared_ptr<SSLContext> ctx_;
 };
 
-class AttachDetachClient : public AsyncSocket::ConnectCallback,
-                           public AsyncTransportWrapper::WriteCallback,
-                           public AsyncTransportWrapper::ReadCallback {
+class AttachDetachClient
+    : public AsyncSocket::ConnectCallback,
+      public AsyncTransport::WriteCallback,
+      public AsyncTransport::ReadCallback {
  private:
   // two threads here - we'll create the socket in one, connect
   // in the other, and then read/write in the initial one
@@ -83,9 +79,7 @@ class AttachDetachClient : public AsyncSocket::ConnectCallback,
   explicit AttachDetachClient(const folly::SocketAddress& address)
       : address_(address), bytesRead_(0) {}
 
-  Future<bool> getFuture() {
-    return promise_.getFuture();
-  }
+  Future<bool> getFuture() { return promise_.getFuture(); }
 
   void connect() {
     // create in one and then move to another
@@ -149,9 +143,7 @@ class AttachDetachClient : public AsyncSocket::ConnectCallback,
     *bufReturn = readbuf_ + bytesRead_;
     *lenReturn = sizeof(readbuf_) - bytesRead_;
   }
-  void readEOF() noexcept override {
-    cerr << "client readEOF" << endl;
-  }
+  void readEOF() noexcept override { cerr << "client readEOF" << endl; }
 
   void readErr(const AsyncSocketException& ex) noexcept override {
     cerr << "client readError: " << ex.what() << endl;
@@ -188,16 +180,14 @@ TEST(AsyncSSLSocketTest2, AttachDetachSSLContext) {
 
   auto f = client->getFuture();
   client->connect();
-  EXPECT_TRUE(f.within(std::chrono::seconds(3)).get());
+  EXPECT_TRUE(std::move(f).within(std::chrono::seconds(3)).get());
 }
 
 class ConnectClient : public AsyncSocket::ConnectCallback {
  public:
   ConnectClient() = default;
 
-  Future<bool> getFuture() {
-    return promise_.getFuture();
-  }
+  Future<bool> getFuture() { return promise_.getFuture(); }
 
   void connect(const folly::SocketAddress& addr) {
     t1_.getEventBase()->runInEventBaseThread([&] {
@@ -216,9 +206,7 @@ class ConnectClient : public AsyncSocket::ConnectCallback {
     promise_.setValue(false);
   }
 
-  void setCtx(std::shared_ptr<SSLContext> ctx) {
-    t1_.ctx_ = ctx;
-  }
+  void setCtx(std::shared_ptr<SSLContext> ctx) { t1_.ctx_ = ctx; }
 
  private:
   EvbAndContext t1_;
@@ -229,9 +217,7 @@ class ConnectClient : public AsyncSocket::ConnectCallback {
 
 class NoopReadCallback : public ReadCallbackBase {
  public:
-  NoopReadCallback() : ReadCallbackBase(nullptr) {
-    state = STATE_SUCCEEDED;
-  }
+  NoopReadCallback() : ReadCallbackBase(nullptr) { state = STATE_SUCCEEDED; }
 
   void getReadBuffer(void** buf, size_t* lenReturn) override {
     *buf = &buffer_;
@@ -255,10 +241,12 @@ TEST(AsyncSSLSocketTest2, TestTLS12DefaultClient) {
   auto c1 = std::make_unique<ConnectClient>();
   auto f1 = c1->getFuture();
   c1->connect(server.getAddress());
-  EXPECT_TRUE(f1.within(std::chrono::seconds(3)).get());
+  EXPECT_TRUE(std::move(f1).within(std::chrono::seconds(3)).get());
 }
 
-TEST(AsyncSSLSocketTest2, TestTLS12BadClient) {
+// Pre-TLS 1.2 client attempting to connect to a TLS 1.2+ server, should not be
+// able to connect.
+TEST(AsyncSSLSocketTest2, TestLegacyClientCannotConnectToTLS12Server) {
   // Start listening on a local port
   NoopReadCallback readCallback;
   HandshakeCallback handshakeCallback(
@@ -268,25 +256,23 @@ TEST(AsyncSSLSocketTest2, TestTLS12BadClient) {
   TestSSLServer server(&acceptCallback, ctx);
   server.loadTestCerts();
 
-  // create a client that doesn't speak TLS 1.2
+  // create a client that doesn't speak TLS 1.2+
   auto c2 = std::make_unique<ConnectClient>();
-  auto clientCtx = std::make_shared<SSLContext>();
+  auto clientCtx = std::make_shared<SSLContext>(SSLContext::TLSv1);
   clientCtx->setOptions(SSL_OP_NO_TLSv1_2);
+  clientCtx->disableTLS13();
   c2->setCtx(clientCtx);
   auto f2 = c2->getFuture();
   c2->connect(server.getAddress());
-  EXPECT_FALSE(f2.within(std::chrono::seconds(3)).get());
+  EXPECT_FALSE(std::move(f2).within(std::chrono::seconds(3)).get());
 }
 
-} // namespace folly
-
 int main(int argc, char* argv[]) {
-  folly::ssl::init();
 #ifdef SIGPIPE
   signal(SIGPIPE, SIG_IGN);
 #endif
   testing::InitGoogleTest(&argc, argv);
-  folly::init(&argc, &argv);
+  folly::Init init(&argc, &argv);
   return RUN_ALL_TESTS();
   OPENSSL_cleanup();
 }

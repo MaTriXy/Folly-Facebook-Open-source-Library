@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,12 +16,14 @@
 
 #pragma once
 
-#ifndef _WIN32
+#if !defined(_WIN32)
 #include <sys/resource.h>
 #else
 #include <cstdint>
 
 #include <folly/portability/SysTime.h>
+
+#define PRIO_PROCESS 1
 
 #define RLIMIT_CORE 0
 #define RLIMIT_NOFILE 0
@@ -62,5 +64,8 @@ extern "C" {
 int getrlimit(int type, rlimit* dst);
 int getrusage(int who, rusage* usage);
 int setrlimit(int type, rlimit* src);
+
+int getpriority(int which, int who);
+int setpriority(int which, int who, int value);
 }
 #endif

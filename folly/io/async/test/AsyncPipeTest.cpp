@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,11 +15,13 @@
  */
 
 #include <folly/io/async/AsyncPipe.h>
+
+#include <fcntl.h>
+
 #include <folly/Memory.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/portability/GTest.h>
-
-#include <fcntl.h>
+#include <folly/portability/Unistd.h>
 
 using namespace testing;
 
@@ -27,12 +29,8 @@ namespace {
 
 class TestReadCallback : public folly::AsyncReader::ReadCallback {
  public:
-  bool isBufferMovable() noexcept override {
-    return movable_;
-  }
-  void setMovable(bool movable) {
-    movable_ = movable;
-  }
+  bool isBufferMovable() noexcept override { return movable_; }
+  void setMovable(bool movable) { movable_ = movable; }
 
   void readBufferAvailable(
       std::unique_ptr<folly::IOBuf> readBuf) noexcept override {
@@ -64,7 +62,7 @@ class TestReadCallback : public folly::AsyncReader::ReadCallback {
   void reset() {
     movable_ = false;
     error_ = false;
-    readBuffer_.clear();
+    readBuffer_.reset();
   }
 
   folly::IOBufQueue readBuffer_{folly::IOBufQueue::cacheChainLength()};
@@ -74,9 +72,7 @@ class TestReadCallback : public folly::AsyncReader::ReadCallback {
 
 class TestWriteCallback : public folly::AsyncWriter::WriteCallback {
  public:
-  void writeSuccess() noexcept override {
-    writes_++;
-  }
+  void writeSuccess() noexcept override { writes_++; }
 
   void writeErr(size_t, const folly::AsyncSocketException&) noexcept override {
     error_ = true;
@@ -99,13 +95,15 @@ class AsyncPipeTest : public Test {
     writer_.reset();
     writeCallback_.reset();
 
-    int rc = pipe(pipeFds_);
+    int rc = folly::fileops::pipe(pipeFds_);
     EXPECT_EQ(rc, 0);
 
     EXPECT_EQ(::fcntl(pipeFds_[0], F_SETFL, O_NONBLOCK), 0);
     EXPECT_EQ(::fcntl(pipeFds_[1], F_SETFL, O_NONBLOCK), 0);
-    reader_ = folly::AsyncPipeReader::newReader(&eventBase_, pipeFds_[0]);
-    writer_ = folly::AsyncPipeWriter::newWriter(&eventBase_, pipeFds_[1]);
+    reader_ = folly::AsyncPipeReader::newReader(
+        &eventBase_, folly::NetworkSocket::fromFd(pipeFds_[0]));
+    writer_ = folly::AsyncPipeWriter::newWriter(
+        &eventBase_, folly::NetworkSocket::fromFd(pipeFds_[1]));
 
     readCallback_.setMovable(movable);
   }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,15 +16,108 @@
 
 #include <folly/ScopeGuard.h>
 
-#include <glog/logging.h>
-
+#include <condition_variable>
 #include <functional>
 #include <stdexcept>
+#include <thread>
 
+#include <glog/logging.h>
+
+#include <folly/lang/Keep.h>
 #include <folly/portability/GTest.h>
 
+using folly::makeDismissedGuard;
 using folly::makeGuard;
 using std::vector;
+
+struct in_scope {};
+struct in_guard {};
+
+extern "C" FOLLY_KEEP void check_folly_scope_exit_opaque() {
+  SCOPE_EXIT {
+    folly::detail::keep_sink(in_guard{});
+  };
+  folly::detail::keep_sink(in_scope{});
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_exit_opaque_noexcept() {
+  SCOPE_EXIT {
+    folly::detail::keep_sink(in_guard{});
+  };
+  folly::detail::keep_sink_nx(in_scope{});
+}
+
+extern "C" FOLLY_KEEP [[noreturn]] void check_folly_scope_exit_visible_throw() {
+  SCOPE_EXIT {
+    folly::detail::keep_sink(in_guard{});
+  };
+  throw 0;
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_exit_visible_throw_cond(bool b) {
+  SCOPE_EXIT {
+    folly::detail::keep_sink(in_guard{});
+  };
+  b ? void(throw 0) : void();
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_success_opaque() {
+  SCOPE_SUCCESS {
+    folly::detail::keep_sink(in_guard{});
+  };
+  folly::detail::keep_sink(in_scope{});
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_success_opaque_noexcept() {
+  SCOPE_SUCCESS {
+    folly::detail::keep_sink(in_guard{});
+  };
+  folly::detail::keep_sink_nx(in_scope{});
+}
+
+extern "C" FOLLY_KEEP [[noreturn]] void
+check_folly_scope_success_visible_throw() {
+  SCOPE_SUCCESS {
+    folly::detail::keep_sink(in_guard{});
+  };
+  throw 0;
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_success_visible_throw_cond(
+    bool b) {
+  SCOPE_SUCCESS {
+    folly::detail::keep_sink(in_guard{});
+  };
+  b ? void(throw 0) : void();
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_fail_opaque() {
+  SCOPE_FAIL {
+    folly::detail::keep_sink(in_guard{});
+  };
+  folly::detail::keep_sink(in_scope{});
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_fail_opaque_noexcept() {
+  SCOPE_FAIL {
+    folly::detail::keep_sink(in_guard{});
+  };
+  folly::detail::keep_sink_nx(in_scope{});
+}
+
+extern "C" FOLLY_KEEP [[noreturn]] void check_folly_scope_fail_visible_throw() {
+  SCOPE_FAIL {
+    folly::detail::keep_sink(in_guard{});
+  };
+  throw 0;
+}
+
+extern "C" FOLLY_KEEP void check_folly_scope_fail_visible_throw_cond(bool b) {
+  SCOPE_FAIL {
+    folly::detail::keep_sink(in_guard{});
+  };
+  b ? void(throw 0) : void();
+}
 
 double returnsDouble() {
   return 0.0;
@@ -34,22 +127,13 @@ class MyFunctor {
  public:
   explicit MyFunctor(int* ptr) : ptr_(ptr) {}
 
-  void operator()() {
-    ++*ptr_;
-  }
+  void operator()() { ++*ptr_; }
 
  private:
   int* ptr_;
 };
 
 TEST(ScopeGuard, DifferentWaysToBind) {
-  {
-    // There is implicit conversion from func pointer
-    // double (*)() to function<void()>.
-    auto g = makeGuard(returnsDouble);
-    (void)g;
-  }
-
   vector<int> v;
   void (vector<int>::*push_back)(int const&) = &vector<int>::push_back;
 
@@ -132,7 +216,9 @@ TEST(ScopeGuard, DifferentWaysToBind) {
 
 TEST(ScopeGuard, GuardException) {
   EXPECT_DEATH(
-      makeGuard([] { throw std::runtime_error("dtors should never throw!"); }),
+      (void)makeGuard([] {
+        throw std::runtime_error("dtors should never throw!");
+      }),
       "dtors should never throw!");
 }
 
@@ -170,6 +256,22 @@ void testUndoAction(bool failure) {
 TEST(ScopeGuard, UndoAction) {
   testUndoAction(true);
   testUndoAction(false);
+}
+
+TEST(ScopeGuard, MakeDismissedGuard) {
+  auto test = [](bool shouldFire) {
+    bool fired = false;
+    {
+      auto guard = makeDismissedGuard([&] { fired = true; });
+      if (shouldFire) {
+        guard.rehire();
+      }
+    }
+    EXPECT_EQ(shouldFire, fired);
+  };
+
+  test(true);
+  test(false);
 }
 
 /**
@@ -225,10 +327,12 @@ TEST(ScopeGuard, TryCatchFinally) {
   testFinally(ErrorBehavior::UNHANDLED_ERROR);
 }
 
-TEST(ScopeGuard, TEST_SCOPE_EXIT) {
+TEST(ScopeGuard, TESTScopeExit) {
   int x = 0;
   {
-    SCOPE_EXIT { ++x; };
+    SCOPE_EXIT {
+      ++x;
+    };
     EXPECT_EQ(0, x);
   }
   EXPECT_EQ(1, x);
@@ -242,7 +346,9 @@ class Foo {
       auto e = std::current_exception();
       int test = 0;
       {
-        SCOPE_EXIT { ++test; };
+        SCOPE_EXIT {
+          ++test;
+        };
         EXPECT_EQ(0, test);
       }
       EXPECT_EQ(1, test);
@@ -252,7 +358,7 @@ class Foo {
   }
 };
 
-TEST(ScopeGuard, TEST_SCOPE_FAILURE2) {
+TEST(ScopeGuard, TESTScopeFailure2) {
   try {
     Foo f;
     throw std::runtime_error("test");
@@ -265,8 +371,12 @@ void testScopeFailAndScopeSuccess(ErrorBehavior error, bool expectFail) {
   bool scopeSuccessExecuted = false;
 
   try {
-    SCOPE_FAIL { scopeFailExecuted = true; };
-    SCOPE_SUCCESS { scopeSuccessExecuted = true; };
+    SCOPE_FAIL {
+      scopeFailExecuted = true;
+    };
+    SCOPE_SUCCESS {
+      scopeSuccessExecuted = true;
+    };
 
     try {
       if (error == ErrorBehavior::HANDLED_ERROR) {
@@ -284,28 +394,55 @@ void testScopeFailAndScopeSuccess(ErrorBehavior error, bool expectFail) {
   EXPECT_EQ(!expectFail, scopeSuccessExecuted);
 }
 
-TEST(ScopeGuard, TEST_SCOPE_FAIL_AND_SCOPE_SUCCESS) {
+TEST(ScopeGuard, TESTScopeFailExceptionPtr) {
+  bool catchExecuted = false;
+  bool failExecuted = false;
+
+  try {
+    SCOPE_FAIL {
+      failExecuted = true;
+    };
+
+    std::exception_ptr ep;
+    try {
+      throw std::runtime_error("test");
+    } catch (...) {
+      ep = std::current_exception();
+    }
+    std::rethrow_exception(ep);
+  } catch (const std::exception&) {
+    catchExecuted = true;
+  }
+
+  EXPECT_TRUE(catchExecuted);
+  EXPECT_TRUE(failExecuted);
+}
+
+TEST(ScopeGuard, TESTScopeFailAndScopeSuccess) {
   testScopeFailAndScopeSuccess(ErrorBehavior::SUCCESS, false);
   testScopeFailAndScopeSuccess(ErrorBehavior::HANDLED_ERROR, false);
   testScopeFailAndScopeSuccess(ErrorBehavior::UNHANDLED_ERROR, true);
 }
 
-TEST(ScopeGuard, TEST_SCOPE_SUCCESS_THROW) {
+TEST(ScopeGuard, TESTScopeSuccessThrow) {
   auto lambda = []() {
-    SCOPE_SUCCESS { throw std::runtime_error("ehm"); };
+    SCOPE_SUCCESS {
+      throw std::runtime_error("ehm");
+    };
   };
   EXPECT_THROW(lambda(), std::runtime_error);
 }
 
-TEST(ScopeGuard, TEST_THROWING_CLEANUP_ACTION) {
+TEST(ScopeGuard, TESTThrowingCleanupAction) {
   struct ThrowingCleanupAction {
+    // clang-format off
     explicit ThrowingCleanupAction(int& scopeExitExecuted)
         : scopeExitExecuted_(scopeExitExecuted) {}
-    [[noreturn]]
-    ThrowingCleanupAction(const ThrowingCleanupAction& other)
+    [[noreturn]] ThrowingCleanupAction(const ThrowingCleanupAction& other)
         : scopeExitExecuted_(other.scopeExitExecuted_) {
       throw std::runtime_error("whoa");
     }
+    // clang-format on
     void operator()() { ++scopeExitExecuted_; }
 
    private:
@@ -313,6 +450,6 @@ TEST(ScopeGuard, TEST_THROWING_CLEANUP_ACTION) {
   };
   int scopeExitExecuted = 0;
   ThrowingCleanupAction onExit(scopeExitExecuted);
-  EXPECT_THROW(makeGuard(onExit), std::runtime_error);
+  EXPECT_THROW((void)makeGuard(onExit), std::runtime_error);
   EXPECT_EQ(scopeExitExecuted, 1);
 }

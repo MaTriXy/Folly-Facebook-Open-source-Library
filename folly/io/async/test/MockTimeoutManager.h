@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,32 +13,33 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
+
+#include <chrono>
 
 #include <folly/io/async/TimeoutManager.h>
 #include <folly/portability/GMock.h>
-
-#include <chrono>
 
 namespace folly {
 namespace test {
 
 class MockTimeoutManager : public folly::TimeoutManager {
  public:
-  MOCK_METHOD2(
+  MOCK_METHOD(
+      void,
       attachTimeoutManager,
-      void(folly::AsyncTimeout*, folly::TimeoutManager::InternalEnum));
+      (folly::AsyncTimeout*, folly::TimeoutManager::InternalEnum));
 
-  MOCK_METHOD1(detachTimeoutManager, void(folly::AsyncTimeout*));
+  MOCK_METHOD(void, detachTimeoutManager, (folly::AsyncTimeout*));
 
-  MOCK_METHOD2(
-      scheduleTimeout,
-      bool(folly::AsyncTimeout*, std::chrono::milliseconds));
+  MOCK_METHOD(
+      bool, scheduleTimeout, (folly::AsyncTimeout*, std::chrono::milliseconds));
 
-  MOCK_METHOD1(cancelTimeout, void(folly::AsyncTimeout*));
+  MOCK_METHOD(void, cancelTimeout, (folly::AsyncTimeout*));
 
-  MOCK_METHOD0(bumpHandlingTime, void());
-  MOCK_METHOD0(isInTimeoutManagerThread, bool());
+  MOCK_METHOD(void, bumpHandlingTime, ());
+  MOCK_METHOD(bool, isInTimeoutManagerThread, ());
 };
 } // namespace test
 } // namespace folly

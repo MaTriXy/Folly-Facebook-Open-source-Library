@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -38,7 +38,7 @@ namespace {
 
 class ArenaTester {
  public:
-  explicit ArenaTester(ThreadCachedArena& arena) : arena_(&arena) { }
+  explicit ArenaTester(ThreadCachedArena& arena) : arena_(&arena) {}
 
   void allocate(size_t count, size_t maxSize);
   void verify();
@@ -52,7 +52,8 @@ class ArenaTester {
 
 void ArenaTester::allocate(size_t count, size_t maxSize) {
   // Allocate chunks of memory of random sizes
-  std::mt19937 rnd;
+  std::random_device rd{};
+  std::mt19937 rnd{rd()};
   std::uniform_int_distribution<uint32_t> sizeDist(1, maxSize - 1);
   areas_.clear();
   areas_.reserve(count);
@@ -64,9 +65,7 @@ void ArenaTester::allocate(size_t count, size_t maxSize) {
 
   // Fill each area with a different value, to prove that they don't overlap
   // Fill in random order.
-  std::random_shuffle(areas_.begin(), areas_.end(), [&rnd](ptrdiff_t n) {
-    return std::uniform_int_distribution<uint32_t>(0, n - 1)(rnd);
-  });
+  std::shuffle(areas_.begin(), areas_.end(), rnd);
 
   for (auto& p : areas_) {
     std::fill(p.second.begin(), p.second.end(), p.first);
@@ -84,8 +83,8 @@ void ArenaTester::verify() {
 void ArenaTester::merge(ArenaTester&& other) {
   {
     std::lock_guard<std::mutex> lock(mergeMutex_);
-    std::move(other.areas_.begin(), other.areas_.end(),
-              std::back_inserter(areas_));
+    std::move(
+        other.areas_.begin(), other.areas_.end(), std::back_inserter(areas_));
   }
   other.areas_.clear();
 }
@@ -103,14 +102,13 @@ TEST(ThreadCachedArena, BlockSize) {
   // Keep allocating until we're no longer one single alignment away from the
   // previous allocation -- that's when we've gotten to the next block.
   uint8_t* p;
-  while ((p = static_cast<uint8_t*>(arena.allocate(1))) ==
-         prev + alignment) {
+  while ((p = static_cast<uint8_t*>(arena.allocate(1))) == prev + alignment) {
     prev = p;
     blockSize += alignment;
   }
 
-  VLOG(1) << "Requested block size: " << requestedBlockSize << ", actual: "
-          << blockSize;
+  VLOG(1) << "Requested block size: " << requestedBlockSize
+          << ", actual: " << blockSize;
   EXPECT_LE(requestedBlockSize, blockSize);
 }
 
@@ -138,13 +136,12 @@ TEST(ThreadCachedArena, MultiThreaded) {
     std::vector<std::thread> threads;
     threads.reserve(numThreads);
     for (size_t j = 0; j < numThreads; j++) {
-      threads.emplace_back(
-          [&arena, &mainTester] () {
-            ArenaTester tester(arena);
-            tester.allocate(500, 1 << 10);
-            tester.verify();
-            mainTester.merge(std::move(tester));
-          });
+      threads.emplace_back([&arena, &mainTester]() {
+        ArenaTester tester(arena);
+        tester.allocate(500, 1 << 10);
+        tester.verify();
+        mainTester.merge(std::move(tester));
+      });
     }
     for (auto& t : threads) {
       t.join();
@@ -165,10 +162,11 @@ TEST(ThreadCachedArena, ThreadCachedArenaAllocator) {
   static const size_t requestedBlockSize = 64;
   ThreadCachedArena arena(requestedBlockSize);
 
-  Map map{0,
-          std::hash<int>(),
-          std::equal_to<int>(),
-          ThreadCachedArenaAllocator<std::pair<const int, int>>(arena)};
+  Map map{
+      0,
+      std::hash<int>(),
+      std::equal_to<int>(),
+      ThreadCachedArenaAllocator<std::pair<const int, int>>(arena)};
 
   for (int i = 0; i < 1000; i++) {
     map[i] = i;
@@ -187,7 +185,7 @@ BENCHMARK(bmUMStandard, iters) {
   using Map = std::unordered_map<int, int>;
 
   while (iters--) {
-    Map map {0};
+    Map map{0};
     for (int i = 0; i < kNumValues; i++) {
       map[i] = i;
     }
@@ -205,10 +203,11 @@ BENCHMARK(bmUMArena, iters) {
   while (iters--) {
     ThreadCachedArena arena;
 
-    Map map{0,
-            std::hash<int>(),
-            std::equal_to<int>(),
-            ThreadCachedArenaAllocator<std::pair<const int, int>>(arena)};
+    Map map{
+        0,
+        std::hash<int>(),
+        std::equal_to<int>(),
+        ThreadCachedArenaAllocator<std::pair<const int, int>>(arena)};
 
     for (int i = 0; i < kNumValues; i++) {
       map[i] = i;
@@ -241,8 +240,9 @@ BENCHMARK(bmMArena, iters) {
   while (iters--) {
     ThreadCachedArena arena;
 
-    Map map{std::less<int>(),
-            ThreadCachedArenaAllocator<std::pair<const int, int>>(arena)};
+    Map map{
+        std::less<int>(),
+        ThreadCachedArenaAllocator<std::pair<const int, int>>(arena)};
 
     for (int i = 0; i < kNumValues; i++) {
       map[i] = i;
@@ -265,9 +265,9 @@ BENCHMARK_DRAW_LINE();
 // *       bmMArena                         2135  2.002 s   937.6 us  1.042 k
 // ----------------------------------------------------------------------------
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   auto ret = RUN_ALL_TESTS();
   if (!ret && FLAGS_benchmark) {
     folly::runBenchmarks();

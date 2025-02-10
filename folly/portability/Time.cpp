@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,21 +15,24 @@
  */
 
 #include <folly/portability/Time.h>
-#include <folly/Likely.h>
 
-#include <assert.h>
+#include <folly/CPortability.h>
+#include <folly/Likely.h>
+#include <folly/Utility.h>
+
+#include <cassert>
 
 #include <chrono>
 
 template <typename _Rep, typename _Period>
 static void duration_to_ts(
-    std::chrono::duration<_Rep, _Period> d,
-    struct timespec* ts) {
+    std::chrono::duration<_Rep, _Period> d, struct timespec* ts) {
   ts->tv_sec =
       time_t(std::chrono::duration_cast<std::chrono::seconds>(d).count());
-  ts->tv_nsec = long(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                         d % std::chrono::seconds(1))
-                         .count());
+  ts->tv_nsec = long(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          d % std::chrono::seconds(1))
+          .count());
 }
 
 #if !FOLLY_HAVE_CLOCK_GETTIME || FOLLY_FORCE_CLOCK_GETTIME_DEFINITION
@@ -57,7 +60,7 @@ static int clock_process_cputime(struct timespec* ts) {
       TASK_THREAD_TIMES_INFO,
       (thread_info_t)&thread_times_info,
       &thread_times_info_count);
-  if (UNLIKELY(kern_result != KERN_SUCCESS)) {
+  if (FOLLY_UNLIKELY(kern_result != KERN_SUCCESS)) {
     return -1;
   }
 
@@ -69,7 +72,7 @@ static int clock_process_cputime(struct timespec* ts) {
       MACH_TASK_BASIC_INFO,
       (thread_info_t)&task_basic_info,
       &task_basic_info_count);
-  if (UNLIKELY(kern_result != KERN_SUCCESS)) {
+  if (FOLLY_UNLIKELY(kern_result != KERN_SUCCESS)) {
     return -1;
   }
 
@@ -88,7 +91,7 @@ static int clock_thread_cputime(struct timespec* ts) {
   kern_return_t kern_result = thread_info(
       thread, THREAD_BASIC_INFO, (thread_info_t)&thread_info_data, &count);
   mach_port_deallocate(mach_task_self(), thread);
-  if (UNLIKELY(kern_result != KERN_SUCCESS)) {
+  if (FOLLY_UNLIKELY(kern_result != KERN_SUCCESS)) {
     return -1;
   }
   auto cputime = time_value_to_ns(thread_info_data.system_time) +
@@ -97,8 +100,8 @@ static int clock_thread_cputime(struct timespec* ts) {
   return 0;
 }
 
-int clock_gettime(clockid_t clk_id, struct timespec* ts) {
-  switch (clk_id) {
+FOLLY_ATTR_WEAK int clock_gettime(clockid_t clk_id, struct timespec* ts) {
+  switch (folly::to_underlying(clk_id)) {
     case CLOCK_REALTIME: {
       auto now = std::chrono::system_clock::now().time_since_epoch();
       duration_to_ts(now, ts);
@@ -342,6 +345,14 @@ char* strptime(
     return nullptr;
   }
   return const_cast<char*>(s + input.tellg());
+}
+
+time_t timelocal(tm* tm) {
+  return mktime(tm);
+}
+
+time_t timegm(tm* tm) {
+  return _mkgmtime(tm);
 }
 }
 #endif

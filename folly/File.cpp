@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,12 +16,11 @@
 
 #include <folly/File.h>
 
-
 #include <folly/Exception.h>
 #include <folly/FileUtil.h>
-#include <folly/Format.h>
 #include <folly/ScopeGuard.h>
 #include <folly/portability/Fcntl.h>
+#include <folly/portability/FmtCompile.h>
 #include <folly/portability/SysFile.h>
 #include <folly/portability/Unistd.h>
 
@@ -31,32 +30,30 @@
 
 namespace folly {
 
-File::File() noexcept : fd_(-1), ownsFd_(false) {}
-
 File::File(int fd, bool ownsFd) noexcept : fd_(fd), ownsFd_(ownsFd) {
   CHECK_GE(fd, -1) << "fd must be -1 or non-negative";
   CHECK(fd != -1 || !ownsFd) << "cannot own -1";
 }
 
 File::File(const char* name, int flags, mode_t mode)
-  : fd_(::open(name, flags, mode))
-  , ownsFd_(false) {
+    : fd_(fileops::open(name, flags, mode)), ownsFd_(false) {
   if (fd_ == -1) {
-    throwSystemError(folly::format("open(\"{}\", {:#o}, 0{:#o}) failed",
-                                   name, flags, mode).fbstr());
+    throwSystemError(fmt::format(
+        FOLLY_FMT_COMPILE("open(\"{}\", {:#o}, 0{:#o}) failed"),
+        name,
+        flags,
+        mode));
   }
   ownsFd_ = true;
 }
 
 File::File(const std::string& name, int flags, mode_t mode)
-  : File(name.c_str(), flags, mode) {}
+    : File(name.c_str(), flags, mode) {}
 
 File::File(StringPiece name, int flags, mode_t mode)
-  : File(name.str(), flags, mode) {}
+    : File(name.str(), flags, mode) {}
 
-File::File(File&& other) noexcept
-  : fd_(other.fd_)
-  , ownsFd_(other.ownsFd_) {
+File::File(File&& other) noexcept : fd_(other.fd_), ownsFd_(other.ownsFd_) {
   other.release();
 }
 
@@ -68,9 +65,10 @@ File& File::operator=(File&& other) {
 
 File::~File() {
   auto fd = fd_;
-  if (!closeNoThrow()) {  // ignore most errors
-    DCHECK_NE(errno, EBADF) << "closing fd " << fd << ", it may already "
-      << "have been closed. Another time, this might close the wrong FD.";
+  if (!closeNoThrow()) { // ignore most errors
+    DCHECK_NE(errno, EBADF)
+        << "closing fd " << fd << ", it may already "
+        << "have been closed. Another time, this might close the wrong FD.";
   }
 }
 
@@ -78,8 +76,11 @@ File::~File() {
   // make a temp file with tmpfile(), dup the fd, then return it in a File.
   FILE* tmpFile = tmpfile();
   checkFopenError(tmpFile, "tmpfile() failed");
-  SCOPE_EXIT { fclose(tmpFile); };
+  SCOPE_EXIT {
+    fclose(tmpFile);
+  };
 
+  // TODO(nga): consider setting close-on-exec for the resulting FD
   int fd = ::dup(fileno(tmpFile));
   checkUnixError(fd, "dup() failed");
 
@@ -93,19 +94,35 @@ int File::release() noexcept {
   return released;
 }
 
-void File::swap(File& other) {
+void File::swap(File& other) noexcept {
   using std::swap;
   swap(fd_, other.fd_);
   swap(ownsFd_, other.ownsFd_);
 }
 
-void swap(File& a, File& b) {
+void swap(File& a, File& b) noexcept {
   a.swap(b);
 }
 
 File File::dup() const {
   if (fd_ != -1) {
     int fd = ::dup(fd_);
+    checkUnixError(fd, "dup() failed");
+
+    return File(fd, true);
+  }
+
+  return File();
+}
+
+File File::dupCloseOnExec() const {
+  if (fd_ != -1) {
+    int fd;
+#ifdef _WIN32
+    fd = ::dup(fd_);
+#else
+    fd = ::fcntl(fd_, F_DUPFD_CLOEXEC, 0);
+#endif
     checkUnixError(fd, "dup() failed");
 
     return File(fd, true);
@@ -121,15 +138,23 @@ void File::close() {
 }
 
 bool File::closeNoThrow() {
-  int r = ownsFd_ ? ::close(fd_) : 0;
+  int r = ownsFd_ ? fileops::close(fd_) : 0;
   release();
   return r == 0;
 }
 
-void File::lock() { doLock(LOCK_EX); }
-bool File::try_lock() { return doTryLock(LOCK_EX); }
-void File::lock_shared() { doLock(LOCK_SH); }
-bool File::try_lock_shared() { return doTryLock(LOCK_SH); }
+void File::lock() {
+  doLock(LOCK_EX);
+}
+bool File::try_lock() {
+  return doTryLock(LOCK_EX);
+}
+void File::lock_shared() {
+  doLock(LOCK_SH);
+}
+bool File::try_lock_shared() {
+  return doTryLock(LOCK_SH);
+}
 
 void File::doLock(int op) {
   checkUnixError(flockNoInt(fd_, op), "flock() failed (lock)");
@@ -148,6 +173,8 @@ bool File::doTryLock(int op) {
 void File::unlock() {
   checkUnixError(flockNoInt(fd_, LOCK_UN), "flock() failed (unlock)");
 }
-void File::unlock_shared() { unlock(); }
+void File::unlock_shared() {
+  unlock();
+}
 
 } // namespace folly

@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,10 +22,12 @@
 
 namespace folly {
 
-template <class T>
+template <class T, class Semaphore = folly::LifoSem>
 class UnboundedBlockingQueue : public BlockingQueue<T> {
  public:
-  virtual ~UnboundedBlockingQueue() {}
+  explicit UnboundedBlockingQueue(
+      const typename Semaphore::Options& semaphoreOptions = {})
+      : sem_(semaphoreOptions) {}
 
   BlockingQueueAddResult add(T item) override {
     queue_.enqueue(std::move(item));
@@ -33,29 +35,21 @@ class UnboundedBlockingQueue : public BlockingQueue<T> {
   }
 
   T take() override {
-    T item;
-    while (!queue_.try_dequeue(item)) {
-      sem_.wait();
-    }
-    return item;
+    sem_.wait();
+    return queue_.dequeue();
   }
 
   folly::Optional<T> try_take_for(std::chrono::milliseconds time) override {
-    T item;
-    while (!queue_.try_dequeue(item)) {
-      if (!sem_.try_wait_for(time)) {
-        return folly::none;
-      }
+    if (!sem_.try_wait_for(time)) {
+      return folly::none;
     }
-    return std::move(item);
+    return queue_.dequeue();
   }
 
-  size_t size() override {
-    return queue_.size();
-  }
+  size_t size() override { return queue_.size(); }
 
  private:
-  LifoSem sem_;
+  Semaphore sem_;
   UMPMCQueue<T, false, 6> queue_;
 };
 

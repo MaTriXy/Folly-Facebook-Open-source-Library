@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,17 +14,13 @@
  * limitations under the License.
  */
 
-//
-// Author: andrei.alexandrescu@fb.com
-
 #include <folly/FBString.h>
 
 #include <cstdlib>
 #include <fstream>
 #include <list>
+#include <random>
 #include <sstream>
-
-#include <boost/random.hpp>
 
 #include <folly/Benchmark.h>
 #include <folly/Random.h>
@@ -35,12 +31,12 @@ using namespace std;
 using namespace folly;
 
 static const int seed = folly::randomNumberSeed();
-typedef boost::mt19937 RandomT;
+using RandomT = std::mt19937;
 static RandomT rng(seed);
 
 template <class Integral1, class Integral2>
 Integral2 random(Integral1 low, Integral2 up) {
-  boost::uniform_int<> range(low, up);
+  std::uniform_int_distribution<> range(low, up);
   return range(rng);
 }
 
@@ -74,7 +70,7 @@ std::list<char> RandomList(unsigned int maxSize) {
   std::list<char>::iterator i = lst.begin();
   for (; i != lst.end(); ++i) {
     *i = random('a', 'z');
- }
+  }
   return lst;
 }
 
@@ -90,7 +86,7 @@ std::list<char> RandomList(unsigned int maxSize) {
 #undef STRING
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

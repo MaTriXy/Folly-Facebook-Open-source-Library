@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /*
  *  This file serves as a helper for bridging folly::future and python
  *  asyncio.future.
@@ -24,15 +25,10 @@
 #include <folly/Executor.h>
 #include <folly/futures/Future.h>
 #include <folly/python/AsyncioExecutor.h>
-#include <folly/python/executor_api.h>
+#include <folly/python/executor.h>
 
 namespace folly {
 namespace python {
-
-inline folly::Executor* getExecutor() {
-  import_folly__executor();
-  return get_executor();
-}
 
 template <typename T>
 void bridgeFuture(
@@ -62,6 +58,25 @@ void bridgeFuture(
     PyObject* userData) {
   bridgeFuture(
       getExecutor(), std::move(futureFrom), std::move(callback), userData);
+}
+
+template <typename T>
+void bridgeSemiFuture(
+    folly::Executor* executor,
+    folly::SemiFuture<T>&& semiFutureFrom,
+    folly::Function<void(folly::Try<T>&&, PyObject*)> callback,
+    PyObject* userData) {
+  folly::Future<T> futureFrom = std::move(semiFutureFrom).via(executor);
+  bridgeFuture(executor, std::move(futureFrom), std::move(callback), userData);
+}
+
+template <typename T>
+void bridgeSemiFuture(
+    folly::SemiFuture<T>&& semiFutureFrom,
+    folly::Function<void(folly::Try<T>&&, PyObject*)> callback,
+    PyObject* userData) {
+  bridgeSemiFuture(
+      getExecutor(), std::move(semiFutureFrom), std::move(callback), userData);
 }
 
 } // namespace python

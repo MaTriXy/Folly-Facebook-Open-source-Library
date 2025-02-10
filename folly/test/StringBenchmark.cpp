@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,12 +14,15 @@
  * limitations under the License.
  */
 
-#include <folly/String.h>
-
 #include <boost/algorithm/string.hpp>
-#include <folly/Benchmark.h>
-#include <folly/Random.h>
+
 #include <random>
+
+#include <fmt/format.h>
+#include <folly/Benchmark.h>
+#include <folly/Format.h>
+#include <folly/Random.h>
+#include <folly/String.h>
 
 using namespace folly;
 using namespace std;
@@ -56,9 +59,12 @@ BENCHMARK(folly_toLowerAscii, iters) {
 
 // A simple benchmark that tests various output sizes for a simple
 // input; the goal is to measure the output buffer resize code cost.
+const size_t kAppendBufSize = 300000;
 void stringPrintfOutputSize(int iters, int param) {
   string buffer;
-  BENCHMARK_SUSPEND { buffer.resize(param, 'x'); }
+  BENCHMARK_SUSPEND {
+    buffer.resize(param, 'x');
+  }
 
   for (int64_t i = 0; i < iters; ++i) {
     string s = stringPrintf("msg: %d, %d, %s", 10, 20, buffer.c_str());
@@ -78,14 +84,78 @@ BENCHMARK_PARAM(stringPrintfOutputSize, 1024)
 // Benchmark simple stringAppendf behavior to show a pathology Lovro
 // reported (t5735468).
 BENCHMARK(stringPrintfAppendfBenchmark, iters) {
-  for (unsigned int i = 0; i < iters; ++i) {
+  for (size_t i = 0; i < iters; ++i) {
     string s;
-    BENCHMARK_SUSPEND { s.reserve(300000); }
-    for (int j = 0; j < 300000; ++j) {
+    BENCHMARK_SUSPEND {
+      s.reserve(kAppendBufSize);
+    }
+    for (size_t j = 0; j < kAppendBufSize; ++j) {
       stringAppendf(&s, "%d", 1);
     }
+    DCHECK_EQ(s.size(), kAppendBufSize);
   }
 }
+
+// A simple benchmark that tests various output sizes for a simple
+// input; the goal is to measure the output buffer resize code cost.
+// Intended for comparison with stringPrintf.
+void fmtOutputSize(int iters, int param) {
+  string buffer;
+  BENCHMARK_SUSPEND {
+    buffer.resize(param, 'x');
+  }
+
+  for (int64_t i = 0; i < iters; ++i) {
+    string s = fmt::format("msg: {}, {}, {}", 10, 20, buffer);
+  }
+}
+
+// The first few of these tend to fit in the inline buffer, while the
+// subsequent ones cross that limit, trigger a second vsnprintf, and
+// exercise a different codepath.
+BENCHMARK_PARAM(fmtOutputSize, 1)
+BENCHMARK_PARAM(fmtOutputSize, 4)
+BENCHMARK_PARAM(fmtOutputSize, 16)
+BENCHMARK_PARAM(fmtOutputSize, 64)
+BENCHMARK_PARAM(fmtOutputSize, 256)
+BENCHMARK_PARAM(fmtOutputSize, 1024)
+
+// Benchmark simple fmt append behavior; intended as a comparison
+// against stringAppendf.
+BENCHMARK(fmtAppendfBenchmark, iters) {
+  for (size_t i = 0; i < iters; ++i) {
+    fmt::memory_buffer buf;
+    for (size_t j = 0; j < kAppendBufSize; ++j) {
+      fmt::format_to(std::back_inserter(buf), "{}", 1);
+    }
+    string s = fmt::to_string(buf);
+    DCHECK_EQ(s.size(), kAppendBufSize);
+  }
+}
+
+// A simple benchmark that tests various output sizes for a simple
+// input; the goal is to measure the output buffer resize code cost.
+// Intended for comparison with stringPrintf and fmt.
+void follyFmtOutputSize(int iters, int param) {
+  string buffer;
+  BENCHMARK_SUSPEND {
+    buffer.resize(param, 'x');
+  }
+
+  for (int64_t i = 0; i < iters; ++i) {
+    string s = sformat("msg: {}, {}, {}", 10, 20, buffer);
+  }
+}
+
+// The first few of these tend to fit in the inline buffer, while the
+// subsequent ones cross that limit, trigger a second vsnprintf, and
+// exercise a different codepath.
+BENCHMARK_PARAM(follyFmtOutputSize, 1)
+BENCHMARK_PARAM(follyFmtOutputSize, 4)
+BENCHMARK_PARAM(follyFmtOutputSize, 16)
+BENCHMARK_PARAM(follyFmtOutputSize, 64)
+BENCHMARK_PARAM(follyFmtOutputSize, 256)
+BENCHMARK_PARAM(follyFmtOutputSize, 1024)
 
 namespace {
 fbstring cbmString;
@@ -276,7 +346,7 @@ BENCHMARK(joinInt, iters) {
 }
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   initBenchmark();
   folly::runBenchmarks();
   return 0;

@@ -1,11 +1,11 @@
 /*
- * Copyright 2018-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,8 +32,7 @@ class InitThreadFactory : public ThreadFactory {
       Func&& threadFinializer = [] {})
       : threadFactory_(std::move(threadFactory)),
         threadInitFini_(std::make_shared<ThreadInitFini>(
-            std::move(threadInitializer),
-            std::move(threadFinializer))) {}
+            std::move(threadInitializer), std::move(threadFinializer))) {}
 
   std::thread newThread(Func&& func) override {
     return threadFactory_->newThread(
@@ -44,6 +43,10 @@ class InitThreadFactory : public ThreadFactory {
           };
           func();
         });
+  }
+
+  const std::string& getNamePrefix() const override {
+    return threadFactory_->getNamePrefix();
   }
 
  private:

@@ -1,3 +1,17 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Some additional configuration options.
 option(MSVC_ENABLE_ALL_WARNINGS "If enabled, pass /Wall to the compiler." ON)
 option(MSVC_ENABLE_DEBUG_INLINING "If enabled, enable inlining in the debug configuration. This allows /Zc:inline to be far more effective." OFF)
@@ -25,11 +39,10 @@ if (NOT MSVC_FAVORED_ARCHITECTURE STREQUAL "blend" AND NOT MSVC_FAVORED_ARCHITEC
   message(FATAL_ERROR "MSVC_FAVORED_ARCHITECTURE must be set to one of exactly, 'blend', 'AMD64', 'INTEL64', or 'ATOM'! Got '${MSVC_FAVORED_ARCHITECTURE}' instead!")
 endif()
 
-set(MSVC_LANGUAGE_VERSION "c++latest" CACHE STRING "One of 'c++14', 'c++17', or 'c++latest'. This determines which version of C++ to compile as.")
+set(MSVC_LANGUAGE_VERSION "c++17" CACHE STRING "One of 'c++17', or 'c++latest'. This determines which version of C++ to compile as.")
 set_property(
   CACHE MSVC_LANGUAGE_VERSION
   PROPERTY STRINGS
-    "c++14"
     "c++17"
     "c++latest"
 )
@@ -75,12 +88,28 @@ foreach(flag_var CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
   endif()
 endforeach()
 
+# When building with Ninja, or with /MP enabled, there is the potential
+# for multiple processes to need to lock the same pdb file.
+# The /FS option (which is implicitly enabled by /MP) is widely believed
+# to be the solution for this, but even with /FS enabled the problem can
+# still randomly occur.
+# https://stackoverflow.com/a/58020501/149111 suggests that /Z7 should be
+# used; rather than placing the debug info into a .pdb file it embeds it
+# into the object files in a similar way to gcc/clang which should reduce
+# contention and potentially make the build faster... but at the cost of
+# larger object files
+foreach(flag_var CMAKE_C_FLAGS_DEBUG CMAKE_CXX_FLAGS_DEBUG)
+  if (${flag_var} MATCHES "/Zi")
+    string(REGEX REPLACE "/Zi" "/Z7" ${flag_var} "${${flag_var}}")
+  endif()
+endforeach()
+
 # Apply the option set for Folly to the specified target.
 function(apply_folly_compile_options_to_target THETARGET)
   # The general options passed:
   target_compile_options(${THETARGET}
     PUBLIC
-      /EHa # Enable both SEH and C++ Exceptions.
+      /EHs # Don't catch structured exceptions with catch (...)
       /GF # There are bugs with constexpr StringPiece when string pooling is disabled.
       /Zc:referenceBinding # Disallow temporaries from binding to non-const lvalue references.
       /Zc:rvalueCast # Enforce the standard rules for explicit type conversion.
@@ -89,10 +118,10 @@ function(apply_folly_compile_options_to_target THETARGET)
       /Zc:threadSafeInit # Enable thread-safe function-local statics initialization.
       /Zc:throwingNew # Assume operator new throws on failure.
 
+      /permissive- # Be mean, don't allow bad non-standard stuff (C++/CLI, __declspec, etc. are all left intact).
       /std:${MSVC_LANGUAGE_VERSION} # Build in the requested version of C++
+      /utf-8 # fmt needs unicode support, which requires compiling with /utf-8
 
-      # This is only supported by MSVC 2017
-      $<$<BOOL:${MSVC_IS_2017}>:/permissive-> # Be mean, don't allow bad non-standard stuff (C++/CLI, __declspec, etc. are all left intact).
     PRIVATE
       /bigobj # Support objects with > 65k sections. Needed due to templates.
       /favor:${MSVC_FAVORED_ARCHITECTURE} # Architecture to prefer when generating code.
@@ -188,13 +217,6 @@ function(apply_folly_compile_options_to_target THETARGET)
       /wd4701 # Potentially uninitialized local variable used.
       /wd4702 # Unreachable code.
 
-      # MSVC 2015 only:
-      $<$<BOOL:${MSVC_IS_2015}>:
-        /wd4268 # Static/global data initialized with compiler generated default constructor fills the object with zeros.
-        /wd4510 # Default constructor was implicitly defined as deleted.
-        /wd4814 # In C++14 'constexpr' will not imply 'const'.
-      >
-      
       # These warnings are disabled because we've
       # enabled all warnings. If all warnings are
       # not enabled, we still need to disable them
@@ -211,6 +233,7 @@ function(apply_folly_compile_options_to_target THETARGET)
       /wd4435 # Object layout under /vd2 will change due to virtual base.
       /wd4514 # Unreferenced inline function has been removed. (caused by /Zc:inline)
       /wd4548 # Expression before comma has no effect. I wouldn't disable this normally, but malloc.h triggers this warning.
+      /wd4571 # Semantics of catch(...) changed in VC 7.1
       /wd4574 # ifdef'd macro was defined to 0.
       /wd4582 # Constructor is not implicitly called.
       /wd4583 # Destructor is not implicitly called.
@@ -218,6 +241,7 @@ function(apply_folly_compile_options_to_target THETARGET)
       /wd4623 # Default constructor was implicitly defined as deleted.
       /wd4625 # Copy constructor was implicitly defined as deleted.
       /wd4626 # Assignment operator was implicitly defined as deleted.
+      /wd4643 # Forward declaring standard library types is not permitted.
       /wd4647 # Behavior change in __is_pod.
       /wd4668 # Macro was not defined, replacing with 0.
       /wd4706 # Assignment within conditional expression.
@@ -228,6 +252,7 @@ function(apply_folly_compile_options_to_target THETARGET)
       /wd5026 # Move constructor was implicitly defined as deleted.
       /wd5027 # Move assignment operator was implicitly defined as deleted.
       /wd5031 # #pragma warning(pop): likely mismatch, popping warning state pushed in different file. This is needed because of how boost does things.
+      /wd5045 # Compiler will insert Spectre mitigation for memory load if /Qspectre switch is specified.
 
       # Warnings to treat as errors:
       /we4099 # Mixed use of struct and class on same type names.
@@ -301,8 +326,4 @@ function(apply_folly_compile_options_to_target THETARGET)
   endif()
 endfunction()
 
-target_link_libraries(folly_deps
-  INTERFACE
-    Iphlpapi.lib
-    Ws2_32.lib
-)
+list(APPEND FOLLY_LINK_LIBRARIES Iphlpapi.lib Ws2_32.lib)

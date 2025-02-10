@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,19 +14,19 @@
  * limitations under the License.
  */
 
-#include <folly/File.h>
-
+#include <cstdlib>
 #include <mutex>
 
 #include <boost/thread/locks.hpp>
 #include <glog/logging.h>
 
+#include <folly/File.h>
 #include <folly/String.h>
 #include <folly/Subprocess.h>
-#include <folly/experimental/TestUtil.h>
 #include <folly/experimental/io/FsUtil.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
+#include <folly/testing/TestUtil.h>
 
 using namespace folly;
 using namespace folly::test;
@@ -45,14 +45,18 @@ TEST(File, Locks) {
   CHECK(r != -1);
   buf[r] = '\0';
 
-  fs::path me(buf);
-  auto helper_basename = "file_test_lock_helper";
   fs::path helper;
-  if (fs::exists(me.parent_path() / helper_basename)) {
-    helper = me.parent_path() / helper_basename;
+  const auto* envPath = getenv("FOLLY_FILE_LOCK_TEST_HELPER");
+  if (envPath) {
+    helper = envPath;
   } else {
+    const fs::path me(buf);
+    const auto helper_basename = "file_test_lock_helper";
+    helper = me.parent_path() / helper_basename;
+  }
+  if (!fs::exists(helper)) {
     throw std::runtime_error(
-        folly::to<std::string>("cannot find helper ", helper_basename));
+        folly::to<std::string>("cannot find helper ", helper.string()));
   }
 
   TemporaryFile tempFile;
@@ -60,9 +64,11 @@ TEST(File, Locks) {
 
   enum LockMode { EXCLUSIVE, SHARED };
   auto testLock = [&](LockMode mode, bool expectedSuccess) {
-    auto ret = Subprocess({helper.string(),
-                           mode == SHARED ? "-s" : "-x",
-                           tempFile.path().string()}).wait();
+    auto ret =
+        Subprocess({helper.string(),
+                    mode == SHARED ? "-s" : "-x",
+                    tempFile.path().string()})
+            .wait();
     EXPECT_TRUE(ret.exited());
     if (ret.exited()) {
       EXPECT_EQ(expectedSuccess ? 0 : 42, ret.exitStatus());

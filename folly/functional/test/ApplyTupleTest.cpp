@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,18 +14,16 @@
  * limitations under the License.
  */
 
+#include <folly/functional/ApplyTuple.h>
+
+#include <algorithm>
+#include <array>
 #include <iostream>
+#include <memory>
+#include <utility>
 
 #include <folly/Overload.h>
-#include <folly/functional/ApplyTuple.h>
 #include <folly/portability/GTest.h>
-
-#include <array>
-#include <memory>
-
-// this placates visual studio stupidity - see
-// http://stackoverflow.com/questions/5503901
-namespace {}
 
 namespace {
 
@@ -36,13 +34,9 @@ void func(int a, int b, double c) {
 }
 
 struct Wat {
-  void func(int a, int b, double c) {
-    ::func(a, b, c);
-  }
+  void func(int a, int b, double c) { ::func(a, b, c); }
 
-  double retVal(int a, double b) {
-    return a + b;
-  }
+  double retVal(int a, double b) { return a + b; }
 
   Wat() {}
   Wat(Wat const&) = delete;
@@ -56,21 +50,17 @@ struct Overloaded {
 };
 
 struct Func {
-  int operator()() const {
-    return 1;
-  }
+  int operator()() const { return 1; }
 };
 
 struct CopyCount {
   CopyCount() {}
-  CopyCount(CopyCount const&) {
-    std::cout << "copy count copy ctor\n";
-  }
+  CopyCount(CopyCount const&) { std::cout << "copy count copy ctor\n"; }
 };
 
 void anotherFunc(CopyCount const&) {}
 
-std::function<void (int, int, double)> makeFunc() {
+std::function<void(int, int, double)> makeFunc() {
   return &func;
 }
 
@@ -80,23 +70,17 @@ struct GuardObjBase {
   GuardObjBase(GuardObjBase const&) = delete;
   GuardObjBase& operator=(GuardObjBase const&) = delete;
 };
-typedef GuardObjBase const& Guard;
 
 template <class F, class Tuple>
 struct GuardObj : GuardObjBase {
   explicit GuardObj(F&& f, Tuple&& args)
-    : f_(std::forward<F>(f))
-    , args_(std::forward<Tuple>(args))
-  {}
+      : f_(std::forward<F>(f)), args_(std::forward<Tuple>(args)) {}
   GuardObj(GuardObj&& g) noexcept
-    : GuardObjBase(std::move(g))
-    , f_(std::move(g.f_))
-    , args_(std::move(g.args_))
-  {}
+      : GuardObjBase(std::move(g)),
+        f_(std::move(g.f_)),
+        args_(std::move(g.args_)) {}
 
-  ~GuardObj() {
-    folly::apply(f_, args_);
-  }
+  ~GuardObj() { folly::apply(f_, args_); }
 
   GuardObj(const GuardObj&) = delete;
   GuardObj& operator=(const GuardObj&) = delete;
@@ -107,12 +91,10 @@ struct GuardObj : GuardObjBase {
 };
 
 template <class F, class... Args>
-GuardObj<typename std::decay<F>::type,std::tuple<Args...>>
-guard(F&& f, Args&&... args) {
-  return GuardObj<typename std::decay<F>::type,std::tuple<Args...>>(
-    std::forward<F>(f),
-    std::tuple<Args...>(std::forward<Args>(args)...)
-  );
+GuardObj<typename std::decay<F>::type, std::tuple<Args...>> guard(
+    F&& f, Args&&... args) {
+  return GuardObj<typename std::decay<F>::type, std::tuple<Args...>>(
+      std::forward<F>(f), std::tuple<Args...>(std::forward<Args>(args)...));
 }
 
 struct Mover {
@@ -202,7 +184,7 @@ TEST(ApplyTuple, RefOverloads) {
   struct RefOverloaded {
     RefOverloaded() {}
     int operator()() & { return 201; }
-    int operator()() const & { return 202; }
+    int operator()() const& { return 202; }
     int operator()() && { return 203; }
   };
 
@@ -365,8 +347,9 @@ TEST(ApplyTuple, Uncurry) {
   std::string long2 = "and here is another one!";
   std::string expected = long1 + long2;
 
-  auto cat = folly::uncurry(
-      [](std::string a, std::string b) { return std::move(a) + std::move(b); });
+  auto cat = folly::uncurry([](std::string a, std::string b) {
+    return std::move(a) + std::move(b);
+  });
 
   EXPECT_EQ(expected, cat(std::make_pair(long1, long2)));
   EXPECT_FALSE(long1.empty());
@@ -397,54 +380,32 @@ struct S {
 };
 } // namespace
 
-TEST(MakeFromTupleTest, make_from_tuple) {
-  S expected{42, 1.0, "foobar"};
-
-  // const lvalue ref
-  auto s1 = folly::make_from_tuple<S>(expected.tuple_);
-  EXPECT_EQ(expected.tuple_, s1.tuple_);
-
-  // rvalue ref
-  S sCopy{expected.tuple_};
-  auto s2 = folly::make_from_tuple<S>(std::move(sCopy.tuple_));
-  EXPECT_EQ(expected.tuple_, s2.tuple_);
-  EXPECT_TRUE(std::get<2>(sCopy.tuple_).empty());
-
-  // forward
-  std::string str{"foobar"};
-  auto s3 =
-      folly::make_from_tuple<S>(std::forward_as_tuple(42, 1.0, std::move(str)));
-  EXPECT_EQ(expected.tuple_, s3.tuple_);
-  EXPECT_TRUE(str.empty());
-}
-
 TEST(MakeIndexSequenceFromTuple, Basic) {
-  using folly::index_sequence;
   using folly::index_sequence_for_tuple;
   using OneElementTuple = std::tuple<int>;
   using TwoElementTuple = std::tuple<int>;
 
   EXPECT_TRUE((std::is_same<
                index_sequence_for_tuple<OneElementTuple>,
-               index_sequence<0>>::value));
+               std::index_sequence<0>>::value));
   EXPECT_TRUE((std::is_same<
                index_sequence_for_tuple<const OneElementTuple>,
-               index_sequence<0>>::value));
+               std::index_sequence<0>>::value));
 
   EXPECT_TRUE((std::is_same<
                index_sequence_for_tuple<TwoElementTuple>,
-               index_sequence<0>>::value));
+               std::index_sequence<0>>::value));
   EXPECT_TRUE((std::is_same<
                index_sequence_for_tuple<const TwoElementTuple>,
-               index_sequence<0>>::value));
+               std::index_sequence<0>>::value));
 }
 
 TEST(ApplyResult, Basic) {
   {
     auto f = [](auto) -> int { return {}; };
-    EXPECT_TRUE((std::is_same<
-                 folly::apply_result_t<decltype(f), std::tuple<int>>,
-                 int>{}));
+    using F = decltype(f);
+    EXPECT_TRUE(
+        (std::is_same<folly::apply_result_t<F, std::tuple<int>>, int>{}));
   }
 
   {
@@ -452,103 +413,91 @@ TEST(ApplyResult, Basic) {
         [](int) {},
         [](double) -> double { return {}; },
         [](int, int) -> int { return {}; });
+    using F = decltype(f);
 
-    EXPECT_TRUE((std::is_same<
-                 folly::apply_result_t<decltype(f), std::tuple<int>>,
-                 void>::value));
-    EXPECT_TRUE((std::is_same<
-                 folly::apply_result_t<decltype(f), std::tuple<double>>,
-                 double>::value));
-    EXPECT_TRUE((std::is_same<
-                 folly::apply_result_t<decltype(f), std::tuple<int, int>>,
-                 int>::value));
+    EXPECT_TRUE(
+        (std::is_same<folly::apply_result_t<F, std::tuple<int>>, void>::value));
+    EXPECT_TRUE((
+        std::is_same<folly::apply_result_t<F, std::tuple<double>>, double>::
+            value));
+    EXPECT_TRUE((
+        std::is_same<folly::apply_result_t<F, std::tuple<int, int>>, int>::
+            value));
   }
 }
 
 TEST(IsApplicable, Basic) {
   {
     auto f = [] {};
-    EXPECT_TRUE((folly::is_applicable<decltype(f), std::tuple<>>::value));
-    EXPECT_FALSE((folly::is_applicable<decltype(f), std::tuple<int>>::value));
+    using F = decltype(f);
+    EXPECT_TRUE((folly::is_applicable_v<F, std::tuple<>>));
+    EXPECT_FALSE((folly::is_applicable_v<F, std::tuple<int>>));
   }
   {
     auto f = folly::overload([](int) {}, [](double) -> double { return {}; });
-    EXPECT_TRUE((folly::is_applicable<decltype(f), std::tuple<double>>::value));
-    EXPECT_TRUE((folly::is_applicable<decltype(f), std::tuple<int>>::value));
-    EXPECT_FALSE((folly::is_applicable<decltype(f), std::tuple<>>::value));
-    EXPECT_FALSE(
-        (folly::is_applicable<decltype(f), std::tuple<int, double>>::value));
+    using F = decltype(f);
+    EXPECT_TRUE((folly::is_applicable_v<F, std::tuple<double>>));
+    EXPECT_TRUE((folly::is_applicable_v<F, std::tuple<int>>));
+    EXPECT_FALSE((folly::is_applicable_v<F, std::tuple<>>));
+    EXPECT_FALSE((folly::is_applicable_v<F, std::tuple<int, double>>));
   }
 }
 
 TEST(IsNothrowApplicable, Basic) {
   {
     auto f = []() noexcept {};
-    EXPECT_TRUE((folly::is_nothrow_applicable<decltype(f), std::tuple<>>{}));
-    EXPECT_FALSE(
-        (folly::is_nothrow_applicable<decltype(f), std::tuple<int>>{}));
+    using F = decltype(f);
+    EXPECT_TRUE((folly::is_nothrow_applicable_v<F, std::tuple<>>));
+    EXPECT_FALSE((folly::is_nothrow_applicable_v<F, std::tuple<int>>));
   }
   {
-    auto f = folly::overload([](int) noexcept {}, [](double) -> double {
-      return {};
-    });
-    EXPECT_FALSE(
-        (folly::is_nothrow_applicable<decltype(f), std::tuple<double>>{}));
-    EXPECT_TRUE((folly::is_nothrow_applicable<decltype(f), std::tuple<int>>{}));
-    EXPECT_FALSE((folly::is_nothrow_applicable<decltype(f), std::tuple<>>{}));
-    EXPECT_FALSE(
-        (folly::is_nothrow_applicable<decltype(f), std::tuple<int, double>>::
-             value));
+    auto f = folly::overload(
+        [](int) noexcept {}, [](double) -> double { return {}; });
+    using F = decltype(f);
+    EXPECT_FALSE((folly::is_nothrow_applicable_v<F, std::tuple<double>>));
+    EXPECT_TRUE((folly::is_nothrow_applicable_v<F, std::tuple<int>>));
+    EXPECT_FALSE((folly::is_nothrow_applicable_v<F, std::tuple<>>));
+    EXPECT_FALSE((folly::is_nothrow_applicable_v<F, std::tuple<int, double>>));
   }
 }
 
 TEST(IsApplicableR, Basic) {
   {
     auto f = []() -> int { return {}; };
-    EXPECT_TRUE((folly::is_applicable_r<double, decltype(f), std::tuple<>>{}));
-    EXPECT_FALSE(
-        (folly::is_applicable_r<double, decltype(f), std::tuple<int>>{}));
+    using F = decltype(f);
+    EXPECT_TRUE((folly::is_applicable_r_v<double, F, std::tuple<>>));
+    EXPECT_FALSE((folly::is_applicable_r_v<double, F, std::tuple<int>>));
   }
   {
-    auto f = folly::overload([](int) noexcept {}, [](double) -> double {
-      return {};
-    });
-    EXPECT_TRUE(
-        (folly::is_applicable_r<float, decltype(f), std::tuple<double>>{}));
-    EXPECT_TRUE((folly::is_applicable_r<void, decltype(f), std::tuple<int>>{}));
-    EXPECT_FALSE((folly::is_applicable_r<void, decltype(f), std::tuple<>>{}));
+    auto f = folly::overload(
+        [](int) noexcept {}, [](double) -> double { return {}; });
+    using F = decltype(f);
+    EXPECT_TRUE((folly::is_applicable_r_v<float, F, std::tuple<double>>));
+    EXPECT_TRUE((folly::is_applicable_r_v<void, F, std::tuple<int>>));
+    EXPECT_FALSE((folly::is_applicable_r_v<void, F, std::tuple<>>));
     EXPECT_FALSE(
-        (folly::is_applicable_r<double, decltype(f), std::tuple<int, double>>::
-             value));
+        (folly::is_applicable_r_v<double, F, std::tuple<int, double>>));
   }
 }
 
 TEST(IsNothrowApplicableR, Basic) {
   {
-    auto f = []() noexcept->int {
-      return {};
-    };
-    EXPECT_TRUE(
-        (folly::is_nothrow_applicable_r<double, decltype(f), std::tuple<>>{}));
+    auto f = []() noexcept -> int { return {}; };
+    using F = decltype(f);
+    EXPECT_TRUE((folly::is_nothrow_applicable_r_v<double, F, std::tuple<>>));
     EXPECT_FALSE(
-        (folly::
-             is_nothrow_applicable_r<double, decltype(f), std::tuple<int>>{}));
+        (folly::is_nothrow_applicable_r_v<double, F, std::tuple<int>>));
   }
   {
-    auto f = folly::overload([](int) noexcept {}, [](double) -> double {
-      return {};
-    });
-    EXPECT_FALSE((
-        folly::
-            is_nothrow_applicable_r<float, decltype(f), std::tuple<double>>{}));
-    EXPECT_TRUE(
-        (folly::is_nothrow_applicable_r<void, decltype(f), std::tuple<int>>{}));
+    auto f = folly::overload(
+        [](int) noexcept {}, [](double) -> double { return {}; });
+    using F = decltype(f);
     EXPECT_FALSE(
-        (folly::is_nothrow_applicable_r<void, decltype(f), std::tuple<>>{}));
-    EXPECT_FALSE((folly::is_nothrow_applicable_r<
-                  double,
-                  decltype(f),
-                  std::tuple<int, double>>::value));
+        (folly::is_nothrow_applicable_r_v<float, F, std::tuple<double>>));
+    EXPECT_TRUE((folly::is_nothrow_applicable_r_v<void, F, std::tuple<int>>));
+    EXPECT_FALSE((folly::is_nothrow_applicable_r_v<void, F, std::tuple<>>));
+    EXPECT_FALSE(
+        (folly::is_nothrow_applicable_r_v<double, F, std::tuple<int, double>>));
   }
 }
 
@@ -560,19 +509,27 @@ TEST(ForwardTuple, Basic) {
                std::tuple<int&, double&>>::value));
   EXPECT_EQ(folly::forward_tuple(tuple), tuple);
   EXPECT_TRUE((std::is_same<
-               decltype(folly::forward_tuple(folly::as_const(tuple))),
+               decltype(folly::forward_tuple(std::as_const(tuple))),
                std::tuple<const int&, const double&>>::value));
-  EXPECT_EQ(folly::forward_tuple(folly::as_const(tuple)), tuple);
+  EXPECT_EQ(folly::forward_tuple(std::as_const(tuple)), tuple);
 
   EXPECT_TRUE((std::is_same<
                decltype(folly::forward_tuple(std::move(tuple))),
                std::tuple<int&&, double&&>>::value));
   EXPECT_EQ(folly::forward_tuple(std::move(tuple)), tuple);
+#if defined(__GLIBCXX__) && (!defined(_GLIBCXX_RELEASE) || _GLIBCXX_RELEASE < 8)
+  constexpr bool before_lwg2485 = true;
+#else
+  constexpr bool before_lwg2485 = false;
+#endif
   EXPECT_TRUE(
       (std::is_same<
-          decltype(folly::forward_tuple(std::move(folly::as_const(tuple)))),
-          std::tuple<const int&, const double&>>::value));
-  EXPECT_EQ(folly::forward_tuple(std::move(folly::as_const(tuple))), tuple);
+          decltype(folly::forward_tuple(std::move(std::as_const(tuple)))),
+          std::conditional_t<
+              before_lwg2485,
+              std::tuple<const int&, const double&>,
+              std::tuple<const int&&, const double&&>>>::value));
+  EXPECT_EQ(folly::forward_tuple(std::move(std::as_const(tuple))), tuple);
 
   auto integer = 1;
   auto floating_point = 2.0;
@@ -586,9 +543,10 @@ TEST(ForwardTuple, Basic) {
                decltype(folly::forward_tuple(std::move(ref_tuple))),
                std::tuple<int&, double&&>>::value));
 
-  EXPECT_TRUE((std::is_same<
-               decltype(std::tuple_cat(
-                   folly::forward_tuple(tuple),
-                   folly::forward_tuple(std::move(tuple)))),
-               std::tuple<int&, double&, int&&, double&&>>::value));
+  EXPECT_TRUE(
+      (std::is_same<
+          decltype(std::tuple_cat(
+              folly::forward_tuple(tuple),
+              folly::forward_tuple(std::move(tuple)))),
+          std::tuple<int&, double&, int&&, double&&>>::value));
 }

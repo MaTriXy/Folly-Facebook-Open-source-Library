@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,17 +19,48 @@
 namespace folly {
 
 // ZeroCopyTest
-ZeroCopyTest::ZeroCopyTest(int numLoops, bool zeroCopy, size_t bufferSize)
-    : numLoops_(numLoops),
+ZeroCopyTest::ZeroCopyTest(
+    size_t numClients,
+    int numLoops,
+    bool zeroCopy,
+    size_t bufferSize,
+    const folly::AsyncSocket::ZeroCopyDrainConfig& config)
+    : numClients_(numClients),
+      counter_(numClients),
+      numLoops_(numLoops),
       zeroCopy_(zeroCopy),
       bufferSize_(bufferSize),
-      client_(
-          new ZeroCopyTestAsyncSocket(&evb_, numLoops_, bufferSize_, zeroCopy)),
       listenSock_(new folly::AsyncServerSocket(&evb_)),
-      server_(&evb_, numLoops_, bufferSize_, zeroCopy) {
+      server_(&evb_, numLoops_, bufferSize_, zeroCopy, config) {
+  clients_.reserve(numClients_);
+
+  for (size_t i = 0; i < numClients_; i++) {
+    clients_.emplace_back(std::make_unique<ZeroCopyTestAsyncSocket>(
+        &counter_, &evb_, numLoops_, bufferSize_, zeroCopy, config));
+  }
   if (listenSock_) {
     server_.addCallbackToServerSocket(*listenSock_);
   }
+}
+
+int ZeroCopyTest::setSendBufSize(size_t bufsize) {
+  int ret = 0;
+  for (const auto& c : clients_) {
+    if (c->setSendBufSize(bufsize) == 0) {
+      ++ret;
+    }
+  }
+  return ret;
+}
+
+void ZeroCopyTest::setCloseAfterSend(bool val) {
+  for (const auto& c : clients_) {
+    c->setCloseAfterSend(val);
+  }
+}
+
+void ZeroCopyTest::setCloseAfterAccept(bool val) {
+  server_.setCloseAfterAccept(val);
 }
 
 bool ZeroCopyTest::run() {
@@ -40,13 +71,19 @@ bool ZeroCopyTest::run() {
       listenSock_->listen(10);
       listenSock_->startAccepting();
 
-      connectOne();
+      connectAll();
     }
   });
 
   evb_.loopForever();
 
-  return !client_->isZeroCopyWriteInProgress();
+  for (auto& client : clients_) {
+    if (client->isZeroCopyWriteInProgress()) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 } // namespace folly

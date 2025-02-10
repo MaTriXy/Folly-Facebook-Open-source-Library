@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,14 +13,27 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <thread>
 
 #include <folly/PackedSyncPtr.h>
 #include <folly/concurrency/detail/AtomicSharedPtr-detail.h>
+#include <folly/memory/SanitizeLeak.h>
 #include <folly/synchronization/AtomicStruct.h>
+#include <folly/synchronization/AtomicUtil.h>
 #include <folly/synchronization/detail/AtomicUtils.h>
-#include <atomic>
-#include <thread>
+
+#if defined(__GLIBCXX__) && FOLLY_HAS_PACKED_SYNC_PTR
+#define FOLLY_HAS_ATOMIC_SHARED_PTR_HOOKED 1
+#else
+#define FOLLY_HAS_ATOMIC_SHARED_PTR_HOOKED 0
+#endif
+
+#if FOLLY_HAS_ATOMIC_SHARED_PTR_HOOKED
 
 /*
  * This is an implementation of the std::atomic_shared_ptr TS
@@ -30,7 +43,7 @@
  * AFAIK, the only other implementation is Anthony Williams from
  * Just::thread library:
  *
- * https://bitbucket.org/anthonyw/atomic_shared_ptr
+ * https://github.com/anthonywilliams/atomic_shared_ptr
  *
  * implementation details:
  *
@@ -48,7 +61,7 @@
  * This version instead stores the 48 bits of address, plus 16 bits of
  * local count in a single 8byte pointer.  This avoids 'lock cmpxchg16b',
  * which is much slower than 'lock xchg' in the normal 'store' case.  In
- * the less-common aliased pointer scenaro, we just allocate it in a new
+ * the less-common aliased pointer scenario, we just allocate it in a new
  * block, and store a pointer to that instead.
  *
  * Note that even if we only want to use the 3-bits of pointer alignment,
@@ -76,18 +89,14 @@ class atomic_shared_ptr {
   using PackedPtr = folly::PackedSyncPtr<BasePtr>;
 
  public:
-  atomic_shared_ptr() noexcept {
-    init();
-  }
+  atomic_shared_ptr() noexcept { init(); }
   explicit atomic_shared_ptr(SharedPtr foo) /* noexcept */
       : atomic_shared_ptr() {
     store(std::move(foo));
   }
   atomic_shared_ptr(const atomic_shared_ptr<T>&) = delete;
 
-  ~atomic_shared_ptr() {
-    store(SharedPtr(nullptr));
-  }
+  ~atomic_shared_ptr() { store(SharedPtr(nullptr)); }
   void operator=(SharedPtr desired) /* noexcept */ {
     store(std::move(desired));
   }
@@ -103,15 +112,13 @@ class atomic_shared_ptr {
     return true;
   }
 
-  SharedPtr load(std::memory_order order = std::memory_order_seq_cst) const
-      noexcept {
+  SharedPtr load(
+      std::memory_order order = std::memory_order_seq_cst) const noexcept {
     auto local = takeOwnedBase(order);
     return get_shared_ptr(local, false);
   }
 
-  /* implicit */ operator SharedPtr() const {
-    return load();
-  }
+  /* implicit */ operator SharedPtr() const { return load(); }
 
   void store(
       SharedPtr n,
@@ -228,69 +235,58 @@ class atomic_shared_ptr {
   // Matches packed_sync_pointer.  Must be > max number of local
   // counts.  This is the max number of threads that can access this
   // atomic_shared_ptr at once before we start blocking.
-  static constexpr unsigned EXTERNAL_OFFSET{0x2000};
+  static constexpr std::uint16_t EXTERNAL_OFFSET{0x2000};
   // Bit signifying aliased constructor
-  static constexpr unsigned ALIASED_PTR{0x4000};
+  static constexpr std::uint16_t ALIASED_PTR{0x4000};
 
-  mutable AtomicStruct<PackedPtr, Atom> ptr_;
+  static std::uint16_t get_local_count(const PackedPtr& p) {
+    return p.extra() & ~ALIASED_PTR;
+  }
 
-  void add_external(BasePtr* res, int64_t c = 0) const {
+  static void add_external(BasePtr* res, int64_t c = 0) {
     assert(res);
     CountedDetail::inc_shared_count(res, EXTERNAL_OFFSET + c);
+    annotate_object_leaked(res);
   }
-  void release_external(PackedPtr& res, int64_t c = 0) const {
+  static void release_external(PackedPtr& res, int64_t c = 0) {
     if (!res.get()) {
       return;
     }
+    annotate_object_collected(res.get());
     int64_t count = get_local_count(res) + c;
     int64_t diff = EXTERNAL_OFFSET - count;
     assert(diff >= 0);
     CountedDetail::template release_shared<T>(res.get(), diff);
   }
-  PackedPtr get_newptr(const SharedPtr& n) const {
-    BasePtr* newval;
-    unsigned count = 0;
-    if (!n) {
-      newval = nullptr;
-    } else {
-      newval = CountedDetail::get_counted_base(n);
-      if (n.get() != CountedDetail::template get_shared_ptr<T>(newval)) {
-        // This is an aliased sharedptr.  Make an un-aliased one
-        // by wrapping in *another* shared_ptr.
-        auto data = CountedDetail::template make_ptr<SharedPtr>(n);
-        newval = CountedDetail::get_counted_base(data);
-        count = ALIASED_PTR;
-        // (add external must happen before data goes out of scope)
-        add_external(newval);
-      } else {
-        add_external(newval);
-      }
-    }
 
-    PackedPtr newptr;
-    newptr.init(newval, count);
-
-    return newptr;
+  static PackedPtr get_newptr(const SharedPtr& n) {
+    return get_newptr_impl<false>(n);
   }
-  PackedPtr get_newptr(SharedPtr&& n) const {
-    BasePtr* newval;
-    unsigned count = 0;
-    if (!n) {
-      newval = nullptr;
+  static PackedPtr get_newptr(SharedPtr&& n) {
+    return get_newptr_impl<true>(std::move(n));
+  }
+  template <bool kOwn, class S>
+  static PackedPtr get_newptr_impl(S&& n) {
+    std::uint16_t count = 0;
+    BasePtr* newval = CountedDetail::get_counted_base(n);
+    if (!n && newval == nullptr) {
+      // n is default-constructed, nothing to do.
+    } else if (
+        newval == nullptr ||
+        n.get() != CountedDetail::template get_shared_ptr<T>(newval)) {
+      // This is an aliased sharedptr.  Make an un-aliased one by wrapping in
+      // *another* shared_ptr.
+      auto data =
+          CountedDetail::template make_ptr<SharedPtr>(std::forward<S>(n));
+      newval = CountedDetail::get_counted_base(data);
+      count = ALIASED_PTR;
+      CountedDetail::release_ptr(data);
+      add_external(newval, -1);
     } else {
-      newval = CountedDetail::get_counted_base(n);
-      if (n.get() != CountedDetail::template get_shared_ptr<T>(newval)) {
-        // This is an aliased sharedptr.  Make an un-aliased one
-        // by wrapping in *another* shared_ptr.
-        auto data = CountedDetail::template make_ptr<SharedPtr>(std::move(n));
-        newval = CountedDetail::get_counted_base(data);
-        count = ALIASED_PTR;
-        CountedDetail::release_ptr(data);
-        add_external(newval, -1);
-      } else {
+      if constexpr (kOwn) {
         CountedDetail::release_ptr(n);
-        add_external(newval, -1);
       }
+      add_external(newval, kOwn ? -1 : 0);
     }
 
     PackedPtr newptr;
@@ -298,14 +294,11 @@ class atomic_shared_ptr {
 
     return newptr;
   }
+
   void init() {
     PackedPtr data;
     data.init();
     ptr_.store(data);
-  }
-
-  unsigned int get_local_count(const PackedPtr& p) const {
-    return p.extra() & ~ALIASED_PTR;
   }
 
   // Check pointer equality considering wrapped aliased pointers.
@@ -363,7 +356,7 @@ class atomic_shared_ptr {
     }
 
     // Check if we need to push a batch from local -> global
-    auto batchcount = EXTERNAL_OFFSET / 2;
+    std::uint16_t batchcount = EXTERNAL_OFFSET / 2;
     if (get_local_count(newlocal) > batchcount) {
       CountedDetail::inc_shared_count(newlocal.get(), batchcount);
       putOwnedBase(newlocal.get(), batchcount, order);
@@ -372,8 +365,8 @@ class atomic_shared_ptr {
     return newlocal;
   }
 
-  void putOwnedBase(BasePtr* p, unsigned int count, std::memory_order mo) const
-      noexcept {
+  void putOwnedBase(
+      BasePtr* p, std::uint16_t count, std::memory_order mo) const noexcept {
     PackedPtr local = ptr_.load(std::memory_order_acquire);
     while (true) {
       if (local.get() != p) {
@@ -396,6 +389,96 @@ class atomic_shared_ptr {
 
     CountedDetail::template release_shared<T>(p, count);
   }
+
+  mutable AtomicStruct<PackedPtr, Atom> ptr_;
 };
 
 } // namespace folly
+
+#else
+
+namespace folly {
+
+template <typename T>
+class atomic_shared_ptr {
+ private:
+  std::shared_ptr<T> rep_;
+
+ public:
+  using value_type = std::shared_ptr<T>;
+
+  atomic_shared_ptr() = default;
+  atomic_shared_ptr(std::nullptr_t) noexcept {}
+  atomic_shared_ptr(std::shared_ptr<T> desired) noexcept
+      : rep_{std::move(desired)} {}
+
+  atomic_shared_ptr(atomic_shared_ptr const&) = delete;
+  atomic_shared_ptr(atomic_shared_ptr&&) = delete;
+
+  void operator=(std::nullptr_t) noexcept { store(nullptr); }
+  void operator=(std::shared_ptr<T> desired) noexcept {
+    store(std::move(desired));
+  }
+
+  void operator=(atomic_shared_ptr const&) = delete;
+  void operator=(atomic_shared_ptr&&) = delete;
+
+  /* implicit */ operator std::shared_ptr<T>() const noexcept { return load(); }
+
+  bool is_lock_free() const noexcept { return atomic_is_lock_free(&rep_); }
+
+  std::shared_ptr<T> load(
+      std::memory_order order = std::memory_order_seq_cst) const noexcept {
+    return atomic_load_explicit(&rep_, order);
+  }
+
+  void store(
+      std::shared_ptr<T> desired,
+      std::memory_order order = std::memory_order_seq_cst) noexcept {
+    atomic_store_explicit(&rep_, std::move(desired), order);
+  }
+
+  std::shared_ptr<T> exchange(
+      std::shared_ptr<T> desired,
+      std::memory_order order = std::memory_order_seq_cst) noexcept {
+    return atomic_exchange_explicit(&rep_, std::move(desired), order);
+  }
+
+  bool compare_exchange_weak(
+      std::shared_ptr<T>& expected,
+      std::shared_ptr<T> desired,
+      std::memory_order success,
+      std::memory_order failure) noexcept {
+    return atomic_compare_exchange_weak_explicit(
+        &rep_, &expected, std::move(desired), success, failure);
+  }
+
+  bool compare_exchange_weak(
+      std::shared_ptr<T>& expected,
+      std::shared_ptr<T> desired,
+      std::memory_order order = std::memory_order_seq_cst) noexcept {
+    return atomic_compare_exchange_weak_explicit(
+        &rep_, &expected, std::move(desired), order, memory_order_load(order));
+  }
+
+  bool compare_exchange_strong(
+      std::shared_ptr<T>& expected,
+      std::shared_ptr<T> desired,
+      std::memory_order success,
+      std::memory_order failure) noexcept {
+    return atomic_compare_exchange_strong_explicit(
+        &rep_, &expected, std::move(desired), success, failure);
+  }
+
+  bool compare_exchange_strong(
+      std::shared_ptr<T>& expected,
+      std::shared_ptr<T> desired,
+      std::memory_order order = std::memory_order_seq_cst) noexcept {
+    return atomic_compare_exchange_strong_explicit(
+        &rep_, &expected, std::move(desired), order, memory_order_load(order));
+  }
+};
+
+} // namespace folly
+
+#endif // FOLLY_HAS_ATOMIC_SHARED_PTR_HOOKED

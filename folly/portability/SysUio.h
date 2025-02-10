@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,12 +20,22 @@
 #include <folly/portability/IOVec.h>
 #include <folly/portability/SysTypes.h>
 
+#if FOLLY_HAVE_PREADV || FOLLY_HAVE_PWRITEV
+#include <sys/uio.h>
+#endif
+
+namespace folly {
 #if !FOLLY_HAVE_PREADV
-extern "C" ssize_t preadv(int fd, const iovec* iov, int count, off_t offset);
+ssize_t preadv(int fd, const iovec* iov, int count, off_t offset);
+#else
+using ::preadv;
 #endif
 #if !FOLLY_HAVE_PWRITEV
-extern "C" ssize_t pwritev(int fd, const iovec* iov, int count, off_t offset);
+ssize_t pwritev(int fd, const iovec* iov, int count, off_t offset);
+#else
+using ::pwritev;
 #endif
+} // namespace folly
 
 #ifdef _WIN32
 extern "C" ssize_t readv(int fd, const iovec* iov, int count);

@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,14 +16,17 @@
 
 #include <folly/Format.h>
 
+#include <utility>
+
 #include <glog/logging.h>
 
 #include <folly/Benchmark.h>
 #include <folly/FBVector.h>
 #include <folly/Utility.h>
-#include <folly/dynamic.h>
 #include <folly/init/Init.h>
-#include <folly/json.h>
+#include <folly/json/dynamic.h>
+
+FOLLY_GNU_DISABLE_WARNING("-Wdeprecated-declarations")
 
 using namespace folly;
 
@@ -100,7 +103,7 @@ BENCHMARK_RELATIVE(intAppend_format) {
 BENCHMARK_DRAW_LINE();
 
 template <size_t... Indexes>
-int snprintf20Numbers(int i, index_sequence<Indexes...>) {
+int snprintf20Numbers(int i, std::index_sequence<Indexes...>) {
   static_assert(20 == sizeof...(Indexes), "Must have exactly 20 indexes");
   return snprintf(
       bigBuf.data(),
@@ -115,13 +118,13 @@ int snprintf20Numbers(int i, index_sequence<Indexes...>) {
 BENCHMARK(bigFormat_snprintf, iters) {
   while (iters--) {
     for (int i = -100; i < 100; i++) {
-      snprintf20Numbers(i, make_index_sequence<20>());
+      snprintf20Numbers(i, std::make_index_sequence<20>());
     }
   }
 }
 
 template <size_t... Indexes>
-decltype(auto) format20Numbers(int i, index_sequence<Indexes...>) {
+decltype(auto) format20Numbers(int i, std::index_sequence<Indexes...>) {
   static_assert(20 == sizeof...(Indexes), "Must have exactly 20 indexes");
   return format(
       "{} {} {} {} {}"
@@ -142,8 +145,9 @@ BENCHMARK_RELATIVE(bigFormat_format, iters) {
   while (iters--) {
     for (int i = -100; i < 100; i++) {
       p = bigBuf.data();
-      suspender.dismissing(
-          [&] { format20Numbers(i, make_index_sequence<20>())(writeToBuf); });
+      suspender.dismissing([&] {
+        format20Numbers(i, std::make_index_sequence<20>())(writeToBuf);
+      });
     }
   }
 }
@@ -159,24 +163,8 @@ BENCHMARK(format_nested_strings, iters) {
         format(
             &out,
             "{} {}",
-            format("{} {}", i, i + 1).str(),
-            format("{} {}", -i, -i - 1).str());
-      });
-    }
-  }
-}
-
-BENCHMARK_RELATIVE(format_nested_fbstrings, iters) {
-  BenchmarkSuspender suspender;
-  while (iters--) {
-    for (int i = 0; i < 1000; ++i) {
-      fbstring out;
-      suspender.dismissing([&] {
-        format(
-            &out,
-            "{} {}",
-            format("{} {}", i, i + 1).fbstr(),
-            format("{} {}", -i, -i - 1).fbstr());
+            sformat("{} {}", i, i + 1),
+            sformat("{} {}", -i, -i - 1));
       });
     }
   }
@@ -311,7 +299,6 @@ BENCHMARK_RELATIVE(sformat_long_string_safe, iters) {
 // bigFormat_format                                  90.41%   196.91us    5.08K
 // ----------------------------------------------------------------------------
 // format_nested_strings                                      317.65us    3.15K
-// format_nested_fbstrings                           99.89%   318.01us    3.14K
 // format_nested_direct                             116.52%   272.62us    3.67K
 // ----------------------------------------------------------------------------
 // copy_short_string                                           28.33ns   35.30M
@@ -328,7 +315,7 @@ BENCHMARK_RELATIVE(sformat_long_string_safe, iters) {
 // ============================================================================
 
 int main(int argc, char* argv[]) {
-  init(&argc, &argv, true);
+  folly::Init init(&argc, &argv, true);
   runBenchmarks();
   return 0;
 }

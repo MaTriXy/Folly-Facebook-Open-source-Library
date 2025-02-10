@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,10 +25,6 @@
 
 #pragma once
 
-#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ < 5
-#error Folly.Poly requires gcc-5 or greater
-#endif
-
 #include <cassert>
 #include <new>
 #include <type_traits>
@@ -41,17 +37,18 @@
 #include <folly/detail/TypeList.h>
 #include <folly/lang/Assume.h>
 
-#if !defined(__cpp_inline_variables)
-#define FOLLY_INLINE_CONSTEXPR constexpr
-#else
-#define FOLLY_INLINE_CONSTEXPR inline constexpr
-#endif
-
+#include <folly/PolyException.h>
 #include <folly/detail/PolyDetail.h>
 
 namespace folly {
 template <class I>
 struct Poly;
+
+// MSVC workaround
+template <class Node, class Tfx, class Access>
+struct PolySelf_ {
+  using type = decltype(Access::template self_<Node, Tfx>());
+};
 
 /**
  * Within the definition of interface `I`, `PolySelf<Base>` is an alias for
@@ -104,7 +101,7 @@ template <
     class Node,
     class Tfx = detail::MetaIdentity,
     class Access = detail::PolyAccess>
-using PolySelf = decltype(Access::template self_<Node, Tfx>());
+using PolySelf = _t<PolySelf_<Node, Tfx, Access>>;
 
 /**
  * When used in conjunction with `PolySelf`, controls how to construct `Poly`
@@ -114,85 +111,11 @@ using PolySelf = decltype(Access::template self_<Node, Tfx>());
  */
 using PolyDecay = detail::MetaQuote<std::decay_t>;
 
-#if !defined(__cpp_template_auto)
-
-/**
- * Use `FOLLY_POLY_MEMBERS(MEMS...)` on pre-C++17 compilers to specify a
- * comma-separated list of member function bindings.
- *
- * For example:
- *
- *     struct IFooBar {
- *       template <class Base>
- *       struct Interface : Base {
- *         int foo() const { return folly::poly_call<0>(*this); }
- *         void bar() { folly::poly_call<1>(*this); }
- *       };
- *       template <class T>
- *       using Members = FOLLY_POLY_MEMBERS(&T::foo, &T::bar);
- *     };
- */
-#define FOLLY_POLY_MEMBERS(...)                     \
-  typename decltype(::folly::detail::deduceMembers( \
-      __VA_ARGS__))::template Members<__VA_ARGS__>
-
-/**
- * Use `FOLLY_POLY_MEMBER(SIG, MEM)` on pre-C++17 compilers to specify a member
- * function binding that needs to be disambiguated because of overloads. `SIG`
- * should the (possibly const-qualified) signature of the `MEM` member function
- * pointer.
- *
- * For example:
- *
- *     struct IFoo {
- *       template <class Base> struct Interface : Base {
- *         int foo() const { return folly::poly_call<0>(*this); }
- *       };
- *       template <class T> using Members = FOLLY_POLY_MEMBERS(
- *         // This works even if T::foo is overloaded:
- *         FOLLY_POLY_MEMBER(int()const, &T::foo)
- *       );
- *     };
- */
-#define FOLLY_POLY_MEMBER(SIG, MEM) \
-  ::folly::detail::MemberDef<       \
-      ::folly::detail::Member<decltype(::folly::sig<SIG>(MEM)), MEM>>::value
-
-/**
- * A list of member function bindings.
- */
-template <class... Ts>
-using PolyMembers = detail::TypeList<Ts...>;
-
-#else
 #define FOLLY_POLY_MEMBER(SIG, MEM) ::folly::sig<SIG>(MEM)
 #define FOLLY_POLY_MEMBERS(...) ::folly::PolyMembers<__VA_ARGS__>
 
 template <auto... Ps>
 struct PolyMembers {};
-
-#endif
-
-/**
- * Exception type that is thrown on invalid access of an empty `Poly` object.
- */
-struct FOLLY_EXPORT BadPolyAccess : std::exception {
-  BadPolyAccess() = default;
-  char const* what() const noexcept override {
-    return "BadPolyAccess";
-  }
-};
-
-/**
- * Exception type that is thrown when attempting to extract from a `Poly` a
- * value of the wrong type.
- */
-struct FOLLY_EXPORT BadPolyCast : std::bad_cast {
-  BadPolyCast() = default;
-  char const* what() const noexcept override {
-    return "BadPolyCast";
-  }
-};
 
 /**
  * Used in the definition of a `Poly` interface to say that the current
@@ -237,8 +160,10 @@ struct PolyExtends : virtual I... {
  *     struct IAddable {
  *       template <class Base>
  *       struct Interface : Base {
- *         friend PolySelf<Base, Decay>
- *         operator+(PolySelf<Base> const& a, PolySelf<Base> const& b) {
+ *         friend folly::PolySelf<Base, folly::PolyDecay>
+ *         operator+(
+ *             folly::PolySelf<Base> const& a,
+ *             folly::PolySelf<Base> const& b) {
  *           return folly::poly_call<0, IAddable>(a, b);
  *         }
  *       };
@@ -255,8 +180,7 @@ struct PolyExtends : virtual I... {
 template <std::size_t N, typename This, typename... As>
 auto poly_call(This&& _this, As&&... as)
     -> decltype(detail::PolyAccess::call<N>(
-        static_cast<This&&>(_this),
-        static_cast<As&&>(as)...)) {
+        static_cast<This&&>(_this), static_cast<As&&>(as)...)) {
   return detail::PolyAccess::call<N>(
       static_cast<This&&>(_this), static_cast<As&&>(as)...);
 }
@@ -292,9 +216,9 @@ template <
     class Poly,
     typename... As,
     std::enable_if_t<detail::IsPoly<Poly>::value, int> = 0>
-auto poly_call(Poly&& _this, As&&... as) -> decltype(poly_call<N, I>(
-    static_cast<Poly&&>(_this).get(),
-    static_cast<As&&>(as)...)) {
+auto poly_call(Poly&& _this, As&&... as)
+    -> decltype(poly_call<N, I>(
+        static_cast<Poly&&>(_this).get(), static_cast<As&&>(as)...)) {
   return poly_call<N, I>(
       static_cast<Poly&&>(_this).get(), static_cast<As&&>(as)...);
 }
@@ -315,7 +239,7 @@ template <std::size_t N, class I, typename... As>
  * \tparam T The (unqualified) type to which to cast the `Poly` object.
  * \tparam Poly The type of the `Poly` object.
  * \param that The `Poly` object to be cast.
- * \return A reference to the `T` object stored in or refered to by `that`.
+ * \return A reference to the `T` object stored in or referred to by `that`.
  * \throw BadPolyAccess if `that` is empty.
  * \throw BadPolyCast if `that` does not store or refer to an object of type
  *        `T`.
@@ -353,7 +277,9 @@ template <class T, class I>
 /// \overload
 template <class T, class I>
 [[noreturn]] detail::AddCvrefOf<T, I> const& poly_cast(
-    detail::ArchetypeRoot<I> const&) { assume_unreachable(); }
+    detail::ArchetypeRoot<I> const&) {
+  assume_unreachable();
+}
 /// \endcond
 
 /// \overload
@@ -440,15 +366,13 @@ constexpr bool poly_empty(Poly<I&> const&) noexcept {
  */
 template <
     class I,
-    std::enable_if_t<detail::Not<std::is_reference<I>>::value, int> = 0>
+    std::enable_if_t<Negation<std::is_reference<I>>::value, int> = 0>
 constexpr Poly<I>&& poly_move(detail::PolyRoot<I>& that) noexcept {
   return static_cast<Poly<I>&&>(static_cast<Poly<I>&>(that));
 }
 
 /// \overload
-template <
-    class I,
-    std::enable_if_t<detail::Not<std::is_const<I>>::value, int> = 0>
+template <class I, std::enable_if_t<Negation<std::is_const<I>>::value, int> = 0>
 Poly<I&&> poly_move(detail::PolyRoot<I&> const& that) noexcept {
   return detail::PolyAccess::move(that);
 }
@@ -491,19 +415,11 @@ struct PolyVal : PolyImpl<I> {
 
   using PolyRoot<I>::vptr_;
 
-  PolyRoot<I>& _polyRoot_() noexcept {
-    return *this;
-  }
-  PolyRoot<I> const& _polyRoot_() const noexcept {
-    return *this;
-  }
+  PolyRoot<I>& _polyRoot_() noexcept { return *this; }
+  PolyRoot<I> const& _polyRoot_() const noexcept { return *this; }
 
-  Data* _data_() noexcept {
-    return PolyAccess::data(*this);
-  }
-  Data const* _data_() const noexcept {
-    return PolyAccess::data(*this);
-  }
+  Data* _data_() noexcept { return PolyAccess::data(*this); }
+  Data const* _data_() const noexcept { return PolyAccess::data(*this); }
 
  public:
   /**
@@ -571,7 +487,7 @@ struct PolyVal : PolyImpl<I> {
 ////////////////////////////////////////////////////////////////////////////////
 /**
  * The implementation of `Poly` for when the interface type is
- * reference-quelified, like `Poly<SemuRegular &>`.
+ * reference-qualified, like `Poly<SemiRegular &>`.
  */
 template <class I>
 struct PolyRef : private PolyImpl<I> {
@@ -580,12 +496,8 @@ struct PolyRef : private PolyImpl<I> {
 
   AddCvrefOf<PolyRoot<I>, I>& _polyRoot_() const noexcept;
 
-  Data* _data_() noexcept {
-    return PolyAccess::data(*this);
-  }
-  Data const* _data_() const noexcept {
-    return PolyAccess::data(*this);
-  }
+  Data* _data_() noexcept { return PolyAccess::data(*this); }
+  Data const* _data_() const noexcept { return PolyAccess::data(*this); }
 
   static constexpr RefType refType() noexcept;
 
@@ -682,16 +594,12 @@ struct PolyRef : private PolyImpl<I> {
   /**
    * Get a reference to the interface, with correct `const`-ness applied.
    */
-  AddCvrefOf<PolyImpl<I>, I>& operator*() const noexcept {
-    return get();
-  }
+  AddCvrefOf<PolyImpl<I>, I>& operator*() const noexcept { return get(); }
 
   /**
    * Get a pointer to the interface, with correct `const`-ness applied.
    */
-  auto operator-> () const noexcept {
-    return &get();
-  }
+  auto operator->() const noexcept { return &get(); }
 };
 
 template <class I>
@@ -740,7 +648,7 @@ using PolyValOrRef = If<std::is_reference<I>::value, PolyRef<I>, PolyVal<I>>;
  * \li A *mapping* from a concrete type to a set of member function bindings.
  *
  * Below is a (heavily commented) example of a simple implementation of a
- * `std::function`-like polymorphic wrapper. Its interface has only a simgle
+ * `std::function`-like polymorphic wrapper. Its interface has only a single
  * member function: `operator()`
  *
  *     // An interface for a callable object of a particular signature, Fun
@@ -1089,7 +997,7 @@ using PolyValOrRef = If<std::is_reference<I>::value, PolyRef<I>, PolyVal<I>>;
  * added? Adding requires _two_ objects, both of which are type-erased. This
  * interface requires dispatching on both objects, doing the addition only
  * if the types are the same. For this we make use of the `PolySelf` template
- * alias to define an interface that takes more than one object of the the
+ * alias to define an interface that takes more than one object of the
  * erased type.
  *
  *     struct IAddable {
@@ -1180,10 +1088,8 @@ void swap(Poly<I>& left, Poly<I>& right) noexcept {
  * The above is permitted
  */
 template <class Sig>
-FOLLY_INLINE_CONSTEXPR detail::Sig<Sig> const sig = {};
+inline constexpr detail::Sig<Sig> const sig = {};
 
 } // namespace folly
 
 #include <folly/Poly-inl.h>
-
-#undef FOLLY_INLINE_CONSTEXPR

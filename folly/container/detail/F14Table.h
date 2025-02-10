@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,6 +25,7 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -32,39 +33,63 @@
 #include <folly/Bits.h>
 #include <folly/ConstexprMath.h>
 #include <folly/Likely.h>
+#include <folly/Memory.h>
 #include <folly/Portability.h>
 #include <folly/ScopeGuard.h>
 #include <folly/Traits.h>
-#include <folly/functional/ApplyTuple.h>
 #include <folly/functional/Invoke.h>
 #include <folly/lang/Align.h>
 #include <folly/lang/Assume.h>
 #include <folly/lang/Exception.h>
-#include <folly/lang/Launder.h>
+#include <folly/lang/Pretty.h>
 #include <folly/lang/SafeAssert.h>
 #include <folly/portability/Builtins.h>
 
+#include <folly/container/HeterogeneousAccess.h>
 #include <folly/container/detail/F14Defaults.h>
 #include <folly/container/detail/F14IntrinsicsAvailability.h>
+#include <folly/container/detail/F14Mask.h>
+
+#if __has_include(<concepts>)
+#include <concepts>
+#endif
 
 #if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+
+#if FOLLY_F14_CRC_INTRINSIC_AVAILABLE
 #if FOLLY_NEON
-#ifdef __ARM_FEATURE_CRC32
 #include <arm_acle.h> // __crc32cd
-#endif
-#include <arm_neon.h> // uint8x16t intrinsics
-#else // SSE2
-#include <immintrin.h> // __m128i intrinsics
+#else
 #include <nmmintrin.h> // _mm_crc32_u64
+#endif
+#else
+#ifdef _WIN32
+#include <intrin.h> // _mul128 in fallback bit mixer
+#endif
+#endif
+
+#if FOLLY_NEON
+#include <arm_neon.h> // uint8x16t intrinsics
+#elif FOLLY_SSE >= 2 // SSE2
+#include <emmintrin.h> // _mm_set1_epi8
+#include <immintrin.h> // __m128i intrinsics
 #include <xmmintrin.h> // _mm_prefetch
 #endif
+
+#ifndef FOLLY_F14_PERTURB_INSERTION_ORDER
+#define FOLLY_F14_PERTURB_INSERTION_ORDER folly::kIsDebug
 #endif
 
-#ifdef _WIN32
-#include <intrin.h> // for _mul128
+#else // FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+
+#ifndef FOLLY_F14_PERTURB_INSERTION_ORDER
+#define FOLLY_F14_PERTURB_INSERTION_ORDER false
 #endif
+
+#endif // FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
 
 namespace folly {
+
 struct F14TableStats {
   char const* policy;
   std::size_t size{0};
@@ -85,9 +110,7 @@ struct F14TableStats {
     return m->computeStats();
   }
 
-  static F14TableStats computeHelper(...) {
-    return {};
-  }
+  static F14TableStats computeHelper(...) { return {}; }
 
  public:
   template <typename T>
@@ -98,6 +121,27 @@ struct F14TableStats {
 
 namespace f14 {
 namespace detail {
+
+template <F14IntrinsicsMode>
+struct F14LinkCheck {};
+
+template <>
+struct F14LinkCheck<getF14IntrinsicsMode()> {
+  // The purpose of this method is to trigger a link failure if
+  // compilation flags vary across compilation units.  The definition
+  // is in F14Table.cpp, so only one of F14LinkCheck<None>::check,
+  // F14LinkCheck<Simd>::check, or F14LinkCheck<SimdAndCrc>::check will
+  // be available at link time.
+  //
+  // To cause a link failure the function must be invoked in code that
+  // is not optimized away, so we call it on a couple of cold paths
+  // (exception handling paths in copy construction and rehash).  LTO may
+  // remove it entirely, but that's fine.
+  static void check() noexcept;
+};
+
+bool tlsPendingSafeInserts(std::ptrdiff_t delta = 0);
+std::size_t tlsMinstdRand(std::size_t n);
 
 #if defined(_LIBCPP_VERSION)
 
@@ -117,8 +161,9 @@ struct StdIsFastHash<std::hash<long double>> : std::false_type {};
 template <typename... Args>
 struct StdIsFastHash<std::hash<std::basic_string<Args...>>> : std::false_type {
 };
-
-// TODO: add specialization for std::basic_string_view
+template <typename... Args>
+struct StdIsFastHash<std::hash<std::basic_string_view<Args...>>>
+    : std::false_type {};
 
 // mimic internal node of unordered containers in STL to estimate the size
 template <typename K, typename V, typename H, typename Enable = void>
@@ -132,14 +177,26 @@ struct StdNodeReplica<
     V,
     H,
     std::enable_if_t<
-        !StdIsFastHash<H>::value ||
-        !folly::is_nothrow_invocable<H, K>::value>> {
+        !StdIsFastHash<H>::value || !is_nothrow_invocable_v<H, K>>> {
   void* next;
   V value;
   std::size_t hash;
 };
 
 #endif
+
+template <class Container, class Predicate>
+typename Container::size_type erase_if_impl(
+    Container& c, Predicate& predicate) {
+  auto const old_size = c.size();
+  for (auto i = c.begin(), last = c.end(); i != last;) {
+    auto prev = i++;
+    if (predicate(*prev)) {
+      c.erase(prev);
+    }
+  }
+  return old_size - c.size();
+}
 
 } // namespace detail
 } // namespace f14
@@ -154,130 +211,276 @@ class F14Table;
 
 class F14HashToken final {
  public:
-  F14HashToken() = default;
+  constexpr F14HashToken() = default;
+
+  friend constexpr bool operator==(
+      F14HashToken const& a, F14HashToken const& b) noexcept {
+    return a.hp_.first == b.hp_.first; // processed hash but not tag
+  }
+  friend constexpr bool operator!=(
+      F14HashToken const& a, F14HashToken const& b) noexcept {
+    return !(a == b);
+  }
 
  private:
-  using HashPair = std::pair<std::size_t, uint8_t>;
+  using HashPair = std::pair<std::size_t, std::size_t>;
 
-  explicit F14HashToken(HashPair hp) : hp_(hp) {}
-  explicit operator HashPair() const {
-    return hp_;
-  }
+  constexpr explicit F14HashToken(HashPair hp) noexcept : hp_(hp) {}
+  constexpr explicit operator HashPair() const noexcept { return hp_; }
 
   HashPair hp_;
 
   template <typename Policy>
   friend class f14::detail::F14Table;
+
+  template <typename Key, typename Hasher>
+  friend class F14HashedKey;
 };
+
+#else
+class F14HashToken final {
+  friend constexpr bool operator==(
+      F14HashToken const&, F14HashToken const&) noexcept {
+    return true;
+  }
+  friend constexpr bool operator!=(
+      F14HashToken const&, F14HashToken const&) noexcept {
+    return false;
+  }
+};
+#endif
+
+#if defined(__cpp_concepts) && __cpp_concepts && __has_include(<concepts>)
+static_assert(std::regular<F14HashToken>);
+#endif
 
 namespace f14 {
 namespace detail {
-//// Defaults should be selected using void
 
+// Detection for folly_assume_32bit_hash
+
+template <typename Hasher, typename Void = void>
+struct ShouldAssume32BitHash : std::bool_constant<!require_sizeof<Hasher>> {};
+
+template <typename Hasher>
+struct ShouldAssume32BitHash<
+    Hasher,
+    void_t<typename Hasher::folly_assume_32bit_hash>>
+    : std::bool_constant<Hasher::folly_assume_32bit_hash::value> {};
+
+//////// hash helpers
+
+// Hash values are used to compute the desired position, which is the
+// chunk index at which we would like to place a value (if there is no
+// overflow), and the tag, which is an additional 7 bits of entropy.
+//
+// The standard's definition of hash function quality only refers to
+// the probability of collisions of the entire hash value, not to the
+// probability of collisions of the results of shifting or masking the
+// hash value.  Some hash functions, however, provide this stronger
+// guarantee (not quite the same as the definition of avalanching,
+// but similar).
+//
+// If the user-supplied hasher is an avalanching one (each bit of the
+// hash value has a 50% chance of being the same for differing hash
+// inputs), then we can just take 7 bits of the hash value for the tag
+// and the rest for the desired position.  Avalanching hashers also
+// let us map hash value to array index position with just a bitmask
+// without risking clumping.  (Many hash tables just accept the risk
+// and do it regardless.)
+//
+// std::hash<std::string> avalanches in all implementations we've
+// examined: libstdc++-v3 uses MurmurHash2, and libc++ uses CityHash
+// or MurmurHash2.  The other std::hash specializations, however, do not
+// have this property.  std::hash for integral and pointer values is the
+// identity function on libstdc++-v3 and libc++, in particular.  In our
+// experience it is also fairly common for user-defined specializations
+// of std::hash to combine fields in an ad-hoc way that does not evenly
+// distribute entropy among the bits of the result (a + 37 * b, for
+// example, where a and b are integer fields).
+//
+// For hash functions we don't trust to avalanche, we repair things by
+// applying a bit mixer to the user-supplied hash.
+
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+#if FOLLY_X64 || FOLLY_AARCH64 || FOLLY_RISCV64
+// 64-bit
+template <typename Hasher, typename Key>
+std::pair<std::size_t, std::size_t> splitHashImpl(std::size_t hash) {
+  static_assert(sizeof(std::size_t) == sizeof(uint64_t), "");
+  std::size_t tag;
+  if (!IsAvalanchingHasher<Hasher, Key>::value) {
+#if FOLLY_F14_CRC_INTRINSIC_AVAILABLE
+#if FOLLY_SSE_PREREQ(4, 2)
+    // SSE4.2 CRC
+    std::size_t c = _mm_crc32_u64(0, hash);
+    tag = (c >> 24) | 0x80;
+    hash += c;
+#else
+    // CRC is optional on armv8 (-march=armv8-a+crc), standard on armv8.1
+    std::size_t c = __crc32cd(0, hash);
+    tag = (c >> 24) | 0x80;
+    hash += c;
+#endif
+#else
+    // The mixer below is not fully avalanching for all 64 bits of
+    // output, but looks quite good for bits 18..63 and puts plenty
+    // of entropy even lower when considering multiple bits together
+    // (like the tag).  Importantly, when under register pressure it
+    // uses fewer registers, instructions, and immediate constants
+    // than the alternatives, resulting in compact code that is more
+    // easily inlinable.  In one instantiation a modified Murmur mixer
+    // was 48 bytes of assembly (even after using the same multiplicand
+    // for both steps) and this one was 27 bytes, for example.
+    auto const kMul = 0xc4ceb9fe1a85ec53ULL;
+#ifdef _WIN32
+    __int64 signedHi;
+    __int64 signedLo = _mul128(
+        static_cast<__int64>(hash), static_cast<__int64>(kMul), &signedHi);
+    auto hi = static_cast<uint64_t>(signedHi);
+    auto lo = static_cast<uint64_t>(signedLo);
+#else
+    auto hi = static_cast<uint64_t>(
+        (static_cast<unsigned __int128>(hash) * kMul) >> 64);
+    auto lo = hash * kMul;
+#endif
+    hash = hi ^ lo;
+    hash *= kMul;
+    tag = ((hash >> 15) & 0x7f) | 0x80;
+    hash >>= 22;
+#endif
+  } else {
+    // F14 uses the bottom bits of the hash to form the index, so for maps
+    // with less than 16.7 million entries, it's safe to have a 32-bit hash,
+    // and use the bottom 24 bits for the index and leave the top 8 for the
+    // tag.
+    //
+    // | 0x80 sets the top bit in the tag.
+    // We need to avoid 0 tag for a non-empty value.
+    // In some places we also rely on the top bit
+    // being 1 for all non-empty values.
+    if (ShouldAssume32BitHash<Hasher>::value) {
+      tag = ((hash >> 24) | 0x80) & 0xFF;
+      // Explicitly mask off the top 32-bits so that the compiler can
+      // optimize away whatever is populating the top 32-bits, which is likely
+      // just the lower 32-bits duplicated.
+      hash = hash & 0xFFFF'FFFF;
+    } else {
+      tag = (hash >> 56) | 0x80;
+    }
+  }
+  return std::make_pair(hash, tag);
+}
+#else
+// 32-bit
+template <typename Hasher, typename Key>
+std::pair<std::size_t, std::size_t> splitHashImpl(std::size_t hash) {
+  static_assert(sizeof(std::size_t) == sizeof(uint32_t), "");
+  uint8_t tag;
+  if (!IsAvalanchingHasher<Hasher, Key>::value) {
+#if FOLLY_F14_CRC_INTRINSIC_AVAILABLE
+#if FOLLY_SSE_PREREQ(4, 2)
+    // SSE4.2 CRC
+    auto c = _mm_crc32_u32(0, hash);
+    tag = static_cast<uint8_t>(~(c >> 25));
+    hash += c;
+#else
+    auto c = __crc32cw(0, hash);
+    tag = static_cast<uint8_t>(~(c >> 25));
+    hash += c;
+#endif
+#else
+    // finalizer for 32-bit murmur2
+    hash ^= hash >> 13;
+    hash *= 0x5bd1e995;
+    hash ^= hash >> 15;
+    tag = static_cast<uint8_t>(~(hash >> 25));
+#endif
+  } else {
+    // | 0x80 sets the top bit in the tag.
+    // We need to avoid 0 tag for a non-empty value.
+    // In some places we also rely on the top bit
+    // being 1 for all non-empty values.
+    tag = (hash >> 24) | 0x80;
+  }
+  return std::make_pair(hash, tag);
+}
+#endif
+#endif
+} // namespace detail
+} // namespace f14
+
+template <typename TKeyType, typename Hasher = f14::DefaultHasher<TKeyType>>
+class F14HashedKey final {
+ public:
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+  template <typename... Args>
+  explicit F14HashedKey(Args&&... args)
+      : key_(std::forward<Args>(args)...),
+        hash_(f14::detail::splitHashImpl<Hasher, TKeyType>(Hasher{}(key_))) {}
+#else
+  F14HashedKey() = delete;
+#endif
+
+  const TKeyType& getKey() const { return key_; }
+  const F14HashToken& getHashToken() const { return hash_; }
+  // We want the conversion to the key to be implicit - the hashed key should
+  // seamlessly behave as the key itself.
+  /* implicit */ operator const TKeyType&() const { return key_; }
+  explicit operator const F14HashToken&() const { return hash_; }
+
+  bool operator==(const F14HashedKey& other) const {
+    return key_ == other.key_;
+  }
+  bool operator==(const TKeyType& other) const { return key_ == other; }
+
+ private:
+  TKeyType key_;
+  F14HashToken hash_;
+};
+
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+namespace f14 {
+namespace detail {
+
+//// Defaults should be selected using void
 template <typename Arg, typename Default>
 using VoidDefault =
     std::conditional_t<std::is_same<Arg, Default>::value, void, Arg>;
 
 template <typename Arg, typename Default>
 using Defaulted =
-    typename std::conditional_t<std::is_same<Arg, void>::value, Default, Arg>;
-
-template <
-    typename TableKey,
-    typename Hasher,
-    typename KeyEqual,
-    typename ArgKey,
-    typename Void = void>
-struct EligibleForHeterogeneousFind : std::false_type {};
-
-template <
-    typename TableKey,
-    typename Hasher,
-    typename KeyEqual,
-    typename ArgKey>
-struct EligibleForHeterogeneousFind<
-    TableKey,
-    Hasher,
-    KeyEqual,
-    ArgKey,
-    folly::void_t<
-        typename Hasher::is_transparent,
-        typename KeyEqual::is_transparent>> : std::true_type {};
-
-template <
-    typename TableKey,
-    typename Hasher,
-    typename KeyEqual,
-    typename ArgKey>
-using EligibleForHeterogeneousInsert = Conjunction<
-    EligibleForHeterogeneousFind<TableKey, Hasher, KeyEqual, ArgKey>,
-    std::is_constructible<TableKey, ArgKey>>;
-
-template <
-    typename TableKey,
-    typename Hasher,
-    typename KeyEqual,
-    typename KeyArg0OrBool,
-    typename... KeyArgs>
-using KeyTypeForEmplaceHelper = std::conditional_t<
-    sizeof...(KeyArgs) == 1 &&
-        (std::is_same<folly::remove_cvref_t<KeyArg0OrBool>, TableKey>::value ||
-         EligibleForHeterogeneousFind<
-             TableKey,
-             Hasher,
-             KeyEqual,
-             KeyArg0OrBool>::value),
-    KeyArg0OrBool&&,
-    TableKey>;
-
-template <
-    typename TableKey,
-    typename Hasher,
-    typename KeyEqual,
-    typename... KeyArgs>
-using KeyTypeForEmplace = KeyTypeForEmplaceHelper<
-    TableKey,
-    Hasher,
-    KeyEqual,
-    std::tuple_element_t<0, std::tuple<KeyArgs..., bool>>,
-    KeyArgs...>;
+    std::conditional_t<std::is_same<Arg, void>::value, Default, Arg>;
 
 ////////////////
 
+/// Prefetch the first cache line of the object at ptr.
 template <typename T>
 FOLLY_ALWAYS_INLINE static void prefetchAddr(T const* ptr) {
 #ifndef _WIN32
+  FOLLY_PUSH_WARNING
+  FOLLY_GNU_DISABLE_WARNING("-Warray-bounds")
+  /// The argument ptr is permitted to be wild, since wild pointers are allowed
+  /// for prefetching on every architecture. While this behavior is technically
+  /// undefined (forbidden) in C and C++, we need this behavior in order to
+  /// avoid extra cost in the callers. Recent versions of GCC warn when they
+  /// detect uses of pointers which may be wild. So we suppress the warning.
   __builtin_prefetch(static_cast<void const*>(ptr));
+  FOLLY_POP_WARNING
 #elif FOLLY_NEON
   __prefetch(static_cast<void const*>(ptr));
-#else
+#elif FOLLY_SSE >= 2
   _mm_prefetch(
       static_cast<char const*>(static_cast<void const*>(ptr)), _MM_HINT_T0);
 #endif
 }
 
-template <typename T>
-FOLLY_ALWAYS_INLINE static unsigned findFirstSetNonZero(T mask) {
-  folly::assume(mask != 0);
-  if (sizeof(mask) == sizeof(unsigned)) {
-    return __builtin_ctz(static_cast<unsigned>(mask));
-  } else {
-    return __builtin_ctzll(mask);
-  }
-}
-
 #if FOLLY_NEON
 using TagVector = uint8x16_t;
-
-using MaskType = uint64_t;
-
-constexpr unsigned kMaskSpacing = 4;
-#else // SSE2
+#elif FOLLY_SSE >= 2
 using TagVector = __m128i;
-
-using MaskType = uint32_t;
-
-constexpr unsigned kMaskSpacing = 1;
+#elif FOLLY_HAVE_INT128_T
+using TagVector = __uint128_t;
 #endif
 
 // We could use unaligned loads to relax this requirement, but that
@@ -286,201 +489,21 @@ constexpr unsigned kMaskSpacing = 1;
 constexpr std::size_t kRequiredVectorAlignment =
     constexpr_max(std::size_t{16}, alignof(max_align_t));
 
-using EmptyTagVectorType = std::aligned_storage_t<
-    sizeof(TagVector) + kRequiredVectorAlignment,
-    alignof(max_align_t)>;
-
-extern EmptyTagVectorType kEmptyTagVector;
-
-template <unsigned BitCount>
-struct FullMask {
-  static constexpr MaskType value =
-      (FullMask<BitCount - 1>::value << kMaskSpacing) + 1;
+struct alignas(kRequiredVectorAlignment) F14EmptyTagVector {
+  std::array<uint8_t, 15> bytes_{};
+  uint8_t marker_{255}; // coincides with outboundOverflowCount_
 };
 
-template <>
-struct FullMask<1> : std::integral_constant<MaskType, 1> {};
-
-#if FOLLY_ARM
-// Mask iteration is different for ARM because that is the only platform
-// for which the mask is bigger than a register.
-
-// Iterates a mask, optimized for the case that only a few bits are set
-class SparseMaskIter {
-  static_assert(kMaskSpacing == 4, "");
-
-  uint32_t interleavedMask_;
-
- public:
-  explicit SparseMaskIter(MaskType mask)
-      : interleavedMask_{static_cast<uint32_t>(((mask >> 32) << 2) | mask)} {}
-
-  bool hasNext() {
-    return interleavedMask_ != 0;
-  }
-
-  unsigned next() {
-    FOLLY_SAFE_DCHECK(hasNext(), "");
-    unsigned i = findFirstSetNonZero(interleavedMask_);
-    interleavedMask_ &= (interleavedMask_ - 1);
-    return ((i >> 2) | (i << 2)) & 0xf;
-  }
-};
-
-// Iterates a mask, optimized for the case that most bits are set
-class DenseMaskIter {
-  static_assert(kMaskSpacing == 4, "");
-
-  std::size_t count_;
-  unsigned index_;
-  uint8_t const* tags_;
-
- public:
-  explicit DenseMaskIter(uint8_t const* tags, MaskType mask) {
-    if (mask == 0) {
-      count_ = 0;
-    } else {
-      count_ =
-          folly::popcount(static_cast<uint32_t>(((mask >> 32) << 2) | mask));
-      if (LIKELY((mask & 1) != 0)) {
-        index_ = 0;
-      } else {
-        index_ = findFirstSetNonZero(mask) / kMaskSpacing;
-      }
-      tags_ = tags;
-    }
-  }
-
-  bool hasNext() {
-    return count_ > 0;
-  }
-
-  unsigned next() {
-    auto rv = index_;
-    --count_;
-    if (count_ > 0) {
-      do {
-        ++index_;
-      } while ((tags_[index_] & 0x80) == 0);
-    }
-    FOLLY_SAFE_DCHECK(index_ < 16, "");
-    return rv;
-  }
-};
-
-#else
-// Iterates a mask, optimized for the case that only a few bits are set
-class SparseMaskIter {
-  MaskType mask_;
-
- public:
-  explicit SparseMaskIter(MaskType mask) : mask_{mask} {}
-
-  bool hasNext() {
-    return mask_ != 0;
-  }
-
-  unsigned next() {
-    FOLLY_SAFE_DCHECK(hasNext(), "");
-    unsigned i = findFirstSetNonZero(mask_);
-    mask_ &= (mask_ - 1);
-    return i / kMaskSpacing;
-  }
-};
-
-// Iterates a mask, optimized for the case that most bits are set
-class DenseMaskIter {
-  MaskType mask_;
-  unsigned index_{0};
-
- public:
-  explicit DenseMaskIter(uint8_t const*, MaskType mask) : mask_{mask} {}
-
-  bool hasNext() {
-    return mask_ != 0;
-  }
-
-  unsigned next() {
-    FOLLY_SAFE_DCHECK(hasNext(), "");
-    if (LIKELY((mask_ & 1) != 0)) {
-      mask_ >>= kMaskSpacing;
-      return index_++;
-    } else {
-      unsigned s = findFirstSetNonZero(mask_);
-      unsigned rv = index_ + (s / kMaskSpacing);
-      mask_ >>= (s + kMaskSpacing);
-      index_ = rv + 1;
-      return rv;
-    }
-  }
-};
-#endif
-
-// Iterates a mask, returning pairs of [begin,end) index covering blocks
-// of set bits
-class MaskRangeIter {
-  MaskType mask_;
-  unsigned shift_{0};
-
- public:
-  explicit MaskRangeIter(MaskType mask) {
-    // If kMaskSpacing is > 1 then there will be empty bits even for
-    // contiguous ranges.  Fill them in.
-    mask_ = mask * ((1 << kMaskSpacing) - 1);
-  }
-
-  bool hasNext() {
-    return mask_ != 0;
-  }
-
-  std::pair<unsigned, unsigned> next() {
-    FOLLY_SAFE_DCHECK(hasNext(), "");
-    auto s = shift_;
-    unsigned b = findFirstSetNonZero(mask_);
-    unsigned e = findFirstSetNonZero(~(mask_ | (mask_ - 1)));
-    mask_ >>= e;
-    shift_ = s + e;
-    return std::make_pair((s + b) / kMaskSpacing, (s + e) / kMaskSpacing);
-  }
-};
-
-// Holds the result of an index query that has an optional result,
-// interpreting a mask of 0 to be the empty answer and the index of the
-// last set bit to be the non-empty answer
-class LastOccupiedInMask {
-  MaskType mask_;
-
- public:
-  explicit LastOccupiedInMask(MaskType mask) : mask_{mask} {}
-
-  bool hasIndex() const {
-    return mask_ != 0;
-  }
-
-  unsigned index() const {
-    folly::assume(mask_ != 0);
-    return (folly::findLastSet(mask_) - 1) / kMaskSpacing;
-  }
-};
-
-// Holds the result of an index query that has an optional result,
-// interpreting a mask of 0 to be the empty answer and the index of the
-// first set bit to be the non-empty answer
-class FirstEmptyInMask {
-  MaskType mask_;
-
- public:
-  explicit FirstEmptyInMask(MaskType mask) : mask_{mask} {}
-
-  bool hasIndex() const {
-    return mask_ != 0;
-  }
-
-  unsigned index() const {
-    FOLLY_SAFE_DCHECK(mask_ != 0, "");
-    return findFirstSetNonZero(mask_) / kMaskSpacing;
-  }
-};
+FOLLY_EXPORT inline F14EmptyTagVector& getF14EmptyTagVector() noexcept {
+  static constexpr F14EmptyTagVector instance;
+  auto const raw = reinterpret_cast<uintptr_t>(&instance);
+  FOLLY_SAFE_DCHECK(
+      (raw % kRequiredVectorAlignment) == 0,
+      raw,
+      " not aligned to ",
+      kRequiredVectorAlignment);
+  return const_cast<F14EmptyTagVector&>(instance);
+}
 
 template <typename ItemType>
 struct alignas(kRequiredVectorAlignment) F14Chunk {
@@ -501,40 +524,41 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
   static constexpr unsigned kAllocatedCapacity =
       kCapacity + (sizeof(Item) == 16 ? 1 : 0);
 
+  // If kCapacity == 12 then we get 16 bits of capacityScale by using
+  // tag 12 and 13, otherwise we only get 4 bits of control_
+  static constexpr std::size_t kCapacityScaleBits = kCapacity == 12 ? 16 : 4;
+  static constexpr std::size_t kCapacityScaleShift = kCapacityScaleBits - 4;
+
   static constexpr MaskType kFullMask = FullMask<kCapacity>::value;
+
+  static constexpr std::uint8_t kOutboundOverflowMax = 254;
+  static constexpr std::uint8_t kOutboundOverflowEmpty = 255;
 
   // Non-empty tags have their top bit set.  tags_ array might be bigger
   // than kCapacity to keep alignment of first item.
   std::array<uint8_t, 14> tags_;
 
-  // Bits 0..3 record the actual capacity of the chunk if this is chunk
-  // zero, or hold 0000 for other chunks.  Bits 4-7 are a 4-bit counter
-  // of the number of values in this chunk that were placed because they
-  // overflowed their desired chunk (hostedOverflowCount).
+  // Bits 0..3 of chunk 0 record the scaling factor between the number of
+  // chunks and the max size without rehash.  Bits 4-7 in any chunk are a
+  // 4-bit counter of the number of values in this chunk that were placed
+  // because they overflowed their desired chunk (hostedOverflowCount).
   uint8_t control_;
 
   // The number of values that would have been placed into this chunk if
   // there had been space, including values that also overflowed previous
-  // full chunks.  This value saturates; once it becomes 255 it no longer
+  // full chunks.  This value saturates; once it becomes 254 it no longer
   // increases nor decreases.
   uint8_t outboundOverflowCount_;
 
-  std::array<
-      std::aligned_storage_t<sizeof(Item), alignof(Item)>,
-      kAllocatedCapacity>
-      rawItems_;
+  std::array<aligned_storage_for_t<Item>, kAllocatedCapacity> rawItems_;
 
-  static F14Chunk* emptyInstance() {
-    auto raw = reinterpret_cast<char*>(&kEmptyTagVector);
-    if (kRequiredVectorAlignment > alignof(max_align_t)) {
-      auto delta = kRequiredVectorAlignment -
-          (reinterpret_cast<uintptr_t>(raw) % kRequiredVectorAlignment);
-      raw += delta;
-    }
-    auto rv = reinterpret_cast<F14Chunk*>(raw);
-    FOLLY_SAFE_DCHECK(
-        (reinterpret_cast<uintptr_t>(rv) % kRequiredVectorAlignment) == 0, "");
-    return rv;
+  FOLLY_EXPORT static F14Chunk* getSomeEmptyInstance() noexcept {
+    return reinterpret_cast<F14Chunk*>(&getF14EmptyTagVector());
+  }
+
+  static bool isEmptyInstance(F14Chunk const* const chunk) noexcept {
+    auto const empty = reinterpret_cast<F14EmptyTagVector const*>(chunk);
+    return empty->marker_ == kOutboundOverflowEmpty;
   }
 
   void clear() {
@@ -543,76 +567,80 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
     // gcc < 6 doesn't exploit chunk alignment to generate the optimal
     // SSE clear from memset.  This is very hot code, so it is worth
     // handling that case specially.
-#if FOLLY_SSE >= 2 && __GNUC__ <= 5 && !__clang__
-    // this doesn't violate strict aliasing rules because __m128i is
-    // tagged as __may_alias__
-    auto* v = static_cast<__m128i*>(static_cast<void*>(&tags_[0]));
-    _mm_store_si128(v, _mm_setzero_si128());
-#else
     std::memset(&tags_[0], '\0', 16);
-#endif
   }
 
   void copyOverflowInfoFrom(F14Chunk const& rhs) {
+    FOLLY_SAFE_DCHECK(!isEmptyInstance(&rhs));
     FOLLY_SAFE_DCHECK(hostedOverflowCount() == 0, "");
-    control_ += rhs.control_ & 0xf0;
+    control_ += static_cast<uint8_t>(rhs.control_ & 0xf0);
     outboundOverflowCount_ = rhs.outboundOverflowCount_;
   }
 
-  unsigned hostedOverflowCount() const {
-    return control_ >> 4;
-  }
+  unsigned hostedOverflowCount() const { return control_ >> 4; }
 
   static constexpr uint8_t kIncrHostedOverflowCount = 0x10;
   static constexpr uint8_t kDecrHostedOverflowCount =
       static_cast<uint8_t>(-0x10);
 
-  void adjustHostedOverflowCount(uint8_t op) {
-    control_ += op;
+  void adjustHostedOverflowCount(uint8_t op) { control_ += op; }
+
+  bool eof() const { return capacityScale(this) != 0; }
+
+  static std::size_t capacityScale(F14Chunk const* const chunk) {
+    auto const empty = reinterpret_cast<F14EmptyTagVector const*>(chunk);
+    if constexpr (kCapacityScaleBits == 4) {
+      return empty->bytes_[offsetof(F14Chunk, control_)] & 0xf;
+    } else {
+      uint16_t v;
+      std::memcpy(&v, &empty->bytes_[12], 2);
+      return v;
+    }
   }
 
-  bool eof() const {
-    return (control_ & 0xf) != 0;
-  }
-
-  std::size_t chunk0Capacity() const {
-    return control_ & 0xf;
-  }
-
-  void markEof(std::size_t c0c) {
+  void setCapacityScale(std::size_t scale) {
     FOLLY_SAFE_DCHECK(
-        this != emptyInstance() && control_ == 0 && c0c > 0 && c0c <= 0xf &&
-            c0c <= kCapacity,
+        !isEmptyInstance(this) && scale > 0 &&
+            scale < (std::size_t{1} << kCapacityScaleBits),
         "");
-    control_ = static_cast<uint8_t>(c0c);
+    if constexpr (kCapacityScaleBits == 4) {
+      control_ = static_cast<uint8_t>((control_ & ~0xf) | scale);
+    } else {
+      uint16_t v = static_cast<uint16_t>(scale);
+      std::memcpy(&tags_[12], &v, 2);
+    }
   }
 
-  unsigned outboundOverflowCount() const {
-    return outboundOverflowCount_;
+  void markEof(std::size_t scale) {
+    folly::assume(control_ == 0);
+    setCapacityScale(scale);
   }
+
+  unsigned outboundOverflowCount() const { return outboundOverflowCount_; }
 
   void incrOutboundOverflowCount() {
-    if (outboundOverflowCount_ != 255) {
+    if (outboundOverflowCount_ != kOutboundOverflowMax) {
       ++outboundOverflowCount_;
     }
   }
 
   void decrOutboundOverflowCount() {
-    if (outboundOverflowCount_ != 255) {
+    FOLLY_SAFE_DCHECK(outboundOverflowCount_ != 0);
+    if (outboundOverflowCount_ != kOutboundOverflowMax) {
       --outboundOverflowCount_;
     }
   }
 
-  uint8_t tag(std::size_t index) const {
-    return tags_[index];
-  }
+  std::size_t tag(std::size_t index) const { return tags_[index]; }
 
-  void setTag(std::size_t index, uint8_t tag) {
-    FOLLY_SAFE_DCHECK(this != emptyInstance() && (tag & 0x80) != 0, "");
-    tags_[index] = tag;
+  void setTag(std::size_t index, std::size_t tag) {
+    FOLLY_SAFE_DCHECK(!isEmptyInstance(this) && tag >= 0x80 && tag <= 0xff, "");
+    FOLLY_SAFE_CHECK(tags_[index] == 0, "");
+    tags_[index] = static_cast<uint8_t>(tag);
   }
 
   void clearTag(std::size_t index) {
+    FOLLY_SAFE_CHECK((tags_[index] & 0x80) != 0, "");
     tags_[index] = 0;
   }
 
@@ -620,10 +648,8 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
   ////////
   // Tag filtering using NEON intrinsics
 
-  SparseMaskIter tagMatchIter(uint8_t needle) const {
-    FOLLY_SAFE_DCHECK((needle & 0x80) != 0, "");
+  SparseMaskIter tagMatchIter(uint8x16_t needleV) const {
     uint8x16_t tagV = vld1q_u8(&tags_[0]);
-    auto needleV = vdupq_n_u8(needle);
     auto eqV = vceqq_u8(tagV, needleV);
     // get info from every byte into the bottom half of every uint16_t
     // by shifting right 4, then round to get it into a 64-bit vector
@@ -640,7 +666,7 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
     uint8x8_t maskV = vshrn_n_u16(vreinterpretq_u16_u8(occupiedV), 4);
     return vget_lane_u64(vreinterpret_u64_u8(maskV), 0) & kFullMask;
   }
-#else
+#elif FOLLY_SSE >= 2
   ////////
   // Tag filtering using SSE2 intrinsics
 
@@ -648,10 +674,9 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
     return static_cast<TagVector const*>(static_cast<void const*>(&tags_[0]));
   }
 
-  SparseMaskIter tagMatchIter(uint8_t needle) const {
-    FOLLY_SAFE_DCHECK((needle & 0x80) != 0, "");
+  SparseMaskIter tagMatchIter(__m128i needleV) const {
     auto tagV = _mm_load_si128(tagVector());
-    auto needleV = _mm_set1_epi8(needle);
+
     auto eqV = _mm_cmpeq_epi8(tagV, needleV);
     auto mask = _mm_movemask_epi8(eqV) & kFullMask;
     return SparseMaskIter{mask};
@@ -660,6 +685,30 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
   MaskType occupiedMask() const {
     auto tagV = _mm_load_si128(tagVector());
     return _mm_movemask_epi8(tagV) & kFullMask;
+  }
+#elif FOLLY_HAVE_INT128_T
+  ////////
+  // Tag filtering using plain C/C++
+
+  SparseMaskIter tagMatchIter(std::size_t needle) const {
+    FOLLY_SAFE_DCHECK(needle >= 0x80 && needle < 0x100, "");
+    auto tagV = static_cast<uint8_t const*>(&tags_[0]);
+    MaskType mask = 0;
+    FOLLY_PRAGMA_UNROLL_N(16)
+    for (auto i = 0u; i < kCapacity; i++) {
+      mask |= ((tagV[i] == static_cast<uint8_t>(needle)) ? 1 : 0) << i;
+    }
+    return SparseMaskIter{mask & kFullMask};
+  }
+
+  MaskType occupiedMask() const {
+    auto tagV = static_cast<uint8_t const*>(&tags_[0]);
+    MaskType mask = 0;
+    FOLLY_PRAGMA_UNROLL_N(16)
+    for (auto i = 0u; i < kCapacity; i++) {
+      mask |= ((tagV[i] & 0x80) ? 1 : 0) << i;
+    }
+    return mask & kFullMask;
   }
 #endif
 
@@ -684,6 +733,11 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
     return tags_[index] != 0;
   }
 
+  /// Permitted to return a wild pointer, which is allowed for prefetching on
+  /// every architecture. This behavior is technically undefined (forbidden) in
+  /// C and C++, but we violate the rule in order to avoid extra cost in the
+  /// prefetch paths. The wild pointer that may be returned is whatever follows
+  /// any empty-instance global in the memory of any DSO.
   Item* itemAddr(std::size_t i) const {
     return static_cast<Item*>(
         const_cast<void*>(static_cast<void const*>(&rawItems_[i])));
@@ -691,12 +745,13 @@ struct alignas(kRequiredVectorAlignment) F14Chunk {
 
   Item& item(std::size_t i) {
     FOLLY_SAFE_DCHECK(this->occupied(i), "");
-    return *folly::launder(itemAddr(i));
+    compiler_may_unsafely_assume(this != getSomeEmptyInstance());
+    return *std::launder(itemAddr(i));
   }
 
   Item const& citem(std::size_t i) const {
     FOLLY_SAFE_DCHECK(this->occupied(i), "");
-    return *folly::launder(itemAddr(i));
+    return *std::launder(itemAddr(i));
   }
 
   static F14Chunk& owner(Item& item, std::size_t index) {
@@ -723,13 +778,9 @@ class PackedChunkItemPtr {
     FOLLY_SAFE_DCHECK(ptr_ != nullptr || index_ == 0, "");
   }
 
-  Ptr ptr() const {
-    return ptr_;
-  }
+  Ptr ptr() const { return ptr_; }
 
-  std::size_t index() const {
-    return index_;
-  }
+  std::size_t index() const { return index_; }
 
   bool operator<(PackedChunkItemPtr const& rhs) const {
     FOLLY_SAFE_DCHECK(ptr_ != rhs.ptr_ || index_ == rhs.index_, "");
@@ -809,8 +860,7 @@ class PackedChunkItemPtr<T*> {
   static constexpr uintptr_t kIndexMask = (uintptr_t{1} << kIndexBits) - 1;
 
   static constexpr uintptr_t kAlignBits = constexpr_min(
-      uintptr_t{4},
-      constexpr_find_first_set(uintptr_t{sizeof(T)}) - 1);
+      uintptr_t{4}, constexpr_find_first_set(uintptr_t{sizeof(T)}) - 1);
 
   static constexpr uintptr_t kAlignMask = (uintptr_t{1} << kAlignBits) - 1;
 
@@ -822,15 +872,13 @@ class PackedChunkItemPtr<T*> {
  public:
   PackedChunkItemPtr(T* p, std::size_t i) noexcept {
     uintptr_t encoded = i >> (kIndexBits - kAlignBits);
-    folly::assume((encoded & ~kAlignMask) == 0);
+    assume((encoded & ~kAlignMask) == 0);
     raw_ = reinterpret_cast<uintptr_t>(p) | encoded;
     FOLLY_SAFE_DCHECK(p == ptr(), "");
     FOLLY_SAFE_DCHECK(i == index(), "");
   }
 
-  T* ptr() const {
-    return reinterpret_cast<T*>(raw_ & ~kAlignMask);
-  }
+  T* ptr() const { return reinterpret_cast<T*>(raw_ & ~kAlignMask); }
 
   std::size_t index() const {
     auto encoded = (raw_ & kAlignMask) << (kIndexBits - kAlignBits);
@@ -879,10 +927,10 @@ class F14ItemIter {
       : itemPtr_{std::pointer_traits<ItemPtr>::pointer_to(chunk->item(index))},
         index_{index} {
     FOLLY_SAFE_DCHECK(index < Chunk::kCapacity, "");
-    folly::assume(
+    assume(
         std::pointer_traits<ItemPtr>::pointer_to(chunk->item(index)) !=
         nullptr);
-    folly::assume(itemPtr_ != nullptr);
+    assume(itemPtr_ != nullptr);
   }
 
   FOLLY_ALWAYS_INLINE void advanceImpl(bool checkEof, bool likelyDead) {
@@ -892,7 +940,7 @@ class F14ItemIter {
     while (index_ > 0) {
       --index_;
       --itemPtr_;
-      if (LIKELY(c->occupied(index_))) {
+      if (FOLLY_LIKELY(c->occupied(index_))) {
         return;
       }
     }
@@ -921,7 +969,7 @@ class F14ItemIter {
     for (std::size_t i = 1; !likelyDead || i != 0; ++i) {
       if (checkEof) {
         // exhausted the current chunk
-        if (UNLIKELY(c->eof())) {
+        if (FOLLY_UNLIKELY(c->eof())) {
           FOLLY_SAFE_DCHECK(index_ == 0, "");
           itemPtr_ = nullptr;
           return;
@@ -934,7 +982,7 @@ class F14ItemIter {
       if (checkEof && !likelyDead) {
         prefetchAddr(&*c - 1);
       }
-      if (LIKELY(last.hasIndex())) {
+      if (FOLLY_LIKELY(last.hasIndex())) {
         index_ = last.index();
         itemPtr_ = std::pointer_traits<ItemPtr>::pointer_to(c->item(index_));
         return;
@@ -942,44 +990,26 @@ class F14ItemIter {
     }
   }
 
-  void precheckedAdvance() {
-    advanceImpl(false, false);
-  }
+  void precheckedAdvance() { advanceImpl(false, false); }
 
-  FOLLY_ALWAYS_INLINE void advance() {
-    advanceImpl(true, false);
-  }
+  FOLLY_ALWAYS_INLINE void advance() { advanceImpl(true, false); }
 
-  FOLLY_ALWAYS_INLINE void advanceLikelyDead() {
-    advanceImpl(true, true);
-  }
+  FOLLY_ALWAYS_INLINE void advanceLikelyDead() { advanceImpl(true, true); }
 
   ChunkPtr chunk() const {
     return std::pointer_traits<ChunkPtr>::pointer_to(
         Chunk::owner(*itemPtr_, index_));
   }
 
-  std::size_t index() const {
-    return index_;
-  }
+  std::size_t index() const { return index_; }
 
-  Item* itemAddr() const {
-    return std::addressof(*itemPtr_);
-  }
-  Item& item() const {
-    return *itemPtr_;
-  }
-  Item const& citem() const {
-    return *itemPtr_;
-  }
+  Item* itemAddr() const { return std::addressof(*itemPtr_); }
+  Item& item() const { return *itemPtr_; }
+  Item const& citem() const { return *itemPtr_; }
 
-  bool atEnd() const {
-    return itemPtr_ == nullptr;
-  }
+  bool atEnd() const { return itemPtr_ == nullptr; }
 
-  Packed pack() const {
-    return Packed{itemPtr_, static_cast<uint8_t>(index_)};
-  }
+  Packed pack() const { return Packed{itemPtr_, static_cast<uint8_t>(index_)}; }
 
   bool operator==(F14ItemIter const& rhs) const {
     // this form makes iter == end() into a single null check after inlining
@@ -987,9 +1017,7 @@ class F14ItemIter {
     return itemPtr_ == rhs.itemPtr_;
   }
 
-  bool operator!=(F14ItemIter const& rhs) const {
-    return !(*this == rhs);
-  }
+  bool operator!=(F14ItemIter const& rhs) const { return !(*this == rhs); }
 
  private:
   ItemPtr itemPtr_;
@@ -998,49 +1026,200 @@ class F14ItemIter {
 
 ////////////////
 
-template <typename SizeType, typename ItemIter, bool EnablePackedItemIter>
-struct SizeAndPackedBegin {
-  SizeType size_{0};
-
+struct PackedSizeAndChunkShift {
  private:
-  typename ItemIter::Packed packedBegin_{ItemIter{}.pack()};
+  // F14Table's chunk count is a power of 2 that is at least 1 and at
+  // most 1 << 63. In order to encode it efficiently, we store its base 2
+  // logarithm `n`, so that (1UL << n) is the chunkCount. Despite
+  // needing only 6 bits to encode the shift, we reserve 8 bits to
+  // avoid extra masking, leaving 56 bits for the size, which is
+  // plenty.
+
+  // We use the least significant bits of
+  // packedSizeAndChunkShift_ for the shift so that size access
+  // is just a single shift and shift access is a normal 8-bit load.
+  static constexpr uint32_t kSizeShift = 8;
+  static constexpr uint32_t kChunkCountShiftMask = (1 << kSizeShift) - 1;
+  uint64_t packedSizeAndChunkShift_{0};
 
  public:
-  typename ItemIter::Packed& packedBegin() {
-    return packedBegin_;
+  // subtract 1 because we can't represent 1 << 64, triggering UBSAN.
+  static constexpr uint8_t kMaxSupportedChunkShift =
+      std::numeric_limits<uint64_t>::digits - 1;
+
+  static constexpr std::size_t kMaxSize =
+      (size_t(1) << (std::numeric_limits<std::size_t>::digits - kSizeShift)) -
+      1;
+
+  uint64_t size() const noexcept {
+    return packedSizeAndChunkShift_ >> kSizeShift;
   }
 
-  typename ItemIter::Packed const& packedBegin() const {
-    return packedBegin_;
+  uint8_t chunkShift() const noexcept {
+    return packedSizeAndChunkShift_ & kChunkCountShiftMask;
+  }
+
+  std::size_t chunkCount() const noexcept {
+    const auto chunkCountShift = chunkShift();
+    return std::size_t(1) << chunkCountShift;
+  }
+
+  void setSize(std::size_t sz) noexcept {
+    packedSizeAndChunkShift_ =
+        chunkShift() | (static_cast<uint64_t>(sz) << kSizeShift);
+  }
+
+  void setChunkCount(std::size_t newCount) {
+    FOLLY_SAFE_DCHECK(
+        folly::isPowTwo(newCount), newCount); // note that this forbids 0!
+    const auto shift = findFirstSet(newCount) - 1; // firstSet is 1-based.
+    packedSizeAndChunkShift_ =
+        (static_cast<uint64_t>(size()) << kSizeShift) | shift;
+    FOLLY_SAFE_DCHECK(chunkCount() == newCount, "");
+  }
+
+  void swap(PackedSizeAndChunkShift& rhs) noexcept {
+    std::swap(packedSizeAndChunkShift_, rhs.packedSizeAndChunkShift_);
   }
 };
 
-template <typename SizeType, typename ItemIter>
-struct SizeAndPackedBegin<SizeType, ItemIter, false> {
-  SizeType size_{0};
+struct UnpackedSizeAndChunkShift {
+ private:
+  // Simple implementation for 32-bit systems: just use two words.
+  std::size_t size_ = 0;
+  uint8_t chunkShift_ = 0;
+
+ public:
+  // subtract 1 because we can't represent 1 << 32, triggering UBSAN.
+  static constexpr uint8_t kMaxSupportedChunkShift =
+      std::numeric_limits<std::size_t>::digits - 1;
+
+  static constexpr std::size_t kMaxSize =
+      std::numeric_limits<std::size_t>::max();
+
+  uint64_t size() const noexcept { return size_; }
+
+  uint8_t chunkShift() const noexcept { return chunkShift_; }
+
+  std::size_t chunkCount() const noexcept {
+    const auto chunkCountShift = chunkShift();
+    return std::size_t(1) << chunkCountShift;
+  }
+
+  void setSize(std::size_t sz) noexcept { size_ = sz; }
+
+  void setChunkCount(std::size_t newCount) {
+    FOLLY_SAFE_DCHECK(
+        folly::isPowTwo(newCount), newCount); // note that this forbids 0!
+    const auto shift = findFirstSet(newCount) - 1; // firstSet is 1-based.
+    FOLLY_SAFE_DCHECK(shift <= std::numeric_limits<uint8_t>::max(), "");
+    chunkShift_ = static_cast<uint8_t>(shift);
+    FOLLY_SAFE_DCHECK(chunkCount() == newCount, "");
+  }
+
+  void swap(UnpackedSizeAndChunkShift& rhs) noexcept {
+    std::swap(size_, rhs.size_);
+    std::swap(chunkShift_, rhs.chunkShift_);
+  }
+};
+
+using SizeAndChunkShift = std::conditional_t<
+    sizeof(uint64_t) == sizeof(std::size_t),
+    PackedSizeAndChunkShift,
+    UnpackedSizeAndChunkShift>;
+
+template <typename ItemIter, bool EnablePackedItemIter>
+struct SizeAndChunkShiftAndPackedBegin {
+ private:
+  SizeAndChunkShift sizeAndChunkShift_;
+
+  typename ItemIter::Packed packedBegin_{ItemIter{}.pack()};
+
+ public:
+  auto size() const { return sizeAndChunkShift_.size(); }
+
+  auto chunkShift() const { return sizeAndChunkShift_.chunkShift(); }
+
+  auto chunkCount() const { return sizeAndChunkShift_.chunkCount(); }
+
+  void setSize(uint64_t sz) { sizeAndChunkShift_.setSize(sz); }
+
+  void incrementSize() { sizeAndChunkShift_.setSize(size() + 1); }
+
+  void decrementSize() { sizeAndChunkShift_.setSize(size() - 1); }
+
+  void setChunkCount(std::size_t count) {
+    sizeAndChunkShift_.setChunkCount(count);
+  }
+
+  typename ItemIter::Packed& packedBegin() { return packedBegin_; }
+
+  typename ItemIter::Packed const& packedBegin() const { return packedBegin_; }
+
+  void swap(SizeAndChunkShiftAndPackedBegin& rhs) noexcept {
+    sizeAndChunkShift_.swap(rhs.sizeAndChunkShift_);
+    std::swap(packedBegin_, rhs.packedBegin_);
+  }
+};
+
+template <typename ItemIter>
+struct SizeAndChunkShiftAndPackedBegin<ItemIter, false> {
+ private:
+  SizeAndChunkShift sizeAndChunkShift_;
+
+ public:
+  auto size() const { return sizeAndChunkShift_.size(); }
+
+  auto chunkShift() const { return sizeAndChunkShift_.chunkShift(); }
+
+  auto chunkCount() const { return sizeAndChunkShift_.chunkCount(); }
+
+  void setSize(uint64_t sz) { sizeAndChunkShift_.setSize(sz); }
+
+  void incrementSize() { sizeAndChunkShift_.setSize(size() + 1); }
+
+  void decrementSize() { sizeAndChunkShift_.setSize(size() - 1); }
+
+  void setChunkCount(std::size_t count) {
+    sizeAndChunkShift_.setChunkCount(count);
+  }
 
   [[noreturn]] typename ItemIter::Packed& packedBegin() {
-    folly::assume_unreachable();
+    assume_unreachable();
   }
 
   [[noreturn]] typename ItemIter::Packed const& packedBegin() const {
-    folly::assume_unreachable();
+    assume_unreachable();
   }
 };
 
 template <typename Policy>
 class F14Table : public Policy {
  public:
-  using typename Policy::Item;
+  using Item = typename Policy::Item;
+
   using value_type = typename Policy::Value;
   using allocator_type = typename Policy::Alloc;
 
  private:
+  using Alloc = typename Policy::Alloc;
+  using AllocTraits = typename Policy::AllocTraits;
+  using Hasher = typename Policy::Hasher;
+  using InternalSizeType = typename Policy::InternalSizeType;
+  using KeyEqual = typename Policy::KeyEqual;
+
   using Policy::kAllocIsAlwaysEqual;
+  using Policy::kContinuousCapacity;
   using Policy::kDefaultConstructIsNoexcept;
+  using Policy::kEnableItemIteration;
   using Policy::kSwapIsNoexcept;
 
-  using AllocTraits = typename Policy::AllocTraits;
+  using Policy::destroyItemOnClear;
+  using Policy::isAvalanchingHasher;
+  using Policy::prefetchBeforeCopy;
+  using Policy::prefetchBeforeDestroy;
+  using Policy::prefetchBeforeRehash;
+  using Policy::shouldAssume32BitHash;
 
   using ByteAlloc = typename AllocTraits::template rebind_alloc<uint8_t>;
   using BytePtr = typename std::allocator_traits<ByteAlloc>::pointer;
@@ -1057,61 +1236,75 @@ class F14Table : public Policy {
  private:
   //////// begin fields
 
-  ChunkPtr chunks_{Chunk::emptyInstance()};
-  typename Policy::InternalSizeType chunkMask_{0};
-  SizeAndPackedBegin<
-      typename Policy::InternalSizeType,
-      ItemIter,
-      Policy::kEnableItemIteration>
-      sizeAndPackedBegin_;
+  ChunkPtr chunks_{Chunk::getSomeEmptyInstance()};
+  SizeAndChunkShiftAndPackedBegin<ItemIter, kEnableItemIteration>
+      sizeAndChunkShiftAndPackedBegin_;
 
   //////// end fields
+
+  auto chunkShift() const {
+    return sizeAndChunkShiftAndPackedBegin_.chunkShift();
+  }
+
+  auto chunkCount() const {
+    return sizeAndChunkShiftAndPackedBegin_.chunkCount();
+  }
+
+  std::size_t moduloByChunkCount(std::size_t index) const {
+#ifdef __BMI2__
+    // TODO: remove once the compiler selects BZHI on its own.
+    // see codegen for: codeSize_find_F14value, defined in:
+    // folly/container/test/F14SmallOverheads.cpp
+    return _bzhi_u64(index, chunkShift());
+#else
+    return index & ((std::size_t(1) << chunkShift()) - 1);
+#endif
+  }
 
   void swapContents(F14Table& rhs) noexcept {
     using std::swap;
     swap(chunks_, rhs.chunks_);
-    swap(chunkMask_, rhs.chunkMask_);
-    swap(sizeAndPackedBegin_.size_, rhs.sizeAndPackedBegin_.size_);
-    if (Policy::kEnableItemIteration) {
-      swap(
-          sizeAndPackedBegin_.packedBegin(),
-          rhs.sizeAndPackedBegin_.packedBegin());
-    }
+    swap(
+        sizeAndChunkShiftAndPackedBegin_, rhs.sizeAndChunkShiftAndPackedBegin_);
   }
 
  public:
+  // Equivalent to F14Table(0, ...), but implemented separately to avoid forcing
+  // a reserve() instantiation in the common case.
+  F14Table() noexcept(Policy::kDefaultConstructIsNoexcept)
+      : Policy{Hasher{}, KeyEqual{}, Alloc{}} {}
+
   F14Table(
       std::size_t initialCapacity,
-      typename Policy::Hasher const& hasher,
-      typename Policy::KeyEqual const& keyEqual,
-      typename Policy::Alloc const& alloc)
+      Hasher const& hasher,
+      KeyEqual const& keyEqual,
+      Alloc const& alloc)
       : Policy{hasher, keyEqual, alloc} {
-    if (initialCapacity > 0) {
-      reserve(initialCapacity);
-    }
+    debugModeOnReserve(initialCapacity);
+    initialReserve(initialCapacity);
   }
 
-  F14Table(F14Table const& rhs) : Policy{rhs} {
-    buildFromF14Table(rhs);
-  }
+  F14Table(F14Table const& rhs) : Policy{rhs} { buildFromF14Table(rhs); }
 
-  F14Table(F14Table const& rhs, typename Policy::Alloc const& alloc)
-      : Policy{rhs, alloc} {
+  F14Table(F14Table const& rhs, Alloc const& alloc) : Policy{rhs, alloc} {
     buildFromF14Table(rhs);
   }
 
   F14Table(F14Table&& rhs) noexcept(
-      std::is_nothrow_move_constructible<typename Policy::Hasher>::value&&
-          std::is_nothrow_move_constructible<typename Policy::KeyEqual>::value&&
-              std::is_nothrow_move_constructible<typename Policy::Alloc>::value)
+      std::is_nothrow_move_constructible<Hasher>::value &&
+      std::is_nothrow_move_constructible<KeyEqual>::value &&
+      std::is_nothrow_move_constructible<Alloc>::value)
       : Policy{std::move(rhs)} {
     swapContents(rhs);
   }
 
-  F14Table(F14Table&& rhs, typename Policy::Alloc const& alloc) noexcept(
-      kAllocIsAlwaysEqual)
+  F14Table(F14Table&& rhs, Alloc const& alloc) noexcept(kAllocIsAlwaysEqual)
       : Policy{std::move(rhs), alloc} {
-    if (kAllocIsAlwaysEqual || this->alloc() == rhs.alloc()) {
+    // if-constexpr allows avoiding dependence on usable Hasher etc.
+    if constexpr (kAllocIsAlwaysEqual) {
+      // move storage (common case)
+      swapContents(rhs);
+    } else if (this->alloc() == rhs.alloc()) {
       // move storage (common case)
       swapContents(rhs);
     } else {
@@ -1130,16 +1323,21 @@ class F14Table : public Policy {
   }
 
   F14Table& operator=(F14Table&& rhs) noexcept(
-      std::is_nothrow_move_assignable<typename Policy::Hasher>::value&&
-          std::is_nothrow_move_assignable<typename Policy::KeyEqual>::value &&
+      std::is_nothrow_move_assignable<Hasher>::value &&
+      std::is_nothrow_move_assignable<KeyEqual>::value &&
       (kAllocIsAlwaysEqual ||
        (AllocTraits::propagate_on_container_move_assignment::value &&
-        std::is_nothrow_move_assignable<typename Policy::Alloc>::value))) {
+        std::is_nothrow_move_assignable<Alloc>::value))) {
     if (this != &rhs) {
       reset();
       static_cast<Policy&>(*this) = std::move(rhs);
-      if (AllocTraits::propagate_on_container_move_assignment::value ||
-          kAllocIsAlwaysEqual || this->alloc() == rhs.alloc()) {
+      // if-constexpr allows avoiding dependence on usable Hasher etc.
+      if constexpr (
+          AllocTraits::propagate_on_container_move_assignment::value ||
+          kAllocIsAlwaysEqual) {
+        // move storage (common case)
+        swapContents(rhs);
+      } else if (this->alloc() == rhs.alloc()) {
         // move storage (common case)
         swapContents(rhs);
       } else {
@@ -1150,9 +1348,7 @@ class F14Table : public Policy {
     return *this;
   }
 
-  ~F14Table() {
-    reset();
-  }
+  ~F14Table() { reset(); }
 
   void swap(F14Table& rhs) noexcept(kSwapIsNoexcept) {
     // If propagate_on_container_swap is false and allocators are
@@ -1169,185 +1365,135 @@ class F14Table : public Policy {
   }
 
  private:
-  //////// hash helpers
-
-  // Hash values are used to compute the desired position, which is the
-  // chunk index at which we would like to place a value (if there is no
-  // overflow), and the tag, which is an additional 8 bits of entropy.
-  //
-  // The standard's definition of hash function quality only refers to
-  // the probability of collisions of the entire hash value, not to the
-  // probability of collisions of the results of shifting or masking the
-  // hash value.  Some hash functions, however, provide this stronger
-  // guarantee (not quite the same as the definition of avalanching,
-  // but similar).
-  //
-  // If the user-supplied hasher is an avalanching one (each bit of the
-  // hash value has a 50% chance of being the same for differing hash
-  // inputs), then we can just take 1 byte of the hash value for the tag
-  // and the rest for the desired position.  Avalanching hashers also
-  // let us map hash value to array index position with just a bitmask
-  // without risking clumping.  (Many hash tables just accept the risk
-  // and do it regardless.)
-  //
-  // std::hash<std::string> avalanches in all implementations we've
-  // examined: libstdc++-v3 uses MurmurHash2, and libc++ uses CityHash
-  // or MurmurHash2.  The other std::hash specializations, however, do not
-  // have this property.  std::hash for integral and pointer values is the
-  // identity function on libstdc++-v3 and libc++, in particular.  In our
-  // experience it is also fairly common for user-defined specializations
-  // of std::hash to combine fields in an ad-hoc way that does not evenly
-  // distribute entropy among the bits of the result (a + 37 * b, for
-  // example, where a and b are integer fields).
-  //
-  // For hash functions we don't trust to avalanche, we repair things by
-  // applying a bit mixer to the user-supplied hash.
-
-#if FOLLY_X64 || FOLLY_AARCH64
-  // 64-bit
   static HashPair splitHash(std::size_t hash) {
-    static_assert(sizeof(std::size_t) == sizeof(uint64_t), "");
-    uint8_t tag;
-    if (!Policy::isAvalanchingHasher()) {
-#if FOLLY_SSE_PREREQ(4, 2)
-      // SSE4.2 CRC
-      auto c = _mm_crc32_u64(0, hash);
-      tag = static_cast<uint8_t>(~(c >> 25));
-      hash += c;
-#elif __ARM_FEATURE_CRC32
-      // CRC is optional on armv8 (-march=armv8-a+crc), standard on armv8.1
-      auto c = __crc32cd(0, hash);
-      tag = static_cast<uint8_t>(~(c >> 25));
-      hash += c;
-#else
-      // The mixer below is not fully avalanching for all 64 bits of
-      // output, but looks quite good for bits 18..63 and puts plenty
-      // of entropy even lower when considering multiple bits together
-      // (like the tag).  Importantly, when under register pressure it
-      // uses fewer registers, instructions, and immediate constants
-      // than the alternatives, resulting in compact code that is more
-      // easily inlinable.  In one instantiation a modified Murmur mixer
-      // was 48 bytes of assembly (even after using the same multiplicand
-      // for both steps) and this one was 27 bytes, for example.
-      auto const kMul = 0xc4ceb9fe1a85ec53ULL;
-#ifdef _WIN32
-      __int64 signedHi;
-      __int64 signedLo = _mul128(
-          static_cast<__int64>(hash), static_cast<__int64>(kMul), &signedHi);
-      auto hi = static_cast<uint64_t>(signedHi);
-      auto lo = static_cast<uint64_t>(signedLo);
-#else
-      auto hi = static_cast<uint64_t>(
-          (static_cast<unsigned __int128>(hash) * kMul) >> 64);
-      auto lo = hash * kMul;
-#endif
-      hash = hi ^ lo;
-      hash *= kMul;
-      tag = static_cast<uint8_t>(hash >> 15) | 0x80;
-      hash >>= 22;
-#endif
-    } else {
-      // we don't trust the top bit
-      tag = (hash >> 56) | 0x80;
-    }
-    return std::make_pair(hash, tag);
+    return f14::detail::splitHashImpl<Hasher, value_type>(hash);
   }
-#else
-  // 32-bit
-  static HashPair splitHash(std::size_t hash) {
-    static_assert(sizeof(std::size_t) == sizeof(uint32_t), "");
-    uint8_t tag;
-    if (!Policy::isAvalanchingHasher()) {
-#if FOLLY_SSE_PREREQ(4, 2)
-      // SSE4.2 CRC
-      auto c = _mm_crc32_u32(0, hash);
-      tag = static_cast<uint8_t>(~(c >> 25));
-      hash += c;
-#elif __ARM_FEATURE_CRC32
-      auto c = __crc32cw(0, hash);
-      tag = static_cast<uint8_t>(~(c >> 25));
-      hash += c;
-#else
-      // finalizer for 32-bit murmur2
-      hash ^= hash >> 13;
-      hash *= 0x5bd1e995;
-      hash ^= hash >> 15;
-      tag = static_cast<uint8_t>(~(hash >> 25));
-#endif
-    } else {
-      // we don't trust the top bit
-      tag = (hash >> 24) | 0x80;
-    }
-    return std::make_pair(hash, tag);
-  }
-#endif
-
   //////// memory management helpers
 
+  static std::size_t computeCapacity(
+      std::size_t chunkCount, std::size_t scale) {
+    FOLLY_SAFE_DCHECK(!(chunkCount > 1 && scale == 0), "");
+    FOLLY_SAFE_DCHECK(
+        scale < (std::size_t{1} << Chunk::kCapacityScaleBits), "");
+    FOLLY_SAFE_DCHECK((chunkCount & (chunkCount - 1)) == 0, "");
+    return (((chunkCount - 1) >> Chunk::kCapacityScaleShift) + 1) * scale;
+  }
+
+  std::pair<std::size_t, std::size_t> computeChunkCountAndScale(
+      std::size_t desiredCapacity,
+      bool continuousSingleChunkCapacity,
+      bool continuousMultiChunkCapacity) const {
+    if (desiredCapacity <= Chunk::kCapacity) {
+      // we can go to 100% capacity in a single chunk with no problem
+      if (!continuousSingleChunkCapacity) {
+        if (desiredCapacity <= 2) {
+          desiredCapacity = 2;
+        } else if (desiredCapacity <= 6) {
+          desiredCapacity = 6;
+        } else {
+          desiredCapacity = Chunk::kCapacity;
+        }
+      }
+      auto rv = std::make_pair(std::size_t{1}, desiredCapacity);
+      FOLLY_SAFE_DCHECK(
+          computeCapacity(rv.first, rv.second) == desiredCapacity, "");
+      return rv;
+    } else {
+      std::size_t minChunks =
+          (desiredCapacity - 1) / Chunk::kDesiredCapacity + 1;
+      std::size_t chunkPow = findLastSet(minChunks - 1);
+      if (chunkPow == 8 * sizeof(std::size_t)) {
+        throw_exception<std::bad_alloc>();
+      }
+
+      std::size_t chunkCount = std::size_t{1} << chunkPow;
+
+      // Let cc * scale be the actual capacity.
+      // cc = ((chunkCount - 1) >> kCapacityScaleShift) + 1.
+      // If chunkPow >= kCapacityScaleShift, then cc = chunkCount >>
+      // kCapacityScaleShift = 1 << (chunkPow - kCapacityScaleShift),
+      // otherwise it equals 1 = 1 << 0.  Let cc = 1 << ss.
+      std::size_t ss = chunkPow >= Chunk::kCapacityScaleShift
+          ? chunkPow - Chunk::kCapacityScaleShift
+          : 0;
+
+      std::size_t scale;
+      if (continuousMultiChunkCapacity) {
+        // (1 << ss) * scale >= desiredCapacity
+        scale = ((desiredCapacity - 1) >> ss) + 1;
+      } else {
+        // (1 << ss) * scale == chunkCount * kDesiredCapacity
+        scale = Chunk::kDesiredCapacity << (chunkPow - ss);
+      }
+
+      std::size_t actualCapacity = computeCapacity(chunkCount, scale);
+      FOLLY_SAFE_DCHECK(actualCapacity >= desiredCapacity, "");
+      if (actualCapacity > max_size()) {
+        throw_exception<std::bad_alloc>();
+      }
+
+      return std::make_pair(chunkCount, scale);
+    }
+  }
+
   static std::size_t chunkAllocSize(
-      std::size_t chunkCount,
-      std::size_t maxSizeWithoutRehash) {
+      std::size_t chunkCount, std::size_t capacityScale) {
+    FOLLY_SAFE_DCHECK(chunkCount > 0, "");
+    FOLLY_SAFE_DCHECK(!(chunkCount > 1 && capacityScale == 0), "");
     if (chunkCount == 1) {
-      FOLLY_SAFE_DCHECK((maxSizeWithoutRehash % 2) == 0, "");
       static_assert(offsetof(Chunk, rawItems_) == 16, "");
-      return 16 + sizeof(Item) * maxSizeWithoutRehash;
+      return 16 + sizeof(Item) * computeCapacity(1, capacityScale);
     } else {
       return sizeof(Chunk) * chunkCount;
     }
   }
 
   ChunkPtr initializeChunks(
-      BytePtr raw,
-      std::size_t chunkCount,
-      std::size_t maxSizeWithoutRehash) {
+      BytePtr raw, std::size_t chunkCount, std::size_t capacityScale) {
     static_assert(std::is_trivial<Chunk>::value, "F14Chunk should be POD");
     auto chunks = static_cast<Chunk*>(static_cast<void*>(&*raw));
     for (std::size_t i = 0; i < chunkCount; ++i) {
       chunks[i].clear();
     }
-    chunks[0].markEof(chunkCount == 1 ? maxSizeWithoutRehash : 1);
+    chunks[0].markEof(capacityScale);
     return std::pointer_traits<ChunkPtr>::pointer_to(*chunks);
+  }
+
+  std::size_t itemCount() const noexcept {
+    if (chunkShift() == 0) {
+      return computeCapacity(
+          1, Chunk::capacityScale(access::to_address(chunks_)));
+    } else {
+      return chunkCount() * Chunk::kCapacity;
+    }
   }
 
  public:
   ItemIter begin() const noexcept {
-    FOLLY_SAFE_DCHECK(Policy::kEnableItemIteration, "");
-    return ItemIter{sizeAndPackedBegin_.packedBegin()};
+    FOLLY_SAFE_DCHECK(kEnableItemIteration, "");
+    return ItemIter{sizeAndChunkShiftAndPackedBegin_.packedBegin()};
   }
 
-  ItemIter end() const noexcept {
-    return ItemIter{};
-  }
+  ItemIter end() const noexcept { return ItemIter{}; }
 
-  bool empty() const noexcept {
-    return size() == 0;
-  }
+  bool empty() const noexcept { return size() == 0; }
 
-  std::size_t size() const noexcept {
-    return sizeAndPackedBegin_.size_;
-  }
+  auto size() const noexcept { return sizeAndChunkShiftAndPackedBegin_.size(); }
 
   std::size_t max_size() const noexcept {
     auto& a = this->alloc();
     return std::min<std::size_t>(
-        (std::numeric_limits<typename Policy::InternalSizeType>::max)(),
-        AllocTraits::max_size(a));
+        {SizeAndChunkShift::kMaxSize,
+         std::numeric_limits<InternalSizeType>::max(),
+         AllocTraits::max_size(a)});
   }
 
   std::size_t bucket_count() const noexcept {
-    // bucket_count is just a synthetic construct for the outside world
-    // so that size, bucket_count, load_factor, and max_load_factor are
-    // all self-consistent.  The only one of those that is real is size().
-    if (chunkMask_ != 0) {
-      return (chunkMask_ + 1) * Chunk::kDesiredCapacity;
-    } else {
-      return chunks_->chunk0Capacity();
-    }
+    return computeCapacity(
+        chunkCount(), Chunk::capacityScale(access::to_address(chunks_)));
   }
 
-  std::size_t max_bucket_count() const noexcept {
-    return max_size();
-  }
+  std::size_t max_bucket_count() const noexcept { return max_size(); }
 
   float load_factor() const noexcept {
     return empty()
@@ -1355,9 +1501,7 @@ class F14Table : public Policy {
         : static_cast<float>(size()) / static_cast<float>(bucket_count());
   }
 
-  float max_load_factor() const noexcept {
-    return 1.0f;
-  }
+  float max_load_factor() const noexcept { return 1.0f; }
 
   void max_load_factor(float) noexcept {
     // Probing hash tables can't run load factors >= 1 (unlike chaining
@@ -1410,30 +1554,60 @@ class F14Table : public Policy {
   // in probe lengths (extra work and less branch predictability) in
   // our experiments.
 
-  std::size_t probeDelta(HashPair hp) const {
-    return 2 * hp.second + 1;
+  std::size_t probeDelta(HashPair hp) const { return 2 * hp.second + 1; }
+
+  // TRICKY!  It may seem strange to have a std::size_t needle and narrow
+  // it at the last moment, rather than making HashPair::second be a
+  // uint8_t, but the latter choice sometimes leads to a performance
+  // problem.
+  //
+  // On architectures with SSE2 but not AVX2, _mm_set1_epi8 expands
+  // to multiple instructions.  One of those is a MOVD of either 4 or
+  // 8 byte width.  Only the bottom byte of that move actually affects
+  // the result, but if a 1-byte needle has been spilled then this will
+  // be a 4 byte load.  GCC 5.5 has been observed to reload needle
+  // (or perhaps fuse a reload and part of a previous static_cast)
+  // needle using a MOVZX with a 1 byte load in parallel with the MOVD.
+  // This combination causes a failure of store-to-load forwarding,
+  // which has a big performance penalty (60 nanoseconds per find on
+  // a microbenchmark).  Keeping needle >= 4 bytes avoids the problem
+  // and also happens to result in slightly more compact assembly.
+
+  FOLLY_ALWAYS_INLINE auto loadNeedleV(std::size_t needle) const {
+#if FOLLY_NEON
+    return vdupq_n_u8(static_cast<uint8_t>(needle));
+#elif FOLLY_SSE >= 2
+    return _mm_set1_epi8(static_cast<uint8_t>(needle));
+#else
+    return needle;
+#endif
   }
 
+  enum class Prefetch { DISABLED, ENABLED };
+
   template <typename K>
-  FOLLY_ALWAYS_INLINE ItemIter findImpl(HashPair hp, K const& key) const {
+  FOLLY_ALWAYS_INLINE ItemIter
+  findImpl(HashPair hp, K const& key, Prefetch prefetch) const {
+    FOLLY_SAFE_DCHECK(hp.second >= 0x80 && hp.second < 0x100, "");
     std::size_t index = hp.first;
     std::size_t step = probeDelta(hp);
-    for (std::size_t tries = 0; tries <= chunkMask_; ++tries) {
-      ChunkPtr chunk = chunks_ + (index & chunkMask_);
-      if (sizeof(Chunk) > 64) {
+    auto needleV = loadNeedleV(hp.second);
+    for (std::size_t tries = chunkCount(); tries > 0; --tries) {
+      ChunkPtr chunk = chunks_ + moduloByChunkCount(index);
+      if (prefetch == Prefetch::ENABLED && sizeof(Chunk) > 64) {
         prefetchAddr(chunk->itemAddr(8));
       }
-      auto hits = chunk->tagMatchIter(hp.second);
+      auto hits = chunk->tagMatchIter(needleV);
       while (hits.hasNext()) {
         auto i = hits.next();
-        if (LIKELY(this->keyMatchesItem(key, chunk->item(i)))) {
+        if (FOLLY_LIKELY(this->keyMatchesItem(key, chunk->item(i)))) {
           // Tag match and key match were both successful.  The chance
           // of a false tag match is 1/128 for each key in the chunk
           // (with a proper hash function).
           return ItemIter{chunk, i};
         }
       }
-      if (LIKELY(chunk->outboundOverflowCount() == 0)) {
+      if (FOLLY_LIKELY(chunk->outboundOverflowCount() == 0)) {
         // No keys that wanted to be placed in this chunk were denied
         // entry, so our search is over.  This is the common case.
         break;
@@ -1448,23 +1622,32 @@ class F14Table : public Policy {
   }
 
  public:
-  // Prehashing splits the work of find(key) into two calls, enabling you
-  // to manually implement loop pipelining for hot bulk lookups.  prehash
-  // computes the hash and prefetches the first computed memory location,
-  // and the two-arg find(F14HashToken,K) performs the rest of the search.
+  // prehash()/prefetch() split the work of find(key) into three calls, enabling
+  // you to manually implement loop pipelining for hot bulk lookups. prehash()
+  // computes the hash and prefetch() prefetches the first computed memory
+  // location, and the two-arg find(F14HashToken, K) performs the rest of the
+  // search.
   template <typename K>
   F14HashToken prehash(K const& key) const {
+    return F14HashToken{splitHash(this->computeKeyHash(key))};
+  }
+
+  template <typename K>
+  F14HashToken prehash(K const& key, std::size_t hash) const {
+    FOLLY_SAFE_DCHECK(hash == this->computeKeyHash(key));
+    return F14HashToken{splitHash(hash)};
+  }
+
+  void prefetch(F14HashToken const& token) const {
     FOLLY_SAFE_DCHECK(chunks_ != nullptr, "");
-    auto hp = splitHash(this->computeKeyHash(key));
-    ChunkPtr firstChunk = chunks_ + (hp.first & chunkMask_);
+    ChunkPtr firstChunk = chunks_ + moduloByChunkCount(token.hp_.first);
     prefetchAddr(firstChunk);
-    return F14HashToken(std::move(hp));
   }
 
   template <typename K>
   FOLLY_ALWAYS_INLINE ItemIter find(K const& key) const {
     auto hp = splitHash(this->computeKeyHash(key));
-    return findImpl(hp, key);
+    return findImpl(hp, key, Prefetch::ENABLED);
   }
 
   template <typename K>
@@ -1473,20 +1656,51 @@ class F14Table : public Policy {
     FOLLY_SAFE_DCHECK(
         splitHash(this->computeKeyHash(key)) == static_cast<HashPair>(token),
         "");
-    return findImpl(static_cast<HashPair>(token), key);
+    return findImpl(static_cast<HashPair>(token), key, Prefetch::DISABLED);
+  }
+
+  // Searches for a key using a key predicate that is a refinement
+  // of key equality.  func(k) should return true only if k is equal
+  // to key according to key_eq(), but is allowed to apply additional
+  // constraints.
+  template <typename K, typename F>
+  FOLLY_ALWAYS_INLINE ItemIter findMatching(K const& key, F&& func) const {
+    auto hp = splitHash(this->computeKeyHash(key));
+    std::size_t index = hp.first;
+    auto needleV = loadNeedleV(hp.second);
+    std::size_t step = probeDelta(hp);
+    for (std::size_t tries = chunkCount(); tries > 0; --tries) {
+      ChunkPtr chunk = chunks_ + moduloByChunkCount(index);
+      if (sizeof(Chunk) > 64) {
+        prefetchAddr(chunk->itemAddr(8));
+      }
+      auto hits = chunk->tagMatchIter(needleV);
+      while (hits.hasNext()) {
+        auto i = hits.next();
+        if (FOLLY_LIKELY(
+                func(this->keyForValue(this->valueAtItem(chunk->item(i)))))) {
+          return ItemIter{chunk, i};
+        }
+      }
+      if (FOLLY_LIKELY(chunk->outboundOverflowCount() == 0)) {
+        break;
+      }
+      index += step;
+    }
+    return ItemIter{};
   }
 
  private:
   void adjustSizeAndBeginAfterInsert(ItemIter iter) {
-    if (Policy::kEnableItemIteration) {
+    if constexpr (kEnableItemIteration) {
       // packedBegin is the max of all valid ItemIter::pack()
       auto packed = iter.pack();
-      if (sizeAndPackedBegin_.packedBegin() < packed) {
-        sizeAndPackedBegin_.packedBegin() = packed;
+      if (sizeAndChunkShiftAndPackedBegin_.packedBegin() < packed) {
+        sizeAndChunkShiftAndPackedBegin_.packedBegin() = packed;
       }
     }
 
-    ++sizeAndPackedBegin_.size_;
+    sizeAndChunkShiftAndPackedBegin_.incrementSize();
   }
 
   // Ignores hp if pos.chunk()->hostedOverflowCount() == 0
@@ -1499,7 +1713,7 @@ class F14Table : public Policy {
       std::size_t delta = probeDelta(hp);
       uint8_t hostedOp = 0;
       while (true) {
-        ChunkPtr chunk = chunks_ + (index & chunkMask_);
+        ChunkPtr chunk = chunks_ + moduloByChunkCount(index);
         if (chunk == iter.chunk()) {
           chunk->adjustHostedOverflowCount(hostedOp);
           break;
@@ -1512,15 +1726,15 @@ class F14Table : public Policy {
   }
 
   void adjustSizeAndBeginBeforeErase(ItemIter iter) {
-    --sizeAndPackedBegin_.size_;
-    if (Policy::kEnableItemIteration) {
-      if (iter.pack() == sizeAndPackedBegin_.packedBegin()) {
+    sizeAndChunkShiftAndPackedBegin_.decrementSize();
+    if constexpr (kEnableItemIteration) {
+      if (iter.pack() == sizeAndChunkShiftAndPackedBegin_.packedBegin()) {
         if (size() == 0) {
           iter = ItemIter{};
         } else {
           iter.precheckedAdvance();
         }
-        sizeAndPackedBegin_.packedBegin() = iter.pack();
+        sizeAndChunkShiftAndPackedBegin_.packedBegin() = iter.pack();
       }
     }
   }
@@ -1529,8 +1743,7 @@ class F14Table : public Policy {
   void insertAtBlank(ItemIter pos, HashPair hp, Args&&... args) {
     try {
       auto dst = pos.itemAddr();
-      folly::assume(dst != nullptr);
-      this->constructValueAtItem(size(), dst, std::forward<Args>(args)...);
+      this->constructValueAtItem(*this, dst, std::forward<Args>(args)...);
     } catch (...) {
       eraseBlank(pos, hp);
       throw;
@@ -1544,9 +1757,9 @@ class F14Table : public Policy {
     std::size_t delta = probeDelta(hp);
     uint8_t hostedOp = 0;
     while (true) {
-      index &= chunkMask_;
+      index = moduloByChunkCount(index);
       chunk = chunks_ + index;
-      if (LIKELY(fullness[index] < Chunk::kCapacity)) {
+      if (FOLLY_LIKELY(fullness[index] < Chunk::kCapacity)) {
         break;
       }
       chunk->incrOutboundOverflowCount();
@@ -1561,16 +1774,17 @@ class F14Table : public Policy {
   }
 
   ChunkPtr lastOccupiedChunk() const {
-    if (Policy::kEnableItemIteration) {
+    FOLLY_SAFE_DCHECK(size() > 0, "");
+    if constexpr (kEnableItemIteration) {
       return begin().chunk();
     } else {
-      return chunks_ + chunkMask_;
+      return chunks_ + chunkCount() - 1;
     }
   }
 
   template <typename T>
   void directBuildFrom(T&& src) {
-    FOLLY_SAFE_DCHECK(src.size() > 0 && chunkMask_ == src.chunkMask_, "");
+    FOLLY_SAFE_DCHECK(src.size() > 0 && chunkShift() == src.chunkShift(), "");
 
     // We use std::forward<T> to allow portions of src to be moved out by
     // either beforeBuild or afterBuild, but we are just relying on good
@@ -1595,31 +1809,39 @@ class F14Table : public Policy {
     // partial failure should not occur.  Sorry for the subtle invariants
     // in the Policy API.
 
-    if (folly::is_trivially_copyable<Item>::value &&
-        !this->destroyItemOnClear() && bucket_count() == src.bucket_count()) {
+    if (std::is_trivially_copyable<Item>::value &&
+        !this->destroyItemOnClear() && itemCount() == src.itemCount()) {
+      FOLLY_SAFE_DCHECK(chunkShift() == src.chunkShift(), "");
+
+      auto scale = Chunk::capacityScale(access::to_address(chunks_));
+
       // most happy path
-      auto n = chunkAllocSize(chunkMask_ + 1, bucket_count());
+      auto n = chunkAllocSize(chunkCount(), scale);
       std::memcpy(&chunks_[0], &src.chunks_[0], n);
-      sizeAndPackedBegin_.size_ = src.size();
-      if (Policy::kEnableItemIteration) {
+      sizeAndChunkShiftAndPackedBegin_.setSize(src.size());
+      if constexpr (kEnableItemIteration) {
         auto srcBegin = src.begin();
-        sizeAndPackedBegin_.packedBegin() =
-            ItemIter{chunks_ + (srcBegin.chunk() - src.chunks_),
-                     srcBegin.index()}
+        sizeAndChunkShiftAndPackedBegin_.packedBegin() =
+            ItemIter{
+                chunks_ + (srcBegin.chunk() - src.chunks_), srcBegin.index()}
                 .pack();
       }
+      if constexpr (kContinuousCapacity) {
+        // capacityScale might not match even if itemCount matches
+        chunks_->setCapacityScale(scale);
+      }
     } else {
-      std::size_t maxChunkIndex = src.lastOccupiedChunk() - src.chunks_;
-
-      // happy path, no rehash but pack items toward bottom of chunk and
-      // use copy constructor
-      auto srcChunk = &src.chunks_[maxChunkIndex];
-      Chunk* dstChunk = &chunks_[maxChunkIndex];
+      // Happy path, no rehash but pack items toward bottom of chunk
+      // and use copy constructor.  Don't try to optimize by using
+      // lastOccupiedChunk() because there may be higher unoccupied chunks
+      // with the overflow bit set.
+      auto srcChunk = &src.chunks_[chunkCount() - 1];
+      Chunk* dstChunk = &chunks_[chunkCount() - 1];
       do {
         dstChunk->copyOverflowInfoFrom(*srcChunk);
 
         auto iter = srcChunk->occupiedIter();
-        if (Policy::prefetchBeforeCopy()) {
+        if (prefetchBeforeCopy()) {
           for (auto piter = iter; piter.hasNext();) {
             this->prefetchValue(srcChunk->citem(piter.next()));
           }
@@ -1631,11 +1853,10 @@ class F14Table : public Policy {
           auto&& srcArg =
               std::forward<T>(src).buildArgForItem(srcChunk->item(srcI));
           auto dst = dstChunk->itemAddr(dstI);
-          folly::assume(dst != nullptr);
           this->constructValueAtItem(
               0, dst, std::forward<decltype(srcArg)>(srcArg));
           dstChunk->setTag(dstI, srcChunk->tag(srcI));
-          ++sizeAndPackedBegin_.size_;
+          sizeAndChunkShiftAndPackedBegin_.incrementSize();
         }
 
         --srcChunk;
@@ -1643,10 +1864,12 @@ class F14Table : public Policy {
       } while (size() != src.size());
 
       // reset doesn't care about packedBegin, so we don't fix it until the end
-      if (Policy::kEnableItemIteration) {
-        sizeAndPackedBegin_.packedBegin() =
-            ItemIter{chunks_ + maxChunkIndex,
-                     chunks_[maxChunkIndex].lastOccupied().index()}
+      if constexpr (kEnableItemIteration) {
+        std::size_t maxChunkIndex = src.lastOccupiedChunk() - src.chunks_;
+        sizeAndChunkShiftAndPackedBegin_.packedBegin() =
+            ItemIter{
+                chunks_ + maxChunkIndex,
+                chunks_[maxChunkIndex].lastOccupied().index()}
                 .pack();
       }
     }
@@ -1656,12 +1879,12 @@ class F14Table : public Policy {
 
   template <typename T>
   void rehashBuildFrom(T&& src) {
-    FOLLY_SAFE_DCHECK(src.chunkMask_ > chunkMask_, "");
+    FOLLY_SAFE_DCHECK(src.chunkCount() > chunkCount(), "");
 
     // 1 byte per chunk means < 1 bit per value temporary overhead
     std::array<uint8_t, 256> stackBuf;
     uint8_t* fullness;
-    auto cc = chunkMask_ + 1;
+    auto cc = chunkCount();
     if (cc <= stackBuf.size()) {
       fullness = stackBuf.data();
     } else {
@@ -1706,7 +1929,7 @@ class F14Table : public Policy {
     while (true) {
       auto srcChunk = &src.chunks_[srcChunkIndex];
       auto iter = srcChunk->occupiedIter();
-      if (Policy::prefetchBeforeRehash()) {
+      if (prefetchBeforeRehash()) {
         for (auto piter = iter; piter.hasNext();) {
           this->prefetchValue(srcChunk->item(piter.next()));
         }
@@ -1732,7 +1955,7 @@ class F14Table : public Policy {
           auto&& srcArg = std::forward<T>(src).buildArgForItem(srcItem);
           auto const& srcKey = src.keyForValue(srcArg);
           auto hp = splitHash(this->computeKeyHash(srcKey));
-          FOLLY_SAFE_DCHECK(hp.second == srcChunk->tag(i), "");
+          FOLLY_SAFE_CHECK(hp.second == srcChunk->tag(i), "");
           insertAtBlank(
               allocateTag(fullness, hp),
               hp,
@@ -1750,75 +1973,194 @@ class F14Table : public Policy {
 
   template <typename T>
   FOLLY_NOINLINE void buildFromF14Table(T&& src) {
-    FOLLY_SAFE_DCHECK(size() == 0, "");
+    FOLLY_SAFE_DCHECK(bucket_count() == 0, "");
     if (src.size() == 0) {
       return;
     }
 
-    reserveForInsert(src.size());
+    // Use the source's capacity, unless it is oversized.
+    auto upperLimit = computeChunkCountAndScale(src.size(), false, false);
+    auto ccas = std::make_pair(
+        src.chunkCount(),
+        Chunk::capacityScale(access::to_address(src.chunks_)));
+    FOLLY_SAFE_DCHECK(
+        ccas.first >= upperLimit.first,
+        "rounded chunk count can't be bigger than actual");
+    if (ccas.first > upperLimit.first || ccas.second > upperLimit.second) {
+      ccas = upperLimit;
+    }
+    rehashImpl(0, 1, 0, ccas.first, ccas.second);
+
     try {
-      if (chunkMask_ == src.chunkMask_) {
+      if (chunkShift() == src.chunkShift()) {
         directBuildFrom(std::forward<T>(src));
       } else {
         rehashBuildFrom(std::forward<T>(src));
       }
     } catch (...) {
       reset();
+      F14LinkCheck<getF14IntrinsicsMode()>::check();
       throw;
     }
   }
 
-  FOLLY_NOINLINE void rehashImpl(
-      std::size_t newChunkCount,
-      std::size_t newMaxSizeWithoutRehash) {
-    FOLLY_SAFE_DCHECK(newMaxSizeWithoutRehash > 0, "");
+  void maybeRehash(std::size_t desiredCapacity, bool attemptExact) {
+    auto origChunkCount = chunkCount();
+    auto origCapacityScale = Chunk::capacityScale(access::to_address(chunks_));
+    auto origCapacity = computeCapacity(origChunkCount, origCapacityScale);
 
+    std::size_t newChunkCount;
+    std::size_t newCapacityScale;
+    std::tie(newChunkCount, newCapacityScale) = computeChunkCountAndScale(
+        desiredCapacity, attemptExact, kContinuousCapacity && attemptExact);
+    auto newCapacity = computeCapacity(newChunkCount, newCapacityScale);
+
+    if (origCapacity != newCapacity) {
+      rehashImpl(
+          size(),
+          origChunkCount,
+          origCapacityScale,
+          newChunkCount,
+          newCapacityScale);
+    }
+  }
+
+  void reserveImpl(std::size_t requestedCapacity) {
+    const size_t targetCapacity =
+        std::max<std::size_t>(requestedCapacity, size());
+    if (targetCapacity == 0) {
+      reset();
+      return;
+    }
+
+    // Special case reserve(n) for n <= size() (pseudo "shrink_to_fit")
+    if (requestedCapacity <= size()) {
+      maybeRehash(targetCapacity, /*attemptExact*/ true);
+      return;
+    }
+
+    auto origCapacity = bucket_count();
+
+    // Never shrink in order to avoid O(n^2) behavior of repeated reserves
+    if (targetCapacity <= origCapacity) {
+      return;
+    }
+
+    // Large increase? Good chance the capacity is exactly right
+    bool attemptExact =
+        targetCapacity > origCapacity + ((origCapacity + 7) / 8);
+    maybeRehash(targetCapacity, attemptExact);
+  }
+
+  FOLLY_NOINLINE void reserveForInsertImpl(
+      std::size_t capacityMinusOne,
+      std::size_t origChunkCount,
+      std::size_t origCapacityScale,
+      std::size_t origCapacity) {
+    FOLLY_SAFE_DCHECK(capacityMinusOne >= size(), "");
+    std::size_t capacity = capacityMinusOne + 1;
+
+    // we want to grow by between 2^0.5 and 2^1.5 ending at a "good"
+    // size, so we grow by 2^0.5 and then round up
+
+    // 1.01101_2 = 1.40625
+    std::size_t minGrowth = origCapacity + (origCapacity >> 2) +
+        (origCapacity >> 3) + (origCapacity >> 5);
+    capacity = std::max<std::size_t>(capacity, minGrowth);
+
+    std::size_t newChunkCount;
+    std::size_t newCapacityScale;
+    std::tie(newChunkCount, newCapacityScale) =
+        computeChunkCountAndScale(capacity, false, false);
+
+    FOLLY_SAFE_DCHECK(
+        computeCapacity(newChunkCount, newCapacityScale) > origCapacity, "");
+
+    rehashImpl(
+        size(),
+        origChunkCount,
+        origCapacityScale,
+        newChunkCount,
+        newCapacityScale);
+  }
+
+  void initialReserve(std::size_t desiredCapacity) {
+    FOLLY_SAFE_DCHECK(size() == 0, "");
+    FOLLY_SAFE_DCHECK(chunkShift() == 0, "");
+    FOLLY_SAFE_DCHECK(!!chunks_);
+    FOLLY_SAFE_DCHECK(Chunk::isEmptyInstance(access::to_address(chunks_)), "");
+    if (desiredCapacity == 0) {
+      return;
+    }
+
+    std::size_t newChunkCount;
+    std::size_t newCapacityScale;
+    std::tie(newChunkCount, newCapacityScale) = computeChunkCountAndScale(
+        desiredCapacity, /*attemptExact=*/true, kContinuousCapacity);
+    auto newCapacity = computeCapacity(newChunkCount, newCapacityScale);
+    auto newAllocSize = chunkAllocSize(newChunkCount, newCapacityScale);
+
+    BytePtr rawAllocation;
+    auto undoState =
+        this->beforeRehash(0, 0, newCapacity, newAllocSize, rawAllocation);
+
+    chunks_ = initializeChunks(rawAllocation, newChunkCount, newCapacityScale);
+
+    sizeAndChunkShiftAndPackedBegin_.setChunkCount(newChunkCount);
+
+    this->afterRehash(
+        std::move(undoState), true, 0, 0, newCapacity, nullptr, 0);
+  }
+
+  void rehashImpl(
+      std::size_t origSize,
+      std::size_t origChunkCount,
+      std::size_t origCapacityScale,
+      std::size_t newChunkCount,
+      std::size_t newCapacityScale) {
     auto origChunks = chunks_;
-    const auto origChunkCount = chunkMask_ + 1;
-    const auto origMaxSizeWithoutRehash = bucket_count();
+    auto origCapacity = computeCapacity(origChunkCount, origCapacityScale);
+    auto origAllocSize = chunkAllocSize(origChunkCount, origCapacityScale);
+    auto newCapacity = computeCapacity(newChunkCount, newCapacityScale);
+    auto newAllocSize = chunkAllocSize(newChunkCount, newCapacityScale);
 
     BytePtr rawAllocation;
     auto undoState = this->beforeRehash(
-        size(),
-        origMaxSizeWithoutRehash,
-        newMaxSizeWithoutRehash,
-        chunkAllocSize(newChunkCount, newMaxSizeWithoutRehash),
-        rawAllocation);
-    chunks_ =
-        initializeChunks(rawAllocation, newChunkCount, newMaxSizeWithoutRehash);
-    chunkMask_ = newChunkCount - 1;
+        origSize, origCapacity, newCapacity, newAllocSize, rawAllocation);
+    chunks_ = initializeChunks(rawAllocation, newChunkCount, newCapacityScale);
+
+    sizeAndChunkShiftAndPackedBegin_.setChunkCount(newChunkCount);
 
     bool success = false;
     SCOPE_EXIT {
-      // this SCOPE_EXIT reverts chunks_ and chunkMask_ if necessary
+      // this SCOPE_EXIT reverts chunks_ and chunkShift if necessary
       BytePtr finishedRawAllocation = nullptr;
       std::size_t finishedAllocSize = 0;
-      if (LIKELY(success)) {
-        if (origMaxSizeWithoutRehash > 0) {
+      if (FOLLY_LIKELY(success)) {
+        if (origCapacity > 0) {
           finishedRawAllocation = std::pointer_traits<BytePtr>::pointer_to(
               *static_cast<uint8_t*>(static_cast<void*>(&*origChunks)));
-          finishedAllocSize =
-              chunkAllocSize(origChunkCount, origMaxSizeWithoutRehash);
+          finishedAllocSize = origAllocSize;
         }
       } else {
         finishedRawAllocation = rawAllocation;
-        finishedAllocSize =
-            chunkAllocSize(newChunkCount, newMaxSizeWithoutRehash);
+        finishedAllocSize = newAllocSize;
         chunks_ = origChunks;
-        chunkMask_ = origChunkCount - 1;
+        sizeAndChunkShiftAndPackedBegin_.setChunkCount(origChunkCount);
+        F14LinkCheck<getF14IntrinsicsMode()>::check();
       }
 
       this->afterRehash(
           std::move(undoState),
           success,
-          size(),
-          origMaxSizeWithoutRehash,
-          newMaxSizeWithoutRehash,
+          origSize,
+          origCapacity,
+          newCapacity,
           finishedRawAllocation,
           finishedAllocSize);
     };
 
-    if (size() == 0) {
+    if (origSize == 0) {
       // nothing to do
     } else if (origChunkCount == 1 && newChunkCount == 1) {
       // no mask, no chunk scan, no hash computation, no probing
@@ -1826,8 +2168,8 @@ class F14Table : public Policy {
       auto dstChunk = chunks_;
       std::size_t srcI = 0;
       std::size_t dstI = 0;
-      while (dstI < size()) {
-        if (LIKELY(srcChunk->occupied(srcI))) {
+      while (dstI < origSize) {
+        if (FOLLY_LIKELY(srcChunk->occupied(srcI))) {
           dstChunk->setTag(dstI, srcChunk->tag(srcI));
           this->moveItemDuringRehash(
               dstChunk->itemAddr(dstI), srcChunk->item(srcI));
@@ -1835,8 +2177,9 @@ class F14Table : public Policy {
         }
         ++srcI;
       }
-      if (Policy::kEnableItemIteration) {
-        sizeAndPackedBegin_.packedBegin() = ItemIter{dstChunk, dstI - 1}.pack();
+      if constexpr (kEnableItemIteration) {
+        sizeAndChunkShiftAndPackedBegin_.packedBegin() =
+            ItemIter{dstChunk, dstI - 1}.pack();
       }
     } else {
       // 1 byte per chunk means < 1 bit per value temporary overhead
@@ -1863,10 +2206,10 @@ class F14Table : public Policy {
       };
 
       auto srcChunk = origChunks + origChunkCount - 1;
-      std::size_t remaining = size();
+      std::size_t remaining = origSize;
       while (remaining > 0) {
         auto iter = srcChunk->occupiedIter();
-        if (Policy::prefetchBeforeRehash()) {
+        if (prefetchBeforeRehash()) {
           for (auto piter = iter; piter.hasNext();) {
             this->prefetchValue(srcChunk->item(piter.next()));
           }
@@ -1877,7 +2220,7 @@ class F14Table : public Policy {
           Item& srcItem = srcChunk->item(srcI);
           auto hp = splitHash(
               this->computeItemHash(const_cast<Item const&>(srcItem)));
-          FOLLY_SAFE_DCHECK(hp.second == srcChunk->tag(srcI), "");
+          FOLLY_SAFE_CHECK(hp.second == srcChunk->tag(srcI), "");
 
           auto dstIter = allocateTag(fullness, hp);
           this->moveItemDuringRehash(dstIter.itemAddr(), srcItem);
@@ -1885,13 +2228,13 @@ class F14Table : public Policy {
         --srcChunk;
       }
 
-      if (Policy::kEnableItemIteration) {
+      if constexpr (kEnableItemIteration) {
         // this code replaces size invocations of adjustSizeAndBeginAfterInsert
-        std::size_t i = chunkMask_;
+        std::size_t i = chunkCount() - 1;
         while (fullness[i] == 0) {
           --i;
         }
-        sizeAndPackedBegin_.packedBegin() =
+        sizeAndChunkShiftAndPackedBegin_.packedBegin() =
             ItemIter{chunks_ + i, std::size_t{fullness[i]} - 1}.pack();
       }
     }
@@ -1899,57 +2242,88 @@ class F14Table : public Policy {
     success = true;
   }
 
+  // Randomization to help expose bugs when running tests in debug or
+  // sanitizer builds
+
+  FOLLY_ALWAYS_INLINE void debugModeOnReserve(std::size_t capacity) {
+    if constexpr (kIsLibrarySanitizeAddress || kIsDebug) {
+      if (capacity > size()) {
+        tlsPendingSafeInserts(static_cast<std::ptrdiff_t>(capacity - size()));
+      }
+    }
+  }
+
+  void debugModeSpuriousRehash() {
+    auto cc = chunkCount();
+    auto ss = Chunk::capacityScale(access::to_address(chunks_));
+    rehashImpl(size(), cc, ss, cc, ss);
+  }
+
+  FOLLY_ALWAYS_INLINE void debugModeBeforeInsert() {
+    // When running under ASAN, we add a spurious rehash with 1/size()
+    // probability before every insert.  This means that finding reference
+    // stability problems for F14Value and F14Vector is much more likely.
+    // The most common pattern that causes this is
+    //
+    //   auto& ref = map[k1]; map[k2] = foo(ref);
+    //
+    // One way to fix this is to call map.reserve(N) before such a
+    // sequence, where N is the number of keys that might be inserted
+    // within the section that retains references plus the existing size.
+    if constexpr (kIsLibrarySanitizeAddress) {
+      if (!tlsPendingSafeInserts() && size() > 0 &&
+          tlsMinstdRand(size()) == 0) {
+        debugModeSpuriousRehash();
+      }
+    }
+  }
+
+  FOLLY_ALWAYS_INLINE void debugModeAfterInsert() {
+    if constexpr (kIsLibrarySanitizeAddress || kIsDebug) {
+      tlsPendingSafeInserts(-1);
+    }
+  }
+
+  FOLLY_ALWAYS_INLINE void debugModePerturbSlotInsertOrder(
+      ChunkPtr chunk, std::size_t& itemIndex) {
+    FOLLY_SAFE_DCHECK(!chunk->occupied(itemIndex), "");
+    constexpr bool perturbSlot = FOLLY_F14_PERTURB_INSERTION_ORDER;
+    if (perturbSlot && !tlsPendingSafeInserts()) {
+      std::size_t e = chunkShift() == 0 ? bucket_count() : Chunk::kCapacity;
+      std::size_t i = itemIndex + tlsMinstdRand(e - itemIndex);
+      if (!chunk->occupied(i)) {
+        itemIndex = i;
+      }
+    }
+  }
+
  public:
   // user has no control over max_load_factor
 
-  void rehash(std::size_t capacity) {
-    if (capacity < size()) {
-      capacity = size();
-    }
-
-    std::size_t const kInitialCapacity = 2;
-    std::size_t const kHalfChunkCapacity =
-        (Chunk::kDesiredCapacity / 2) & ~std::size_t{1};
-    std::size_t maxSizeWithoutRehash;
-    std::size_t chunkCount;
-    if (capacity <= kInitialCapacity) {
-      chunkCount = 1;
-      maxSizeWithoutRehash = kInitialCapacity;
-    } else if (capacity <= kHalfChunkCapacity) {
-      chunkCount = 1;
-      maxSizeWithoutRehash = kHalfChunkCapacity;
-    } else {
-      chunkCount = folly::nextPowTwo(
-          (capacity + Chunk::kDesiredCapacity - 1) / Chunk::kDesiredCapacity);
-      maxSizeWithoutRehash = chunkCount * Chunk::kDesiredCapacity;
-
-      constexpr std::size_t kMaxChunksWithoutCapacityOverflow =
-          (std::numeric_limits<std::size_t>::max)() / Chunk::kDesiredCapacity;
-
-      if (UNLIKELY(
-              chunkCount > kMaxChunksWithoutCapacityOverflow ||
-              maxSizeWithoutRehash > max_size())) {
-        throw_exception<std::bad_alloc>();
-      }
-    }
-    if (bucket_count() != maxSizeWithoutRehash) {
-      rehashImpl(chunkCount, maxSizeWithoutRehash);
-    }
-  }
+  void rehash(std::size_t capacity) { reserve(capacity); }
 
   void reserve(std::size_t capacity) {
-    rehash(capacity);
-  }
-
-  // Returns true iff a rehash was performed
-  void reserveForInsert(size_t incoming = 1) {
-    if (size() + incoming - 1 >= bucket_count()) {
-      reserveForInsertImpl(incoming);
+    // We want to support the pattern
+    //   map.reserve(map.size() + 2); auto& r1 = map[k1]; auto& r2 = map[k2];
+    debugModeOnReserve(capacity);
+    FOLLY_SAFE_DCHECK(!!chunks_);
+    if (Chunk::isEmptyInstance(access::to_address(chunks_))) {
+      initialReserve(capacity);
+    } else {
+      reserveImpl(capacity);
     }
   }
 
-  FOLLY_NOINLINE void reserveForInsertImpl(size_t incoming) {
-    rehash(size() + incoming);
+  void reserveForInsert(size_t incoming = 1) {
+    FOLLY_SAFE_DCHECK(incoming > 0, "");
+
+    auto needed = size() + incoming;
+    auto chunkCount_ = chunkCount();
+    auto scale = Chunk::capacityScale(access::to_address(chunks_));
+    auto existing = computeCapacity(chunkCount_, scale);
+    if (needed - 1 >= existing) {
+      reserveForInsertImpl(needed - 1, chunkCount_, scale, existing);
+    }
   }
 
   // Returns pos,true if construct, pos,false if found.  key is only used
@@ -1958,16 +2332,35 @@ class F14Table : public Policy {
   template <typename K, typename... Args>
   std::pair<ItemIter, bool> tryEmplaceValue(K const& key, Args&&... args) {
     const auto hp = splitHash(this->computeKeyHash(key));
+    return tryEmplaceValueImpl(hp, key, std::forward<Args>(args)...);
+  }
 
-    auto existing = findImpl(hp, key);
-    if (!existing.atEnd()) {
-      return std::make_pair(existing, false);
+  template <typename K, typename... Args>
+  std::pair<ItemIter, bool> tryEmplaceValueWithToken(
+      F14HashToken const& token, K const& key, Args&&... args) {
+    FOLLY_SAFE_DCHECK(
+        splitHash(this->computeKeyHash(key)) == static_cast<HashPair>(token),
+        "");
+    return tryEmplaceValueImpl(
+        static_cast<HashPair>(token), key, std::forward<Args>(args)...);
+  }
+
+  template <typename K, typename... Args>
+  std::pair<ItemIter, bool> tryEmplaceValueImpl(
+      HashPair hp, K const& key, Args&&... args) {
+    if (size() > 0) {
+      auto existing = findImpl(hp, key, Prefetch::ENABLED);
+      if (!existing.atEnd()) {
+        return std::make_pair(existing, false);
+      }
     }
+
+    debugModeBeforeInsert();
 
     reserveForInsert();
 
     std::size_t index = hp.first;
-    ChunkPtr chunk = chunks_ + (index & chunkMask_);
+    ChunkPtr chunk = chunks_ + moduloByChunkCount(index);
     auto firstEmpty = chunk->firstEmpty();
 
     if (!firstEmpty.hasIndex()) {
@@ -1975,33 +2368,38 @@ class F14Table : public Policy {
       do {
         chunk->incrOutboundOverflowCount();
         index += delta;
-        chunk = chunks_ + (index & chunkMask_);
+        chunk = chunks_ + moduloByChunkCount(index);
         firstEmpty = chunk->firstEmpty();
       } while (!firstEmpty.hasIndex());
       chunk->adjustHostedOverflowCount(Chunk::kIncrHostedOverflowCount);
     }
     std::size_t itemIndex = firstEmpty.index();
-    FOLLY_SAFE_DCHECK(!chunk->occupied(itemIndex), "");
+
+    debugModePerturbSlotInsertOrder(chunk, itemIndex);
 
     chunk->setTag(itemIndex, hp.second);
     ItemIter iter{chunk, itemIndex};
 
     // insertAtBlank will clear the tag if the constructor throws
     insertAtBlank(iter, hp, std::forward<Args>(args)...);
+
+    debugModeAfterInsert();
+
     return std::make_pair(iter, true);
   }
 
  private:
   template <bool Reset>
   void clearImpl() noexcept {
-    if (chunks_ == Chunk::emptyInstance()) {
+    FOLLY_SAFE_DCHECK(!!chunks_);
+    if (Chunk::isEmptyInstance(access::to_address(chunks_))) {
       FOLLY_SAFE_DCHECK(empty() && bucket_count() == 0, "");
       return;
     }
 
     // turn clear into reset if the table is >= 16 chunks so that
     // we don't get too low a load factor
-    bool willReset = Reset || chunkMask_ + 1 >= 16;
+    bool willReset = Reset || chunkCount() >= 16;
 
     auto origSize = size();
     auto origCapacity = bucket_count();
@@ -2012,11 +2410,11 @@ class F14Table : public Policy {
     }
 
     if (!empty()) {
-      if (Policy::destroyItemOnClear()) {
-        for (std::size_t ci = 0; ci <= chunkMask_; ++ci) {
+      if (destroyItemOnClear()) {
+        for (std::size_t ci = 0; ci < chunkCount(); ++ci) {
           ChunkPtr chunk = chunks_ + ci;
           auto iter = chunk->occupiedIter();
-          if (Policy::prefetchBeforeDestroy()) {
+          if (prefetchBeforeDestroy()) {
             for (auto piter = iter; piter.hasNext();) {
               this->prefetchValue(chunk->item(piter.next()));
             }
@@ -2030,25 +2428,26 @@ class F14Table : public Policy {
         // It's okay to do this in a separate loop because we only do it
         // when the chunk count is small.  That avoids a branch when we
         // are promoting a clear to a reset for a large table.
-        auto c0c = chunks_[0].chunk0Capacity();
-        for (std::size_t ci = 0; ci <= chunkMask_; ++ci) {
+        auto scale = Chunk::capacityScale(access::to_address(chunks_));
+        for (std::size_t ci = 0; ci < chunkCount(); ++ci) {
           chunks_[ci].clear();
         }
-        chunks_[0].markEof(c0c);
+        chunks_[0].markEof(scale);
       }
-      if (Policy::kEnableItemIteration) {
-        sizeAndPackedBegin_.packedBegin() = ItemIter{}.pack();
+      if constexpr (kEnableItemIteration) {
+        sizeAndChunkShiftAndPackedBegin_.packedBegin() = ItemIter{}.pack();
       }
-      sizeAndPackedBegin_.size_ = 0;
+      sizeAndChunkShiftAndPackedBegin_.setSize(0);
     }
 
     if (willReset) {
       BytePtr rawAllocation = std::pointer_traits<BytePtr>::pointer_to(
           *static_cast<uint8_t*>(static_cast<void*>(&*chunks_)));
-      std::size_t rawSize = chunkAllocSize(chunkMask_ + 1, bucket_count());
+      std::size_t rawSize = chunkAllocSize(
+          chunkCount(), Chunk::capacityScale(access::to_address(chunks_)));
 
-      chunks_ = Chunk::emptyInstance();
-      chunkMask_ = 0;
+      chunks_ = Chunk::getSomeEmptyInstance();
+      sizeAndChunkShiftAndPackedBegin_.setChunkCount(1);
 
       this->afterReset(origSize, origCapacity, rawAllocation, rawSize);
     } else {
@@ -2065,13 +2464,6 @@ class F14Table : public Policy {
  public:
   // The item needs to still be hashable during this call.  If you want
   // to intercept the value before it is destroyed (to extract it, for
-  // example), use eraseIterInto(pos, beforeDestroy).
-  void eraseIter(ItemIter pos) {
-    eraseIterInto(pos, [](value_type&&) {});
-  }
-
-  // The item needs to still be hashable during this call.  If you want
-  // to intercept the value before it is destroyed (to extract it, for
   // example), do so in the beforeDestroy callback.
   template <typename BeforeDestroy>
   void eraseIterInto(ItemIter pos, BeforeDestroy&& beforeDestroy) {
@@ -2083,18 +2475,13 @@ class F14Table : public Policy {
     eraseImpl(pos, hp);
   }
 
-  template <typename K>
-  std::size_t eraseKey(K const& key) {
-    return eraseKeyInto(key, [](value_type&&) {});
-  }
-
   template <typename K, typename BeforeDestroy>
   std::size_t eraseKeyInto(K const& key, BeforeDestroy&& beforeDestroy) {
-    if (UNLIKELY(size() == 0)) {
+    if (FOLLY_UNLIKELY(size() == 0)) {
       return 0;
     }
     auto hp = splitHash(this->computeKeyHash(key));
-    auto iter = findImpl(hp, key);
+    auto iter = findImpl(hp, key, Prefetch::ENABLED);
     if (!iter.atEnd()) {
       beforeDestroy(this->valueAtItemForExtract(iter.item()));
       eraseImpl(iter, hp);
@@ -2105,20 +2492,30 @@ class F14Table : public Policy {
   }
 
   void clear() noexcept {
-    clearImpl<false>();
+    if constexpr (kIsLibrarySanitizeAddress) {
+      // force recycling of heap memory
+      auto bc = bucket_count();
+      reset();
+      try {
+        reserveImpl(bc);
+      } catch (std::bad_alloc const&) {
+        // ASAN mode only, keep going
+      }
+    } else {
+      clearImpl<false>();
+    }
   }
 
   // Like clear(), but always frees all dynamic storage allocated
   // by the table.
-  void reset() noexcept {
-    clearImpl<true>();
-  }
+  void reset() noexcept { clearImpl<true>(); }
 
   // Get memory footprint, not including sizeof(*this).
   std::size_t getAllocatedMemorySize() const {
     std::size_t sum = 0;
-    visitAllocationClasses(
-        [&sum](std::size_t bytes, std::size_t n) { sum += bytes * n; });
+    visitAllocationClasses([&sum](std::size_t bytes, std::size_t n) {
+      sum += bytes * n;
+    });
     return sum;
   }
 
@@ -2133,22 +2530,25 @@ class F14Table : public Policy {
   // be called with a zero allocationCount.
   template <typename V>
   void visitAllocationClasses(V&& visitor) const {
-    auto bc = bucket_count();
+    auto scale = Chunk::capacityScale(access::to_address(chunks_));
     this->visitPolicyAllocationClasses(
-        (bc == 0 ? 0 : chunkAllocSize(chunkMask_ + 1, bc)),
+        scale == 0 ? 0 : chunkAllocSize(chunkCount(), scale),
         size(),
-        bc,
+        bucket_count(),
         visitor);
   }
 
   // visitor should take an Item const&
   template <typename V>
   void visitItems(V&& visitor) const {
+    if (empty()) {
+      return;
+    }
     std::size_t maxChunkIndex = lastOccupiedChunk() - chunks_;
     auto chunk = &chunks_[0];
-    for (std::size_t i = 0; i < maxChunkIndex; ++i, ++chunk) {
+    for (std::size_t i = 0; i <= maxChunkIndex; ++i, ++chunk) {
       auto iter = chunk->occupiedIter();
-      if (Policy::prefetchBeforeCopy()) {
+      if (prefetchBeforeCopy()) {
         for (auto piter = iter; piter.hasNext();) {
           this->prefetchValue(chunk->citem(piter.next()));
         }
@@ -2162,9 +2562,12 @@ class F14Table : public Policy {
   // visitor should take two Item const*
   template <typename V>
   void visitContiguousItemRanges(V&& visitor) const {
+    if (empty()) {
+      return;
+    }
     std::size_t maxChunkIndex = lastOccupiedChunk() - chunks_;
     auto chunk = &chunks_[0];
-    for (std::size_t i = 0; i < maxChunkIndex; ++i, ++chunk) {
+    for (std::size_t i = 0; i <= maxChunkIndex; ++i, ++chunk) {
       for (auto iter = chunk->occupiedRangeIter(); iter.hasNext();) {
         auto be = iter.next();
         FOLLY_SAFE_DCHECK(
@@ -2177,8 +2580,7 @@ class F14Table : public Policy {
 
  private:
   static std::size_t& histoAt(
-      std::vector<std::size_t>& histo,
-      std::size_t index) {
+      std::vector<std::size_t>& histo, std::size_t index) {
     if (histo.size() <= index) {
       histo.resize(index + 1);
     }
@@ -2190,7 +2592,7 @@ class F14Table : public Policy {
   F14TableStats computeStats() const {
     F14TableStats stats;
 
-    if (folly::kIsDebug && Policy::kEnableItemIteration) {
+    if constexpr (kIsDebug && kEnableItemIteration) {
       // validate iteration
       std::size_t n = 0;
       ItemIter prev;
@@ -2203,11 +2605,13 @@ class F14Table : public Policy {
     }
 
     FOLLY_SAFE_DCHECK(
-        (chunks_ == Chunk::emptyInstance()) == (bucket_count() == 0), "");
+        (Chunk::isEmptyInstance(access::to_address(chunks_))) ==
+            (bucket_count() == 0),
+        "");
 
     std::size_t n1 = 0;
     std::size_t n2 = 0;
-    auto cc = bucket_count() == 0 ? 0 : chunkMask_ + 1;
+    auto cc = bucket_count() == 0 ? 0 : chunkCount();
     for (std::size_t ci = 0; ci < cc; ++ci) {
       ChunkPtr chunk = chunks_ + ci;
       FOLLY_SAFE_DCHECK(chunk->eof() == (ci == 0), "");
@@ -2237,7 +2641,7 @@ class F14Table : public Policy {
           std::size_t dist = 1;
           std::size_t index = hp.first;
           std::size_t delta = probeDelta(hp);
-          while ((index & chunkMask_) != ci) {
+          while (moduloByChunkCount(index) != ci) {
             index += delta;
             ++dist;
           }
@@ -2254,8 +2658,8 @@ class F14Table : public Policy {
           std::size_t dist = 1;
           std::size_t index = hp.first;
           std::size_t delta = probeDelta(hp);
-          for (std::size_t tries = 0; tries <= chunkMask_ &&
-               chunks_[index & chunkMask_].outboundOverflowCount() != 0;
+          for (std::size_t tries = 0; tries >> chunkShift() == 0 &&
+               chunks_[moduloByChunkCount(index)].outboundOverflowCount() != 0;
                ++tries) {
             index += delta;
             ++dist;
@@ -2269,9 +2673,7 @@ class F14Table : public Policy {
     FOLLY_SAFE_DCHECK(n1 == size(), "");
     FOLLY_SAFE_DCHECK(n2 == size(), "");
 
-#if FOLLY_HAS_RTTI
-    stats.policy = typeid(Policy).name();
-#endif
+    stats.policy = pretty_name<Policy>();
     stats.size = size();
     stats.valueSize = sizeof(value_type);
     stats.bucketCount = bucket_count();
@@ -2288,4 +2690,14 @@ class F14Table : public Policy {
 
 #endif // FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
 
+namespace f14 {
+namespace test {
+inline void disableInsertOrderRandomization() {
+  if constexpr (kIsLibrarySanitizeAddress || kIsDebug) {
+    detail::tlsPendingSafeInserts(static_cast<std::ptrdiff_t>(
+        (std::numeric_limits<std::size_t>::max)() / 2));
+  }
+}
+} // namespace test
+} // namespace f14
 } // namespace folly

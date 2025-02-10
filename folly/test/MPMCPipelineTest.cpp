@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,9 +22,11 @@
 #include <glog/logging.h>
 
 #include <folly/Conv.h>
+#include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
 
-namespace folly { namespace test {
+namespace folly {
+namespace test {
 
 TEST(MPMCPipeline, Trivial) {
   MPMCPipeline<int, std::string> a(2, 2);
@@ -85,13 +87,12 @@ TEST(MPMCPipeline, MultiThreaded) {
       for (;;) {
         int val;
         auto ticket = a.blockingReadStage<0>(val);
-        if (val == -1) {  // stop
+        if (val == -1) { // stop
           // We still need to propagate
           a.blockingWriteStage<0>(ticket, "");
           break;
         }
-        a.blockingWriteStage<0>(
-            ticket, folly::to<std::string>(val, " hello"));
+        a.blockingWriteStage<0>(ticket, folly::to<std::string>(val, " hello"));
       }
     });
   }
@@ -101,19 +102,18 @@ TEST(MPMCPipeline, MultiThreaded) {
       for (;;) {
         std::string val;
         auto ticket = a.blockingReadStage<1>(val);
-        if (val.empty()) {  // stop
+        if (val.empty()) { // stop
           // We still need to propagate
           a.blockingWriteStage<1>(ticket, "");
           break;
         }
-        a.blockingWriteStage<1>(
-            ticket, folly::to<std::string>(val, " world"));
+        a.blockingWriteStage<1>(ticket, folly::to<std::string>(val, " world"));
       }
     });
   }
 
   std::vector<std::string> results;
-  threads.emplace_back([&a, &results] () {
+  threads.emplace_back([&a, &results]() {
     for (;;) {
       std::string val;
       a.blockingRead(val);
@@ -159,8 +159,8 @@ TEST(MPMCPipeline, MultiThreaded) {
 } // namespace test
 } // namespace folly
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   return RUN_ALL_TESTS();
 }

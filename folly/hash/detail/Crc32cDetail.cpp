@@ -31,13 +31,12 @@
 
 #include <stdexcept>
 
-#include <folly/hash/detail/ChecksumDetail.h>
-
-#include <folly/CppAttributes.h>
-
 #include <boost/preprocessor/arithmetic/add.hpp>
 #include <boost/preprocessor/arithmetic/sub.hpp>
 #include <boost/preprocessor/repetition/repeat_from_to.hpp>
+
+#include <folly/CppAttributes.h>
+#include <folly/hash/detail/ChecksumDetail.h>
 
 namespace folly {
 namespace detail {
@@ -50,15 +49,16 @@ namespace crc32_detail {
   crc##0 = _mm_crc32_u64(crc##0, *(buf##0 + offset)); \
   crc##1 = _mm_crc32_u64(crc##1, *(buf##1 + offset)); \
   crc##2 = _mm_crc32_u64(crc##2, *(buf##2 + offset)); \
-  FOLLY_FALLTHROUGH;
+  [[fallthrough]]
 
 #define CRCduplet(crc, buf, offset)                   \
   crc##0 = _mm_crc32_u64(crc##0, *(buf##0 + offset)); \
-  crc##1 = _mm_crc32_u64(crc##1, *(buf##1 + offset));
+  crc##1 = _mm_crc32_u64(crc##1, *(buf##1 + offset)); \
+  static_assert(true, "Semicolon required")
 
 #define CRCsinglet(crc, buf, offset)                    \
   crc = _mm_crc32_u64(crc, *(uint64_t*)(buf + offset)); \
-  FOLLY_FALLTHROUGH;
+  [[fallthrough]]
 
 #define CASEREPEAT_TRIPLET(unused, count, total)    \
   case BOOST_PP_ADD(1, BOOST_PP_SUB(total, count)): \
@@ -227,7 +227,7 @@ void triplet_loop(
             next1 = next0 + 128; // from here on all blocks are 128 long
             next2 = next1 + 128;
           }
-          FOLLY_FALLTHROUGH;
+          [[fallthrough]];
         case 0:;
       } while (n > 0);
   }
@@ -235,7 +235,7 @@ void triplet_loop(
   next = (const unsigned char*)next2;
 }
 
-} // namespace crc32c_detail
+} // namespace crc32_detail
 
 /* Compute CRC-32C using the Intel hardware instruction. */
 FOLLY_TARGET_ATTRIBUTE("sse4.2")
@@ -286,14 +286,18 @@ uint32_t crc32c_hw(const uint8_t* buf, size_t len, uint32_t crc) {
   return (uint32_t)crc0;
 }
 
+#elif FOLLY_ARM_FEATURE_CRC32
+
+// crc32c_hw is defined in external/nvidia/hash/detail/Crc32cDetail.cpp
+
 #else
 
-uint32_t
-crc32c_hw(const uint8_t* /* buf */, size_t /* len */, uint32_t /* crc */) {
+uint32_t crc32c_hw(
+    const uint8_t* /* buf */, size_t /* len */, uint32_t /* crc */) {
   throw std::runtime_error("crc32_hw is not implemented on this platform");
 }
 
-#endif
+#endif // !defined(FOLLY_ARM_FEATURE_CRC32)
 
 } // namespace detail
 } // namespace folly

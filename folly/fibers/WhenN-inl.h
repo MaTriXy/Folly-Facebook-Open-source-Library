@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,8 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <folly/Optional.h>
 
+#include <folly/Optional.h>
 #include <folly/fibers/FiberManagerInternal.h>
 #include <folly/fibers/ForEach.h>
 
@@ -22,15 +22,15 @@ namespace folly {
 namespace fibers {
 
 template <class InputIterator>
-typename std::vector<typename std::enable_if<
+typename std::enable_if<
     !std::is_same<
         invoke_result_t<
             typename std::iterator_traits<InputIterator>::value_type>,
         void>::value,
-    typename std::pair<
+    std::vector<std::pair<
         size_t,
         invoke_result_t<
-            typename std::iterator_traits<InputIterator>::value_type>>>::type>
+            typename std::iterator_traits<InputIterator>::value_type>>>>::type
 collectN(InputIterator first, InputIterator last, size_t n) {
   typedef invoke_result_t<
       typename std::iterator_traits<InputIterator>::value_type>
@@ -51,10 +51,10 @@ collectN(InputIterator first, InputIterator last, size_t n) {
   };
   auto context = std::make_shared<Context>(n);
 
-  await([first, last, context](Promise<void> promise) mutable {
+  await_async([first, last, context](Promise<void> promise) mutable {
     context->promise = std::move(promise);
     for (size_t i = 0; first != last; ++i, ++first) {
-      addTask([ i, context, f = std::move(*first) ]() {
+      addTask([i, context, f = std::move(*first)]() {
         try {
           auto result = f();
           if (context->tasksTodo == 0) {
@@ -65,7 +65,7 @@ collectN(InputIterator first, InputIterator last, size_t n) {
           if (context->tasksTodo == 0) {
             return;
           }
-          context->e = std::current_exception();
+          context->e = current_exception();
         }
         if (--context->tasksTodo == 0) {
           context->promise->setValue();
@@ -105,10 +105,10 @@ collectN(InputIterator first, InputIterator last, size_t n) {
   };
   auto context = std::make_shared<Context>(n);
 
-  await([first, last, context](Promise<void> promise) mutable {
+  await_async([first, last, context](Promise<void> promise) mutable {
     context->promise = std::move(promise);
     for (size_t i = 0; first != last; ++i, ++first) {
-      addTask([ i, context, f = std::move(*first) ]() {
+      addTask([i, context, f = std::move(*first)]() {
         try {
           f();
           if (context->tasksTodo == 0) {
@@ -119,7 +119,7 @@ collectN(InputIterator first, InputIterator last, size_t n) {
           if (context->tasksTodo == 0) {
             return;
           }
-          context->e = std::current_exception();
+          context->e = current_exception();
         }
         if (--context->tasksTodo == 0) {
           context->promise->setValue();

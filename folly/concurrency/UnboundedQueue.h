@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +24,7 @@
 
 #include <folly/ConstexprMath.h>
 #include <folly/Optional.h>
+#include <folly/Traits.h>
 #include <folly/concurrency/CacheLocality.h>
 #include <folly/lang/Align.h>
 #include <folly/synchronization/Hazptr.h>
@@ -81,6 +82,7 @@ namespace folly {
 ///
 ///   Consumer operations:
 ///     void dequeue(T&);
+///     T dequeue();
 ///         Extracts an element from the front of the queue. Waits
 ///         until an element is available if needed.
 ///     bool try_dequeue(T&);
@@ -135,6 +137,10 @@ namespace folly {
 ///   a fixed size of 2^LgSegmentSize entries. Each segment is used
 ///   exactly once.
 /// - Each entry is composed of a futex and a single element.
+/// - Each segment's array of entries is strided to avoid false sharing.
+///   I.e., to reduce any cacheline contention that might be induced by
+///   concurrent mutations to the queue that might happen to affect
+///   otherwise-adjacent locations that might happen to share cacheline.
 /// - The queue contains two 64-bit ticket variables. The producer
 ///   ticket counts the number of producer tickets issued so far, and
 ///   the same for the consumer ticket. Each ticket number corresponds
@@ -204,6 +210,13 @@ namespace folly {
 ///   may yield better results due to, for example, more favorable
 ///   producer-consumer balance or favorable timing for avoiding
 ///   costly blocking.
+///
+/// Guarantees:
+/// - The queues are linearizable:
+///   - For two enqueue operations q(A) and q(B), if q(A) < q(B) in
+///     the happens-before relation, then A precedes B in the queue.
+///   - For two dequeue operations d(A) and d(B), if d(A) < d(B) in
+///     the happens-before relation, then A preceded B in the queue.
 
 template <
     typename T,
@@ -224,16 +237,20 @@ class UnboundedQueue {
   static constexpr size_t Align = 1u << LgAlign;
 
   static_assert(
-      std::is_nothrow_destructible<T>::value,
-      "T must be nothrow_destructible");
+      std::is_nothrow_destructible<T>::value, "T must be nothrow_destructible");
   static_assert((Stride & 1) == 1, "Stride must be odd");
   static_assert(LgSegmentSize < 32, "LgSegmentSize must be < 32");
   static_assert(LgAlign < 16, "LgAlign must be < 16");
 
+  using Sem = folly::SaturatingSemaphore<MayBlock, Atom>;
+
   struct Consumer {
     Atom<Segment*> head;
     Atom<Ticket> ticket;
-    explicit Consumer(Segment* s) : head(s), ticket(0) {}
+    hazptr_obj_cohort<Atom> cohort;
+    explicit Consumer(Segment* s) : head(s), ticket(0) {
+      s->set_cohort_no_tag(&cohort); // defined in hazptr_obj
+    }
   };
   struct Producer {
     Atom<Segment*> tail;
@@ -245,37 +262,33 @@ class UnboundedQueue {
   alignas(Align) Producer p_;
 
  public:
+  using value_type = T;
+  using size_type = size_t;
+
   /** constructor */
   UnboundedQueue()
       : c_(new Segment(0)), p_(c_.head.load(std::memory_order_relaxed)) {}
 
   /** destructor */
   ~UnboundedQueue() {
-    Segment* next;
-    for (Segment* s = head(); s; s = next) {
-      next = s->nextSegment();
-      reclaimSegment(s);
-    }
+    cleanUpRemainingItems();
+    reclaimRemainingSegments();
   }
 
   /** enqueue */
-  FOLLY_ALWAYS_INLINE void enqueue(const T& arg) {
-    enqueueImpl(arg);
-  }
+  FOLLY_ALWAYS_INLINE void enqueue(const T& arg) { enqueueImpl(arg); }
 
-  FOLLY_ALWAYS_INLINE void enqueue(T&& arg) {
-    enqueueImpl(std::move(arg));
-  }
+  FOLLY_ALWAYS_INLINE void enqueue(T&& arg) { enqueueImpl(std::move(arg)); }
 
   /** dequeue */
-  FOLLY_ALWAYS_INLINE void dequeue(T& item) noexcept {
-    dequeueImpl(item);
-  }
+  FOLLY_ALWAYS_INLINE void dequeue(T& item) noexcept { item = dequeueImpl(); }
+
+  FOLLY_ALWAYS_INLINE T dequeue() noexcept { return dequeueImpl(); }
 
   /** try_dequeue */
   FOLLY_ALWAYS_INLINE bool try_dequeue(T& item) noexcept {
     auto o = try_dequeue();
-    if (LIKELY(o.has_value())) {
+    if (FOLLY_LIKELY(o.has_value())) {
       item = std::move(*o);
       return true;
     }
@@ -293,7 +306,7 @@ class UnboundedQueue {
       const std::chrono::time_point<Clock, Duration>& deadline) noexcept {
     folly::Optional<T> o = try_dequeue_until(deadline);
 
-    if (LIKELY(o.has_value())) {
+    if (FOLLY_LIKELY(o.has_value())) {
       item = std::move(*o);
       return true;
     }
@@ -310,11 +323,10 @@ class UnboundedQueue {
   /** try_dequeue_for */
   template <typename Rep, typename Period>
   FOLLY_ALWAYS_INLINE bool try_dequeue_for(
-      T& item,
-      const std::chrono::duration<Rep, Period>& duration) noexcept {
+      T& item, const std::chrono::duration<Rep, Period>& duration) noexcept {
     folly::Optional<T> o = try_dequeue_for(duration);
 
-    if (LIKELY(o.has_value())) {
+    if (FOLLY_LIKELY(o.has_value())) {
       item = std::move(*o);
       return true;
     }
@@ -326,7 +338,7 @@ class UnboundedQueue {
   FOLLY_ALWAYS_INLINE folly::Optional<T> try_dequeue_for(
       const std::chrono::duration<Rep, Period>& duration) noexcept {
     folly::Optional<T> o = try_dequeue();
-    if (LIKELY(o.has_value())) {
+    if (FOLLY_LIKELY(o.has_value())) {
       return o;
     }
     return tryDequeueUntil(std::chrono::steady_clock::now() + duration);
@@ -334,8 +346,7 @@ class UnboundedQueue {
 
   /** try_peek */
   FOLLY_ALWAYS_INLINE const T* try_peek() noexcept {
-    /* This function is supported only for USPSC and UMPSC queues. */
-    DCHECK(SingleConsumer);
+    static_assert(SingleConsumer, "not single-consumer");
     return tryPeekUntil(std::chrono::steady_clock::time_point::min());
   }
 
@@ -363,8 +374,8 @@ class UnboundedQueue {
     } else {
       // Using hazptr_holder instead of hazptr_local because it is
       // possible that the T ctor happens to use hazard pointers.
-      hazptr_holder<Atom> hptr;
-      Segment* s = hptr.get_protected(p_.tail);
+      hazptr_holder<Atom> hptr = make_hazard_pointer<Atom>();
+      Segment* s = hptr.protect(p_.tail);
       enqueueCommon(s, std::forward<Arg>(arg));
     }
   }
@@ -390,32 +401,33 @@ class UnboundedQueue {
   }
 
   /** dequeueImpl */
-  FOLLY_ALWAYS_INLINE void dequeueImpl(T& item) noexcept {
+  FOLLY_ALWAYS_INLINE T dequeueImpl() noexcept {
     if (SPSC) {
       Segment* s = head();
-      dequeueCommon(s, item);
+      return dequeueCommon(s);
     } else {
       // Using hazptr_holder instead of hazptr_local because it is
       // possible to call the T dtor and it may happen to use hazard
       // pointers.
-      hazptr_holder<Atom> hptr;
-      Segment* s = hptr.get_protected(c_.head);
-      dequeueCommon(s, item);
+      hazptr_holder<Atom> hptr = make_hazard_pointer<Atom>();
+      Segment* s = hptr.protect(c_.head);
+      return dequeueCommon(s);
     }
   }
 
   /** dequeueCommon */
-  FOLLY_ALWAYS_INLINE void dequeueCommon(Segment* s, T& item) noexcept {
+  FOLLY_ALWAYS_INLINE T dequeueCommon(Segment* s) noexcept {
     Ticket t = fetchIncrementConsumerTicket();
     if (!SingleConsumer) {
       s = findSegment(s, t);
     }
     size_t idx = index(t);
     Entry& e = s->entry(idx);
-    e.takeItem(item);
+    auto res = e.takeItem();
     if (responsibleForAdvance(t)) {
       advanceHead(s);
     }
+    return res;
   }
 
   /** tryDequeueUntil */
@@ -428,8 +440,8 @@ class UnboundedQueue {
     } else {
       // Using hazptr_holder instead of hazptr_local because it is
       //  possible to call ~T() and it may happen to use hazard pointers.
-      hazptr_holder<Atom> hptr;
-      Segment* s = hptr.get_protected(c_.head);
+      hazptr_holder<Atom> hptr = make_hazard_pointer<Atom>();
+      Segment* s = hptr.protect(c_.head);
       return tryDequeueUntilMC(s, deadline);
     }
   }
@@ -444,11 +456,11 @@ class UnboundedQueue {
     DCHECK_LT(t, (s->minTicket() + SegmentSize));
     size_t idx = index(t);
     Entry& e = s->entry(idx);
-    if (UNLIKELY(!tryDequeueWaitElem(e, t, deadline))) {
+    if (FOLLY_UNLIKELY(!tryDequeueWaitElem(e, t, deadline))) {
       return folly::Optional<T>();
     }
     setConsumerTicket(t + 1);
-    auto ret = e.takeItem();
+    folly::Optional<T> ret = e.takeItem();
     if (responsibleForAdvance(t)) {
       advanceHead(s);
     }
@@ -462,21 +474,21 @@ class UnboundedQueue {
       const std::chrono::time_point<Clock, Duration>& deadline) noexcept {
     while (true) {
       Ticket t = consumerTicket();
-      if (UNLIKELY(t >= (s->minTicket() + SegmentSize))) {
+      if (FOLLY_UNLIKELY(t >= (s->minTicket() + SegmentSize))) {
         s = getAllocNextSegment(s, t);
         DCHECK(s);
         continue;
       }
       size_t idx = index(t);
       Entry& e = s->entry(idx);
-      if (UNLIKELY(!tryDequeueWaitElem(e, t, deadline))) {
+      if (FOLLY_UNLIKELY(!tryDequeueWaitElem(e, t, deadline))) {
         return folly::Optional<T>();
       }
       if (!c_.ticket.compare_exchange_weak(
               t, t + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
         continue;
       }
-      auto ret = e.takeItem();
+      folly::Optional<T> ret = e.takeItem();
       if (responsibleForAdvance(t)) {
         advanceHead(s);
       }
@@ -490,7 +502,7 @@ class UnboundedQueue {
       Entry& e,
       Ticket t,
       const std::chrono::time_point<Clock, Duration>& deadline) noexcept {
-    if (LIKELY(e.tryWaitUntil(deadline))) {
+    if (FOLLY_LIKELY(e.tryWaitUntil(deadline))) {
       return true;
     }
     return t < producerTicket();
@@ -500,13 +512,15 @@ class UnboundedQueue {
   template <typename Clock, typename Duration>
   FOLLY_ALWAYS_INLINE const T* tryPeekUntil(
       const std::chrono::time_point<Clock, Duration>& deadline) noexcept {
+    // This function is supported only for USPSC and UMPSC queues.
+    DCHECK(SingleConsumer);
     Segment* s = head();
     Ticket t = consumerTicket();
     DCHECK_GE(t, s->minTicket());
     DCHECK_LT(t, (s->minTicket() + SegmentSize));
     size_t idx = index(t);
     Entry& e = s->entry(idx);
-    if (UNLIKELY(!tryDequeueWaitElem(e, t, deadline))) {
+    if (FOLLY_UNLIKELY(!tryDequeueWaitElem(e, t, deadline))) {
       return nullptr;
     }
     return e.peekItem();
@@ -515,7 +529,7 @@ class UnboundedQueue {
   /** findSegment */
   FOLLY_ALWAYS_INLINE
   Segment* findSegment(Segment* s, const Ticket t) noexcept {
-    while (UNLIKELY(t >= (s->minTicket() + SegmentSize))) {
+    while (FOLLY_UNLIKELY(t >= (s->minTicket() + SegmentSize))) {
       s = getAllocNextSegment(s, t);
       DCHECK(s);
     }
@@ -533,8 +547,9 @@ class UnboundedQueue {
         auto deadline = std::chrono::steady_clock::now() + dur;
         WaitOptions opt;
         opt.spin_max(dur);
-        detail::spin_pause_until(
-            deadline, opt, [s] { return s->nextSegment(); });
+        detail::spin_pause_until(deadline, opt, [s] {
+          return s->nextSegment();
+        });
         next = s->nextSegment();
         if (next) {
           return next;
@@ -550,6 +565,7 @@ class UnboundedQueue {
   Segment* allocNextSegment(Segment* s) {
     auto t = s->minTicket() + SegmentSize;
     Segment* next = new Segment(t);
+    next->set_cohort_no_tag(&c_.cohort); // defined in hazptr_obj
     next->acquire_ref_safe(); // defined in hazptr_obj_base_linked
     if (!s->casNextSegment(next)) {
       delete next;
@@ -635,6 +651,34 @@ class UnboundedQueue {
     }
   }
 
+  /** cleanUpRemainingItems */
+  void cleanUpRemainingItems() {
+    auto end = producerTicket();
+    auto s = head();
+    for (auto t = consumerTicket(); t < end; ++t) {
+      if (t >= s->minTicket() + SegmentSize) {
+        s = s->nextSegment();
+      }
+      DCHECK_LT(t, (s->minTicket() + SegmentSize));
+      auto idx = index(t);
+      auto& e = s->entry(idx);
+      e.destroyItem();
+    }
+  }
+
+  /** reclaimRemainingSegments */
+  void reclaimRemainingSegments() {
+    auto h = head();
+    auto s = h->nextSegment();
+    h->setNextSegment(nullptr);
+    reclaimSegment(h);
+    while (s) {
+      auto next = s->nextSegment();
+      delete s;
+      s = next;
+    }
+  }
+
   FOLLY_ALWAYS_INLINE size_t index(Ticket t) const noexcept {
     return (t * Stride) & (SegmentSize - 1);
   }
@@ -717,8 +761,8 @@ class UnboundedQueue {
    *  Entry
    */
   class Entry {
-    folly::SaturatingSemaphore<MayBlock, Atom> flag_;
-    typename std::aligned_storage<sizeof(T), alignof(T)>::type item_;
+    Sem flag_;
+    aligned_storage_for_t<T> item_;
 
    public:
     template <typename Arg>
@@ -727,12 +771,7 @@ class UnboundedQueue {
       flag_.post();
     }
 
-    FOLLY_ALWAYS_INLINE void takeItem(T& item) noexcept {
-      flag_.wait();
-      getItem(item);
-    }
-
-    FOLLY_ALWAYS_INLINE folly::Optional<T> takeItem() noexcept {
+    FOLLY_ALWAYS_INLINE T takeItem() noexcept {
       flag_.wait();
       return getItem();
     }
@@ -743,32 +782,25 @@ class UnboundedQueue {
     }
 
     template <typename Clock, typename Duration>
-    FOLLY_ALWAYS_INLINE bool tryWaitUntil(
+    FOLLY_EXPORT FOLLY_ALWAYS_INLINE bool tryWaitUntil(
         const std::chrono::time_point<Clock, Duration>& deadline) noexcept {
       // wait-options from benchmarks on contended queues:
-      auto const opt =
-          flag_.wait_options().spin_max(std::chrono::microseconds(10));
+      static constexpr auto const opt =
+          Sem::wait_options().spin_max(std::chrono::microseconds(10));
       return flag_.try_wait_until(deadline, opt);
     }
 
-   private:
-    FOLLY_ALWAYS_INLINE void getItem(T& item) noexcept {
-      item = std::move(*(itemPtr()));
-      destroyItem();
-    }
+    FOLLY_ALWAYS_INLINE void destroyItem() noexcept { itemPtr()->~T(); }
 
-    FOLLY_ALWAYS_INLINE folly::Optional<T> getItem() noexcept {
-      folly::Optional<T> ret = std::move(*(itemPtr()));
+   private:
+    FOLLY_ALWAYS_INLINE T getItem() noexcept {
+      T ret = std::move(*(itemPtr()));
       destroyItem();
       return ret;
     }
 
     FOLLY_ALWAYS_INLINE T* itemPtr() noexcept {
       return static_cast<T*>(static_cast<void*>(&item_));
-    }
-
-    FOLLY_ALWAYS_INLINE void destroyItem() noexcept {
-      itemPtr()->~T();
     }
   }; // Entry
 
@@ -785,6 +817,10 @@ class UnboundedQueue {
 
     Segment* nextSegment() const noexcept {
       return next_.load(std::memory_order_acquire);
+    }
+
+    void setNextSegment(Segment* next) {
+      next_.store(next, std::memory_order_relaxed);
     }
 
     bool casNextSegment(Segment* next) noexcept {

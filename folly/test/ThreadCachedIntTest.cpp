@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +24,7 @@
 #include <glog/logging.h>
 
 #include <folly/Benchmark.h>
+#include <folly/container/Foreach.h>
 #include <folly/hash/Hash.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
@@ -201,12 +202,12 @@ ThreadCachedInt<int32_t> globalInt32(0, 11);
 ThreadCachedInt<int64_t> globalInt64(0, 11);
 int kNumInserts = 100000;
 DEFINE_int32(numThreads, 8, "Number simultaneous threads for benchmarks.");
-#define CREATE_INC_FUNC(size)                                       \
-  void incFunc ## size () {                                         \
-    const int num = kNumInserts / FLAGS_numThreads;                 \
-    for (int i = 0; i < num; ++i) {                                 \
-      ++globalInt ## size ;                                         \
-    }                                                               \
+#define CREATE_INC_FUNC(size)                       \
+  void incFunc##size() {                            \
+    const int num = kNumInserts / FLAGS_numThreads; \
+    for (int i = 0; i < num; ++i) {                 \
+      ++globalInt##size;                            \
+    }                                               \
   }
 CREATE_INC_FUNC(64)
 CREATE_INC_FUNC(32)
@@ -214,8 +215,9 @@ CREATE_INC_FUNC(32)
 // Confirms counts are accurate with competing threads
 TEST(ThreadCachedInt, MultiThreadedCached) {
   kNumInserts = 100000;
-  CHECK_EQ(0, kNumInserts % FLAGS_numThreads) <<
-    "FLAGS_numThreads must evenly divide kNumInserts (" << kNumInserts << ").";
+  CHECK_EQ(0, kNumInserts % FLAGS_numThreads)
+      << "FLAGS_numThreads must evenly divide kNumInserts (" << kNumInserts
+      << ").";
   const int numPerThread = kNumInserts / FLAGS_numThreads;
   ThreadCachedInt<int64_t> TCInt64(0, numPerThread - 2);
   {
@@ -224,11 +226,13 @@ TEST(ThreadCachedInt, MultiThreadedCached) {
     std::vector<std::thread> threads;
     for (int i = 0; i < FLAGS_numThreads; ++i) {
       threads.push_back(std::thread([&] {
-        FOR_EACH_RANGE(k, 0, numPerThread) {
+        FOR_EACH_RANGE (k, 0, numPerThread) {
           ++TCInt64;
         }
         std::atomic_fetch_add(&threadsDone, 1);
-        while (run.load()) { usleep(100); }
+        while (run.load()) {
+          usleep(100);
+        }
       }));
     }
 
@@ -238,7 +242,9 @@ TEST(ThreadCachedInt, MultiThreadedCached) {
     otherTCInt64.set(33);
     ++otherTCInt64;
 
-    while (threadsDone.load() < FLAGS_numThreads) { usleep(100); }
+    while (threadsDone.load() < FLAGS_numThreads) {
+      usleep(100);
+    }
 
     ++otherTCInt64;
 
@@ -252,48 +258,48 @@ TEST(ThreadCachedInt, MultiThreadedCached) {
       t.join();
     }
 
-  }  // Caches are flushed when threads finish
+  } // Caches are flushed when threads finish
   EXPECT_EQ(kNumInserts, TCInt64.readFast());
 }
 
-#define MAKE_MT_CACHE_SIZE_BM(size)                             \
-  void BM_mt_cache_size ## size (int iters, int cacheSize) {    \
-    kNumInserts = iters;                                        \
-    globalInt ## size.set(0);                                   \
-    globalInt ## size.setCacheSize(cacheSize);                  \
-    std::vector<std::thread> threads;                           \
-    for (int i = 0; i < FLAGS_numThreads; ++i) {                \
-      threads.push_back(std::thread(incFunc ## size));          \
-    }                                                           \
-    for (auto& t : threads) {                                   \
-      t.join();                                                 \
-    }                                                           \
+#define MAKE_MT_CACHE_SIZE_BM(size)                       \
+  void BM_mt_cache_size##size(int iters, int cacheSize) { \
+    kNumInserts = iters;                                  \
+    globalInt##size.set(0);                               \
+    globalInt##size.setCacheSize(cacheSize);              \
+    std::vector<std::thread> threads;                     \
+    for (int i = 0; i < FLAGS_numThreads; ++i) {          \
+      threads.push_back(std::thread(incFunc##size));      \
+    }                                                     \
+    for (auto& t : threads) {                             \
+      t.join();                                           \
+    }                                                     \
   }
 MAKE_MT_CACHE_SIZE_BM(64)
 MAKE_MT_CACHE_SIZE_BM(32)
 
-#define REG_BASELINE(name, inc_stmt)                            \
-  BENCHMARK(FB_CONCATENATE(BM_mt_baseline_, name), iters) {     \
-    const int iterPerThread = iters / FLAGS_numThreads;         \
-    std::vector<std::thread> threads;                           \
-    for (int i = 0; i < FLAGS_numThreads; ++i) {                \
-      threads.push_back(std::thread([&]() {                     \
-            for (int j = 0; j < iterPerThread; ++j) {           \
-              inc_stmt;                                         \
-            }                                                   \
-          }));                                                  \
-    }                                                           \
-    for (auto& t : threads) {                                   \
-      t.join();                                                 \
-    }                                                           \
+#define REG_BASELINE(name, inc_stmt)                        \
+  BENCHMARK(FB_CONCATENATE(BM_mt_baseline_, name), iters) { \
+    const int iterPerThread = iters / FLAGS_numThreads;     \
+    std::vector<std::thread> threads;                       \
+    for (int i = 0; i < FLAGS_numThreads; ++i) {            \
+      threads.push_back(std::thread([&]() {                 \
+        for (int j = 0; j < iterPerThread; ++j) {           \
+          inc_stmt;                                         \
+        }                                                   \
+      }));                                                  \
+    }                                                       \
+    for (auto& t : threads) {                               \
+      t.join();                                             \
+    }                                                       \
   }
 
 ThreadLocal<int64_t> globalTL64Baseline;
 ThreadLocal<int32_t> globalTL32Baseline;
 std::atomic<int64_t> globalInt64Baseline(0);
 std::atomic<int32_t> globalInt32Baseline(0);
-FOLLY_TLS int64_t global__thread64;
-FOLLY_TLS int32_t global__thread32;
+thread_local int64_t global__thread64;
+thread_local int32_t global__thread32;
 
 // Alternate lock-free implementation.  Achieves about the same performance,
 // but uses about 20x more memory than ThreadCachedInt with 24 threads.
@@ -310,7 +316,7 @@ struct ShardedAtomicInt {
   int64_t readFast() {
     int64_t ret = 0;
     static const int numToRead = 8;
-    FOR_EACH_RANGE(i, 0, numToRead) {
+    FOR_EACH_RANGE (i, 0, numToRead) {
       ret += ints_[i].load(std::memory_order_relaxed);
     }
     return ret * (kBuckets_ / numToRead);
@@ -334,11 +340,9 @@ REG_BASELINE(_thread32, global__thread32 += 1)
 REG_BASELINE(ThreadLocal64, *globalTL64Baseline += 1)
 REG_BASELINE(ThreadLocal32, *globalTL32Baseline += 1)
 REG_BASELINE(
-    atomic_inc64,
-    std::atomic_fetch_add(&globalInt64Baseline, int64_t(1)))
+    atomic_inc64, std::atomic_fetch_add(&globalInt64Baseline, int64_t(1)))
 REG_BASELINE(
-    atomic_inc32,
-    std::atomic_fetch_add(&globalInt32Baseline, int32_t(1)))
+    atomic_inc32, std::atomic_fetch_add(&globalInt32Baseline, int32_t(1)))
 REG_BASELINE(ShardedAtm64, shd_int64.inc())
 
 BENCHMARK_PARAM(BM_mt_cache_size64, 0)
@@ -381,10 +385,9 @@ BENCHMARK_DRAW_LINE();
 
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  gflags::SetCommandLineOptionWithMode(
-    "bm_min_usec", "10000", gflags::SET_FLAG_IF_DEFAULT
-  );
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::SetCommandLineOptionWithMode(
+      "bm_min_usec", "10000", folly::gflags::SET_FLAG_IF_DEFAULT);
   if (FLAGS_benchmark) {
     folly::runBenchmarks();
   }

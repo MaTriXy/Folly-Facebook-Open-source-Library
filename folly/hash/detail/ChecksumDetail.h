@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,9 +23,11 @@
 #endif
 
 #include <stdint.h>
+
 #include <cstddef>
 
-namespace folly { namespace detail {
+namespace folly {
+namespace detail {
 
 /**
  * Compute a CRC-32C checksum of a buffer using a hardware-accelerated
@@ -37,14 +39,38 @@ namespace folly { namespace detail {
  *       all other scenarios, please call crc32c() and let it pick an
  *       implementation based on the capabilities of the underlying CPU.
  */
-uint32_t crc32c_hw(const uint8_t* data, size_t nbytes,
-    uint32_t startingChecksum = ~0U);
+uint32_t crc32c_hw(
+    const uint8_t* data, size_t nbytes, uint32_t startingChecksum = ~0U);
+
+/**
+ * Check whether a SSE4.2 hardware-accelerated CRC-32C implementation is
+ * supported on the current CPU.
+ */
+bool crc32c_hw_supported_sse42();
 
 /**
  * Check whether a hardware-accelerated CRC-32C implementation is
  * supported on the current CPU.
  */
 bool crc32c_hw_supported();
+
+/**
+ * Check whether an AVX512VL hardware-accelerated CRC-32C implementation is
+ * supported on the current CPU.
+ */
+bool crc32c_hw_supported_avx512();
+
+/**
+ * Check whether a NEON hardware-accelerated CRC-32C implementation is
+ * supported on the current CPU.
+ */
+bool crc32c_hw_supported_neon();
+
+/**
+ * Check whether a NEON+EOR3+SHA3 hardware-accelerated CRC-32C implementation
+ * is supported on the current CPU.
+ */
+bool crc32c_hw_supported_neon_eor3_sha3();
 
 /**
  * Compute a CRC-32C checksum of a buffer using a portable,
@@ -57,8 +83,8 @@ bool crc32c_hw_supported();
  *       and let it pick an implementation based on the capabilities of
  *       the underlying CPU.
  */
-uint32_t crc32c_sw(const uint8_t* data, size_t nbytes,
-    uint32_t startingChecksum = ~0U);
+uint32_t crc32c_sw(
+    const uint8_t* data, size_t nbytes, uint32_t startingChecksum = ~0U);
 
 /**
  * Compute a CRC-32 checksum of a buffer using a hardware-accelerated
@@ -70,12 +96,12 @@ uint32_t crc32c_sw(const uint8_t* data, size_t nbytes,
  *       all other scenarios, please call crc32() and let it pick an
  *       implementation based on the capabilities of the underlying CPU.
  */
-uint32_t
-crc32_hw(const uint8_t* data, size_t nbytes, uint32_t startingChecksum = ~0U);
+uint32_t crc32_hw(
+    const uint8_t* data, size_t nbytes, uint32_t startingChecksum = ~0U);
 
 #if FOLLY_SSE_PREREQ(4, 2)
-uint32_t
-crc32_hw_aligned(uint32_t remainder, const __m128i* p, size_t vec_count);
+uint32_t crc32_hw_aligned(
+    uint32_t remainder, const __m128i* p, size_t vec_count);
 #endif
 
 /**
@@ -95,7 +121,17 @@ bool crc32_hw_supported();
  *       and let it pick an implementation based on the capabilities of
  *       the underlying CPU.
  */
-uint32_t
-crc32_sw(const uint8_t* data, size_t nbytes, uint32_t startingChecksum = ~0U);
+uint32_t crc32_sw(
+    const uint8_t* data, size_t nbytes, uint32_t startingChecksum = ~0U);
+
+/* See Checksum.h for details.
+ *
+ * crc2len *must* be a power of two >= 4.
+ */
+uint32_t crc32_combine_sw(uint32_t crc1, uint32_t crc2, size_t crc2len);
+uint32_t crc32_combine_hw(uint32_t crc1, uint32_t crc2, size_t crc2len);
+uint32_t crc32c_combine_sw(uint32_t crc1, uint32_t crc2, size_t crc2len);
+uint32_t crc32c_combine_hw(uint32_t crc1, uint32_t crc2, size_t crc2len);
+
 } // namespace detail
 } // namespace folly

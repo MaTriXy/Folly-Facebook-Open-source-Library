@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,8 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-// @author: Xin Liu <xliux@fb.com>
 
 #pragma once
 
@@ -27,21 +25,22 @@
 #include <type_traits>
 #include <vector>
 
-#include <boost/noncopyable.hpp>
 #include <boost/random.hpp>
-#include <boost/type_traits.hpp>
 #include <glog/logging.h>
 
+#include <folly/ConstexprMath.h>
 #include <folly/Memory.h>
 #include <folly/ThreadLocal.h>
 #include <folly/synchronization/MicroSpinLock.h>
 
-namespace folly { namespace detail {
+namespace folly {
+namespace detail {
 
-template <typename ValT, typename NodeT> class csl_iterator;
+template <typename ValT, typename NodeT>
+class csl_iterator;
 
 template <typename T>
-class SkipListNode : private boost::noncopyable {
+class SkipListNode {
   enum : uint16_t {
     IS_HEAD_NODE = 1,
     MARKED_FOR_REMOVAL = (1 << 1),
@@ -50,6 +49,9 @@ class SkipListNode : private boost::noncopyable {
 
  public:
   typedef T value_type;
+
+  SkipListNode(const SkipListNode&) = delete;
+  SkipListNode& operator=(const SkipListNode&) = delete;
 
   template <
       typename NodeAlloc,
@@ -60,8 +62,8 @@ class SkipListNode : private boost::noncopyable {
       NodeAlloc& alloc, int height, U&& data, bool isHead = false) {
     DCHECK(height >= 1 && height < 64) << height;
 
-    size_t size = sizeof(SkipListNode) +
-      height * sizeof(std::atomic<SkipListNode*>);
+    size_t size =
+        sizeof(SkipListNode) + height * sizeof(std::atomic<SkipListNode*>);
     auto storage = std::allocator_traits<NodeAlloc>::allocate(alloc, size);
     // do placement new
     return new (storage)
@@ -73,13 +75,15 @@ class SkipListNode : private boost::noncopyable {
     size_t size = sizeof(SkipListNode) +
         node->height_ * sizeof(std::atomic<SkipListNode*>);
     node->~SkipListNode();
-    std::allocator_traits<NodeAlloc>::deallocate(alloc, node, size);
+    std::allocator_traits<NodeAlloc>::deallocate(
+        alloc, typename std::allocator_traits<NodeAlloc>::pointer(node), size);
   }
 
   template <typename NodeAlloc>
-  struct DestroyIsNoOp : StrictConjunction<
-                             AllocatorHasTrivialDeallocate<NodeAlloc>,
-                             boost::has_trivial_destructor<SkipListNode>> {};
+  struct DestroyIsNoOp
+      : StrictConjunction<
+            AllocatorHasTrivialDeallocate<NodeAlloc>,
+            std::is_trivially_destructible<SkipListNode>> {};
 
   // copy the head node to a new head node assuming lock acquired
   SkipListNode* copyHead(SkipListNode* node) {
@@ -93,15 +97,15 @@ class SkipListNode : private boost::noncopyable {
 
   inline SkipListNode* skip(int layer) const {
     DCHECK_LT(layer, height_);
-    return skip_[layer].load(std::memory_order_consume);
+    return skip_[layer].load(std::memory_order_acquire);
   }
 
   // next valid node as in the linked list
   SkipListNode* next() {
     SkipListNode* node;
-    for (node = skip(0);
-        (node != nullptr && node->markedForRemoval());
-        node = node->skip(0)) {}
+    for (node = skip(0); (node != nullptr && node->markedForRemoval());
+         node = node->skip(0)) {
+    }
     return node;
   }
 
@@ -119,16 +123,12 @@ class SkipListNode : private boost::noncopyable {
     return std::unique_lock<MicroSpinLock>(spinLock_);
   }
 
-  bool fullyLinked() const      { return getFlags() & FULLY_LINKED; }
+  bool fullyLinked() const { return getFlags() & FULLY_LINKED; }
   bool markedForRemoval() const { return getFlags() & MARKED_FOR_REMOVAL; }
-  bool isHeadNode() const       { return getFlags() & IS_HEAD_NODE; }
+  bool isHeadNode() const { return getFlags() & IS_HEAD_NODE; }
 
-  void setIsHeadNode() {
-    setFlags(uint16_t(getFlags() | IS_HEAD_NODE));
-  }
-  void setFullyLinked() {
-    setFlags(uint16_t(getFlags() | FULLY_LINKED));
-  }
+  void setIsHeadNode() { setFlags(uint16_t(getFlags() | IS_HEAD_NODE)); }
+  void setFullyLinked() { setFlags(uint16_t(getFlags() | FULLY_LINKED)); }
   void setMarkedForRemoval() {
     setFlags(uint16_t(getFlags() | MARKED_FOR_REMOVAL));
   }
@@ -136,8 +136,8 @@ class SkipListNode : private boost::noncopyable {
  private:
   // Note! this can only be called from create() as a placement new.
   template <typename U>
-  SkipListNode(uint8_t height, U&& data, bool isHead) :
-      height_(height), data_(std::forward<U>(data)) {
+  SkipListNode(uint8_t height, U&& data, bool isHead)
+      : height_(height), data_(std::forward<U>(data)) {
     spinLock_.init();
     setFlags(0);
     if (isHead) {
@@ -155,9 +155,7 @@ class SkipListNode : private boost::noncopyable {
     }
   }
 
-  uint16_t getFlags() const {
-    return flags_.load(std::memory_order_consume);
-  }
+  uint16_t getFlags() const { return flags_.load(std::memory_order_acquire); }
   void setFlags(uint16_t flags) {
     flags_.store(flags, std::memory_order_release);
   }
@@ -177,9 +175,10 @@ class SkipListNode : private boost::noncopyable {
 
 class SkipListRandomHeight {
   enum { kMaxHeight = 64 };
+
  public:
   // make it a singleton.
-  static SkipListRandomHeight *instance() {
+  static SkipListRandomHeight* instance() {
     static SkipListRandomHeight instance_;
     return &instance_;
   }
@@ -216,9 +215,7 @@ class SkipListRandomHeight {
       p *= kProb;
       sizeLimit *= kProbInv;
       lookupTable_[i] = lookupTable_[i - 1] + p;
-      sizeLimitTable_[i] = sizeLimit > kMaxSizeLimit ?
-        kMaxSizeLimit :
-        static_cast<size_t>(sizeLimit);
+      sizeLimitTable_[i] = folly::constexpr_clamp_cast<size_t>(sizeLimit);
     }
     lookupTable_[kMaxHeight - 1] = 1;
     sizeLimitTable_[kMaxHeight - 1] = kMaxSizeLimit;
@@ -237,11 +234,16 @@ template <typename NodeType, typename NodeAlloc, typename = void>
 class NodeRecycler;
 
 template <typename NodeType, typename NodeAlloc>
-class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
-  !NodeType::template DestroyIsNoOp<NodeAlloc>::value>::type> {
+class NodeRecycler<
+    NodeType,
+    NodeAlloc,
+    typename std::enable_if<
+        !NodeType::template DestroyIsNoOp<NodeAlloc>::value>::type> {
  public:
   explicit NodeRecycler(const NodeAlloc& alloc)
-    : refs_(0), dirty_(false), alloc_(alloc) { lock_.init(); }
+      : refs_(0), dirty_(false), alloc_(alloc) {
+    lock_.init();
+  }
 
   explicit NodeRecycler() : refs_(0), dirty_(false) { lock_.init(); }
 
@@ -265,53 +267,47 @@ class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
     dirty_.store(true, std::memory_order_relaxed);
   }
 
-  int addRef() {
-    return refs_.fetch_add(1, std::memory_order_relaxed);
-  }
+  int addRef() { return refs_.fetch_add(1, std::memory_order_acq_rel); }
 
   int releaseRef() {
-    // We don't expect to clean the recycler immediately everytime it is OK
-    // to do so. Here, it is possible that multiple accessors all release at
-    // the same time but nobody would clean the recycler here. If this
-    // happens, the recycler will usually still get cleaned when
-    // such a race doesn't happen. The worst case is the recycler will
-    // eventually get deleted along with the skiplist.
-    if (LIKELY(!dirty_.load(std::memory_order_relaxed) || refs() > 1)) {
-      return refs_.fetch_add(-1, std::memory_order_relaxed);
+    // This if statement is purely an optimization. It's possible that this
+    // misses an opportunity to delete, but that's OK, we'll try again at
+    // the next opportunity. It does not harm the thread safety. For this
+    // reason, we can use relaxed loads to make the decision.
+    if (!dirty_.load(std::memory_order_relaxed) || refs() > 1) {
+      return refs_.fetch_add(-1, std::memory_order_acq_rel);
     }
 
     std::unique_ptr<std::vector<NodeType*>> newNodes;
+    int ret;
     {
+      // The order at which we lock, add, swap, is very important for
+      // correctness.
       std::lock_guard<MicroSpinLock> g(lock_);
-      if (nodes_.get() == nullptr || refs() > 1) {
-        return refs_.fetch_add(-1, std::memory_order_relaxed);
+      ret = refs_.fetch_add(-1, std::memory_order_acq_rel);
+      if (ret == 1) {
+        // When releasing the last reference, it is safe to remove all the
+        // current nodes in the recycler, as we already acquired the lock here
+        // so no more new nodes can be added, even though new accessors may be
+        // added after this.
+        newNodes.swap(nodes_);
+        dirty_.store(false, std::memory_order_relaxed);
       }
-      // once refs_ reaches 1 and there is no other accessor, it is safe to
-      // remove all the current nodes in the recycler, as we already acquired
-      // the lock here so no more new nodes can be added, even though new
-      // accessors may be added after that.
-      newNodes.swap(nodes_);
-      dirty_.store(false, std::memory_order_relaxed);
     }
-
     // TODO(xliu) should we spawn a thread to do this when there are large
     // number of nodes in the recycler?
-    for (auto& node : *newNodes) {
-      NodeType::destroy(alloc_, node);
+    if (newNodes) {
+      for (auto& node : *newNodes) {
+        NodeType::destroy(alloc_, node);
+      }
     }
-
-    // decrease the ref count at the very end, to minimize the
-    // chance of other threads acquiring lock_ to clear the deleted
-    // nodes again.
-    return refs_.fetch_add(-1, std::memory_order_relaxed);
+    return ret;
   }
 
   NodeAlloc& alloc() { return alloc_; }
 
  private:
-  int refs() const {
-    return refs_.load(std::memory_order_relaxed);
-  }
+  int refs() const { return refs_.load(std::memory_order_relaxed); }
 
   std::unique_ptr<std::vector<NodeType*>> nodes_;
   std::atomic<int32_t> refs_; // current number of visitors to the list
@@ -323,13 +319,16 @@ class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
 // In case of arena allocator, no recycling is necessary, and it's possible
 // to save on ConcurrentSkipList size.
 template <typename NodeType, typename NodeAlloc>
-class NodeRecycler<NodeType, NodeAlloc, typename std::enable_if<
-  NodeType::template DestroyIsNoOp<NodeAlloc>::value>::type> {
+class NodeRecycler<
+    NodeType,
+    NodeAlloc,
+    typename std::enable_if<
+        NodeType::template DestroyIsNoOp<NodeAlloc>::value>::type> {
  public:
-  explicit NodeRecycler(const NodeAlloc& alloc) : alloc_(alloc) { }
+  explicit NodeRecycler(const NodeAlloc& alloc) : alloc_(alloc) {}
 
-  void addRef() { }
-  void releaseRef() { }
+  void addRef() {}
+  void releaseRef() {}
 
   void add(NodeType* /* node */) {}
 

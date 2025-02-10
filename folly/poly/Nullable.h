@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -48,23 +48,19 @@ struct INullablePointer : PolyExtends<IEqualityComparable> {
     }
 
     friend bool operator==(
-        std::nullptr_t,
-        PolySelf<Base> const& self) noexcept {
+        std::nullptr_t, PolySelf<Base> const& self) noexcept {
       return poly_empty(self);
     }
     friend bool operator==(
-        PolySelf<Base> const& self,
-        std::nullptr_t) noexcept {
+        PolySelf<Base> const& self, std::nullptr_t) noexcept {
       return poly_empty(self);
     }
     friend bool operator!=(
-        std::nullptr_t,
-        PolySelf<Base> const& self) noexcept {
+        std::nullptr_t, PolySelf<Base> const& self) noexcept {
       return !poly_empty(self);
     }
     friend bool operator!=(
-        PolySelf<Base> const& self,
-        std::nullptr_t) noexcept {
+        PolySelf<Base> const& self, std::nullptr_t) noexcept {
       return !poly_empty(self);
     }
   };
@@ -78,12 +74,8 @@ struct INullablePointer : PolyExtends<IEqualityComparable> {
 struct IBooleanTestable : PolyExtends<> {
   template <class Base>
   struct Interface : Base {
-    constexpr bool operator!() const noexcept {
-      return poly_empty(*this);
-    }
-    constexpr explicit operator bool() const noexcept {
-      return !!*this;
-    }
+    constexpr bool operator!() const noexcept { return poly_empty(*this); }
+    constexpr explicit operator bool() const noexcept { return !!*this; }
   };
 };
 } // namespace poly

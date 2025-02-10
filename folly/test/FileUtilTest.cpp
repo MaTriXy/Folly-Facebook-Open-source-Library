@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,13 +15,12 @@
  */
 
 #include <folly/FileUtil.h>
-#include <folly/detail/FileUtilDetail.h>
-#include <folly/experimental/TestUtil.h>
 
-#include <deque>
 #if defined(__linux__)
 #include <dlfcn.h>
 #endif
+
+#include <deque>
 
 #include <glog/logging.h>
 
@@ -29,15 +28,18 @@
 #include <folly/File.h>
 #include <folly/Range.h>
 #include <folly/String.h>
+#include <folly/detail/FileUtilDetail.h>
+#include <folly/detail/FileUtilVectorDetail.h>
 #include <folly/portability/GTest.h>
+#include <folly/testing/TestUtil.h>
 
-namespace folly { namespace test {
+namespace folly {
+namespace test {
 
 using namespace fileutil_detail;
 using namespace std;
 
 namespace {
-
 class Reader {
  public:
   Reader(off_t offset, StringPiece data, std::deque<ssize_t> spec);
@@ -65,10 +67,7 @@ class Reader {
 };
 
 Reader::Reader(off_t offset, StringPiece data, std::deque<ssize_t> spec)
-  : offset_(offset),
-    data_(data),
-    spec_(std::move(spec)) {
-}
+    : offset_(offset), data_(data), spec_(std::move(spec)) {}
 
 ssize_t Reader::nextSize() {
   if (spec_.empty()) {
@@ -80,7 +79,7 @@ ssize_t Reader::nextSize() {
     if (n == -1) {
       errno = EIO;
     }
-    spec_.clear();  // so we fail if called again
+    spec_.clear(); // so we fail if called again
   } else {
     offset_ += n;
   }
@@ -93,7 +92,20 @@ ssize_t Reader::operator()(int /* fd */, void* buf, size_t count) {
     return n;
   }
   if (size_t(n) > count) {
+#ifndef _WIN32
     throw std::runtime_error("requested count too small");
+#else
+    // On Windows the code does not use readv(), so it will perform
+    // individual reads for each separate iovec element.  These reads may arrive
+    // in smaller chunks than we were asked to return.
+    //
+    // Return the partial read data, and push the remaining size back onto the
+    // front of spec_ so we will return that on the next call.
+    auto remainder = n - count;
+    spec_.push_front(remainder);
+    offset_ -= remainder;
+    n = count;
+#endif
   }
   memcpy(buf, data_.data(), n);
   data_.advance(n);
@@ -141,14 +153,14 @@ class FileUtilTest : public ::testing::Test {
 };
 
 FileUtilTest::FileUtilTest()
-  : in_("1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+    : in_("1234567890abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") {
   CHECK_EQ(62, in_.size());
 
   readers_.emplace_back(0, reader({0}));
   readers_.emplace_back(62, reader({62}));
-  readers_.emplace_back(62, reader({62, -1}));  // error after end (not called)
+  readers_.emplace_back(62, reader({62, -1})); // error after end (not called)
   readers_.emplace_back(61, reader({61, 0}));
-  readers_.emplace_back(-1, reader({61, -1}));  // error before end
+  readers_.emplace_back(-1, reader({61, -1})); // error before end
   readers_.emplace_back(62, reader({31, 31}));
   readers_.emplace_back(62, reader({1, 10, 20, 10, 1, 20}));
   readers_.emplace_back(61, reader({1, 10, 20, 10, 20, 0}));
@@ -185,7 +197,7 @@ class IovecBuffers {
   explicit IovecBuffers(std::initializer_list<size_t> sizes);
   explicit IovecBuffers(std::vector<size_t> sizes);
 
-  std::vector<iovec> iov() const { return iov_; }  // yes, make a copy
+  std::vector<iovec> iov() const { return iov_; } // yes, make a copy
   std::string join() const { return folly::join("", buffers_); }
   size_t size() const;
 
@@ -252,7 +264,13 @@ TEST(FileUtilTest2, wrapv) {
   IovecBuffers buf(sizes);
   ASSERT_EQ(sum, buf.size());
   auto iov = buf.iov();
+#ifndef _WIN32
   EXPECT_EQ(sum, wrapvFull(writev, tempFile.fd(), iov.data(), iov.size()));
+#else
+  EXPECT_EQ(
+      sum,
+      wrapvFull(folly::fileops::write, tempFile.fd(), iov.data(), iov.size()));
+#endif
 }
 
 TEST_F(FileUtilTest, preadv) {
@@ -261,12 +279,32 @@ TEST_F(FileUtilTest, preadv) {
     ASSERT_EQ(62, buf.size());
 
     auto iov = buf.iov();
-    EXPECT_EQ(p.first,
-              wrapvFull(p.second, 0, iov.data(), iov.size(), off_t(42)));
+    EXPECT_EQ(
+        p.first, wrapvFull(p.second, 0, iov.data(), iov.size(), off_t(42)));
     if (p.first != (decltype(p.first))(-1)) {
       EXPECT_EQ(in_.substr(0, p.first), buf.join().substr(0, p.first));
     }
   }
+}
+
+TEST_F(FileUtilTest, writeVStderr) {
+  // Test writing to stderr with writevFull(), and verify that it succeeds.
+  // Previously this would fail on Windows, as folly's writev() implementation
+  // would call lockf(), and this would hang and eventually fail for stderr.
+  std::vector<iovec> iov;
+  size_t totalSize = 0;
+  auto addBuf = [&](StringPiece str) {
+    iov.emplace_back();
+    iov.back().iov_base = const_cast<char*>(str.data());
+    iov.back().iov_len = str.size();
+    totalSize += str.size();
+  };
+
+  addBuf("this");
+  addBuf(" is ");
+  addBuf("a test\n ");
+  auto rc = writevFull(STDERR_FILENO, iov.data(), iov.size());
+  EXPECT_EQ(rc, totalSize);
 }
 
 TEST(String, readFile) {
@@ -345,6 +383,7 @@ TEST_F(ReadFileFd, InvalidFd) {
   PLOG(INFO);
 }
 
+#ifndef _WIN32
 class WriteFileAtomic : public ::testing::Test {
  protected:
   WriteFileAtomic() {}
@@ -393,6 +432,19 @@ TEST_F(WriteFileAtomic, writeNew) {
   auto path = tmpPath("foo");
   auto contents = StringPiece{"contents\n"};
   writeFileAtomic(path, contents);
+
+  // The directory should contain exactly 1 file now, with the correct contents
+  EXPECT_EQ(set<string>{"foo"}, listTmpDir());
+  EXPECT_EQ(contents, readData(path));
+  EXPECT_EQ(0644, getPerms(path));
+}
+
+TEST_F(WriteFileAtomic, withSync) {
+  // Call writeFileAtomic() to create a new file
+  auto path = tmpPath("foo");
+  auto contents = StringPiece{"contents\n"};
+  auto permissions = mode_t{0644};
+  writeFileAtomic(path, contents, permissions, SyncType::WITH_SYNC);
 
   // The directory should contain exactly 1 file now, with the correct contents
   EXPECT_EQ(set<string>{"foo"}, listTmpDir());
@@ -494,6 +546,34 @@ TEST_F(WriteFileAtomic, multipleFiles) {
   EXPECT_EQ(0440, getPerms(tmpPath("foo_txt")));
   EXPECT_EQ(0444, getPerms(tmpPath("foo.txt2")));
 }
+
+TEST_F(WriteFileAtomic, WriteWithCustomTempPath) {
+  auto path = fs::path{tmpDir_.path().string()} / fs::path{"file"};
+
+  writeFileAtomic(path.c_str(), "data_1");
+
+  auto output = std::string{};
+  auto success = readFile(path.c_str(), output);
+  ASSERT_TRUE(success);
+  EXPECT_EQ(output, "data_1");
+
+  auto customPath = fs::path{tmpDir_.path().string()}.string();
+
+  writeFileAtomic(
+      path.string(),
+      "data_2",
+      WriteFileAtomicOptions{}
+          .setPermissions(0644)
+          .setSyncType(SyncType::WITH_SYNC)
+          .setTemporaryDirectory(customPath));
+
+  output = std::string{};
+  success = readFile(path.c_str(), output);
+  ASSERT_TRUE(success);
+  EXPECT_EQ(output, "data_2");
+}
+#endif // !_WIN32
+
 } // namespace test
 } // namespace folly
 
@@ -505,16 +585,10 @@ namespace {
  */
 class FChmodFailure {
  public:
-  FChmodFailure() {
-    ++forceFailure_;
-  }
-  ~FChmodFailure() {
-    --forceFailure_;
-  }
+  FChmodFailure() { ++forceFailure_; }
+  ~FChmodFailure() { --forceFailure_; }
 
-  static bool shouldFail() {
-    return forceFailure_.load() > 0;
-  }
+  static bool shouldFail() { return forceFailure_.load() > 0; }
 
  private:
   static std::atomic<int> forceFailure_;
@@ -530,7 +604,9 @@ int fchmod(int fd, mode_t mode) {
       reinterpret_cast<int (*)(int, mode_t)>(dlsym(RTLD_NEXT, "fchmod"));
   // For sanity, make sure we didn't find ourself,
   // since that would cause infinite recursion.
-  CHECK_NE(realFunction, fchmod);
+  CHECK_NE(
+      reinterpret_cast<uintptr_t>(realFunction),
+      reinterpret_cast<uintptr_t>(&fchmod));
 
   if (FChmodFailure::shouldFail()) {
     errno = EINVAL;

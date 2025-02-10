@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,15 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <thread>
+#include <vector>
+
 #include <folly/Random.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/HHWheelTimer.h>
 #include <folly/io/async/test/UndelayedDestruction.h>
 #include <folly/io/async/test/Util.h>
 #include <folly/portability/GTest.h>
-
-#include <thread>
-#include <vector>
 
 using namespace folly;
 using std::chrono::milliseconds;
@@ -52,13 +53,6 @@ class TestTimeout : public HHWheelTimer::Callback {
   std::deque<TimePoint> timestamps;
   std::deque<TimePoint> canceledTimestamps;
   std::function<void()> fn;
-};
-
-class TestTimeoutDelayed : public TestTimeout {
- protected:
-  std::chrono::steady_clock::time_point getCurTime() override {
-    return std::chrono::steady_clock::now() - milliseconds(5);
-  }
 };
 
 struct HHWheelTimerTest : public ::testing::Test {

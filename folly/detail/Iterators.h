@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,10 +50,11 @@ namespace folly {
 namespace detail {
 
 /**
- * Currently this only supports forward iteration.  The derived class must
- * must have definitions for these three methods:
+ * Currently this only supports forward and bidirectional iteration.  The
+ * derived class must must have definitions for these methods:
  *
  *   void increment();
+ *   void decrement(); // optional, to be used with bidirectional
  *   reference dereference() const;
  *   bool equal([appropriate iterator type] const& rhs) const;
  *
@@ -63,50 +64,26 @@ namespace detail {
  * Template parameters:
  * D: the deriving class (CRTP)
  * V: value type
+ * Tag: the iterator category, one of:
+ *   std::forward_iterator_tag
+ *   std::bidirectional_iterator_tag
  */
-template <class D, class V>
+template <class D, class V, class Tag>
 class IteratorFacade {
  public:
   using value_type = V;
   using reference = value_type&;
   using pointer = value_type*;
-  using difference_type = ssize_t;
-  using iterator_category = std::forward_iterator_tag;
+  using difference_type = std::ptrdiff_t;
+  using iterator_category = Tag;
 
-  bool operator==(D const& rhs) const {
-    return asDerivedConst().equal(rhs);
-  }
+  friend bool operator==(D const& lhs, D const& rhs) { return equal(lhs, rhs); }
 
-  bool operator!=(D const& rhs) const {
-    return !operator==(rhs);
-  }
+  friend bool operator!=(D const& lhs, D const& rhs) { return !(lhs == rhs); }
 
-  /*
-   * Allow for comparisons between this and an iterator of some other class.
-   * (e.g. a const_iterator version of this, the probable use case).
-   * Does a conversion of D (or D reference) to D2, if one exists (otherwise
-   * this is disabled).  Disabled if D and D2 are the same, to disambiguate
-   * this and the `operator==(D const&) const` method above.
-   */
+  V& operator*() const { return asDerivedConst().dereference(); }
 
-  template <class D2>
-  typename std::enable_if<std::is_convertible<D, D2>::value, bool>::type
-  operator==(D2 const& rhs) const {
-    return D2(asDerivedConst()) == rhs;
-  }
-
-  template <class D2>
-  bool operator!=(D2 const& rhs) const {
-    return !operator==(rhs);
-  }
-
-  V& operator*() const {
-    return asDerivedConst().dereference();
-  }
-
-  V* operator->() const {
-    return std::addressof(operator*());
-  }
+  V* operator->() const { return std::addressof(operator*()); }
 
   D& operator++() {
     asDerived().increment();
@@ -119,14 +96,23 @@ class IteratorFacade {
     return ret;
   }
 
- private:
-  D& asDerived() {
-    return static_cast<D&>(*this);
+  D& operator--() {
+    asDerived().decrement();
+    return asDerived();
   }
 
-  D const& asDerivedConst() const {
-    return static_cast<D const&>(*this);
+  D operator--(int) {
+    auto ret = asDerived(); // copy
+    asDerived().decrement();
+    return ret;
   }
+
+ private:
+  D& asDerived() { return static_cast<D&>(*this); }
+
+  D const& asDerivedConst() const { return static_cast<D const&>(*this); }
+
+  static bool equal(D const& lhs, D const& rhs) { return lhs.equal(rhs); }
 };
 
 /**
@@ -138,35 +124,29 @@ class IteratorFacade {
  * I: the wrapper iterator type
  * V: value type
  */
-template <class D, class I, class V>
-class IteratorAdaptor : public IteratorFacade<D, V> {
+template <class D, class I, class V, class Tag>
+class IteratorAdaptor : public IteratorFacade<D, V, Tag> {
  public:
-  using Super = IteratorFacade<D, V>;
+  using Super = IteratorFacade<D, V, Tag>;
   using value_type = typename Super::value_type;
   using iterator_category = typename Super::iterator_category;
   using reference = typename Super::reference;
   using pointer = typename Super::pointer;
   using difference_type = typename Super::difference_type;
 
-  explicit IteratorAdaptor(I base) : base_(base) {}
-  void increment() {
-    ++base_;
-  }
+  IteratorAdaptor() = default;
+  explicit IteratorAdaptor(I base) : base_(std::move(base)) {}
 
-  V& dereference() const {
-    return *base_;
-  }
+  void increment() { ++base_; }
 
-  bool equal(D const& rhs) const {
-    return base_ == rhs.base_;
-  }
+  void decrement() { --base_; }
 
-  I const& base() const {
-    return base_;
-  }
-  I& base() {
-    return base_;
-  }
+  V& dereference() const { return *base_; }
+
+  bool equal(D const& rhs) const { return base_ == rhs.base_; }
+
+  I const& base() const { return base_; }
+  I& base() { return base_; }
 
  private:
   I base_;

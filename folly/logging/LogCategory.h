@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,12 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <atomic>
 #include <cstdint>
 #include <list>
+#include <memory>
 #include <string>
+#include <unordered_map>
 
 #include <folly/Range.h>
 #include <folly/Synchronized.h>
@@ -63,9 +66,7 @@ class LogCategory {
   /**
    * Get the name of this log category.
    */
-  const std::string& getName() const {
-    return name_;
-  }
+  const std::string& getName() const { return name_; }
 
   /**
    * Get the level for this log category.
@@ -80,8 +81,9 @@ class LogCategory {
    */
   std::pair<LogLevel, bool> getLevelInfo() const {
     auto value = level_.load(std::memory_order_acquire);
-    return {static_cast<LogLevel>(value & ~FLAG_INHERIT),
-            bool(value & FLAG_INHERIT)};
+    return {
+        static_cast<LogLevel>(value & ~FLAG_INHERIT),
+        bool(value & FLAG_INHERIT)};
   }
 
   /**
@@ -139,15 +141,31 @@ class LogCategory {
   void setLevel(LogLevel level, bool inherit = true);
 
   /**
+   * Set which messages processed by this category will be propagated up to the
+   * parent category
+   *
+   * The default is `LogLevel::MIN_LEVEL` meaning that all messages will be
+   * passed to the parent. You can set this to any higher log level to prevent
+   * some messages being passed to the parent. `LogLevel::MAX_LEVEL` is a good
+   * choice if you've attached a Handler to this category and you don't want
+   * any of these logs to also appear in the parent's Handler.
+   */
+  void setPropagateLevelMessagesToParent(LogLevel level);
+
+  /**
+   * Get which messages processed by this category will be processed by the
+   * parent category
+   */
+  LogLevel getPropagateLevelMessagesToParentRelaxed() const;
+
+  /**
    * Get the LoggerDB that this LogCategory belongs to.
    *
    * This is almost always the main LoggerDB singleton returned by
    * LoggerDB::get().  The logging unit tests are the main location that
    * creates alternative LoggerDB objects.
    */
-  LoggerDB* getDB() const {
-    return db_;
-  }
+  LoggerDB* getDB() const { return db_; }
 
   /**
    * Attach a LogHandler to this category.
@@ -180,9 +198,10 @@ class LogCategory {
    * This is used when the LogHandler configuration is changed requiring one or
    * more LogHandler objects to be replaced with new ones.
    */
-  void updateHandlers(const std::unordered_map<
-                      std::shared_ptr<LogHandler>,
-                      std::shared_ptr<LogHandler>>& handlerMap);
+  void updateHandlers(
+      const std::unordered_map<
+          std::shared_ptr<LogHandler>,
+          std::shared_ptr<LogHandler>>& handlerMap);
 
   /* Internal methods for use by other parts of the logging library code */
 
@@ -194,8 +213,16 @@ class LogCategory {
    *
    * This method generally should be invoked only through the logging macros,
    * rather than calling this directly.
+   *
+   * skipAbortOnFatal parameters provides more granular control on who
+   * is responsible for aborting process when calling the method directly.
+   * If skipAbortOnFatal is true, then this LogCategory will not trigger
+   * std::abort() if the LogMessage is fatal and the process should abort.
+   * This is necessary for the LoggerDB to handle fatal messages specially and
+   * only suitable for direct calls.
    */
-  void admitMessage(const LogMessage& message) const;
+  void admitMessage(
+      const LogMessage& message, bool skipAbortOnFatal = false) const;
 
   /**
    * Note: setLevelLocked() may only be called while holding the
@@ -236,9 +263,20 @@ class LogCategory {
   LogCategory(LogCategory&&) = delete;
   LogCategory& operator=(LogCategory&&) = delete;
 
+  static void processMessageWalker(
+      const LogCategory* category, const LogMessage& message);
   void processMessage(const LogMessage& message) const;
   void updateEffectiveLevel(LogLevel newEffectiveLevel);
   void parentLevelUpdated(LogLevel parentEffectiveLevel);
+
+  /**
+   * Which log messages processed at this category should propagate to the
+   * parent category. The usual case is `LogLevel::MIN_LEVEL` which means all
+   * messages will be propagated. `LogLevel::MAX_LEVEL` generally means that
+   * this category and its children are directed to different destinations
+   * and the user does not want the messages duplicated.
+   */
+  std::atomic<LogLevel> propagateLevelMessagesToParent_{LogLevel::MIN_LEVEL};
 
   /**
    * The minimum log level of this category and all of its parents.

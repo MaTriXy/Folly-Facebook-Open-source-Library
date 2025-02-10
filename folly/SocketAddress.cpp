@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,19 +20,23 @@
 
 #include <folly/SocketAddress.h>
 
+#include <cassert>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <type_traits>
 
 #include <boost/functional/hash.hpp>
 
-#include <folly/CppAttributes.h>
+#include <fmt/core.h>
+
 #include <folly/Exception.h>
-#include <folly/Format.h>
 #include <folly/hash/Hash.h>
+#include <folly/net/NetOps.h>
+#include <folly/net/NetworkSocket.h>
 
 namespace {
 
@@ -41,9 +45,7 @@ namespace {
  */
 struct ScopedAddrInfo {
   explicit ScopedAddrInfo(struct addrinfo* addrinfo) : info(addrinfo) {}
-  ~ScopedAddrInfo() {
-    freeaddrinfo(info);
-  }
+  ~ScopedAddrInfo() { freeaddrinfo(info); }
 
   struct addrinfo* info;
 };
@@ -95,13 +97,27 @@ struct HostAndPort {
     }
   }
 
-  ~HostAndPort() {
-    free(allocated);
-  }
+  ~HostAndPort() { free(allocated); }
 
   const char* host;
   const char* port;
   char* allocated;
+};
+
+struct GetAddrInfoError {
+#ifdef _WIN32
+  std::string error;
+  const char* str() const { return error.c_str(); }
+  explicit GetAddrInfoError(int errorCode) {
+    auto s = gai_strerror(errorCode);
+    using Char = std::remove_reference_t<decltype(*s)>;
+    error.assign(s, s + std::char_traits<Char>::length(s));
+  }
+#else
+  const char* error;
+  const char* str() const { return error; }
+  explicit GetAddrInfoError(int errorCode) : error(gai_strerror(errorCode)) {}
+#endif
 };
 
 } // namespace
@@ -195,13 +211,12 @@ int SocketAddress::getPortFrom(const struct sockaddr* address) {
 }
 
 const char* SocketAddress::getFamilyNameFrom(
-    const struct sockaddr* address,
-    const char* defaultResult) {
+    const struct sockaddr* address, const char* defaultResult) {
 #define GETFAMILYNAMEFROM_IMPL(Family) \
   case Family:                         \
     return #Family
 
-  switch (address->sa_family) {
+  switch ((int)address->sa_family) {
     GETFAMILYNAMEFROM_IMPL(AF_INET);
     GETFAMILYNAMEFROM_IMPL(AF_INET6);
     GETFAMILYNAMEFROM_IMPL(AF_UNIX);
@@ -217,7 +232,7 @@ const char* SocketAddress::getFamilyNameFrom(
 void SocketAddress::setFromPath(StringPiece path) {
   // Before we touch storage_, check to see if the length is too big.
   // Note that "storage_.un.addr->sun_path" may not be safe to evaluate here,
-  // but sizeof() just uses its type, and does't evaluate it.
+  // but sizeof() just uses its type, and doesn't evaluate it.
   if (path.size() > sizeof(storage_.un.addr->sun_path)) {
     throw std::invalid_argument(
         "socket path too large to fit into sockaddr_un");
@@ -240,12 +255,12 @@ void SocketAddress::setFromPath(StringPiece path) {
   }
 }
 
-void SocketAddress::setFromPeerAddress(int socket) {
-  setFromSocket(socket, getpeername);
+void SocketAddress::setFromPeerAddress(NetworkSocket socket) {
+  setFromSocket(socket, netops::getpeername);
 }
 
-void SocketAddress::setFromLocalAddress(int socket) {
-  setFromSocket(socket, getsockname);
+void SocketAddress::setFromLocalAddress(NetworkSocket socket) {
+  setFromSocket(socket, netops::getsockname);
 }
 
 void SocketAddress::setFromSockaddr(const struct sockaddr* address) {
@@ -273,8 +288,7 @@ void SocketAddress::setFromSockaddr(const struct sockaddr* address) {
 }
 
 void SocketAddress::setFromSockaddr(
-    const struct sockaddr* address,
-    socklen_t addrlen) {
+    const struct sockaddr* address, socklen_t addrlen) {
   // Check the length to make sure we can access address->sa_family
   if (addrlen <
       (offsetof(struct sockaddr, sa_family) + sizeof(address->sa_family))) {
@@ -318,8 +332,7 @@ void SocketAddress::setFromSockaddr(const struct sockaddr_in6* address) {
 }
 
 void SocketAddress::setFromSockaddr(
-    const struct sockaddr_un* address,
-    socklen_t addrlen) {
+    const struct sockaddr_un* address, socklen_t addrlen) {
   assert(address->sun_family == AF_UNIX);
   if (addrlen > sizeof(struct sockaddr_un)) {
     throw std::invalid_argument(
@@ -336,7 +349,7 @@ void SocketAddress::setFromSockaddr(
 
   // Fill the rest with 0s, just for safety
   if (addrlen < sizeof(struct sockaddr_un)) {
-    char* p = reinterpret_cast<char*>(storage_.un.addr);
+    auto p = reinterpret_cast<char*>(storage_.un.addr);
     memset(p + addrlen, 0, sizeof(struct sockaddr_un) - addrlen);
   }
 }
@@ -420,7 +433,7 @@ void SocketAddress::setPort(uint16_t port) {
 void SocketAddress::convertToIPv4() {
   if (!tryConvertToIPv4()) {
     throw std::invalid_argument(
-        "convertToIPv4() called on an addresse that is "
+        "convertToIPv4() called on an address that is "
         "not an IPv4-mapped address");
   }
 }
@@ -534,16 +547,16 @@ bool SocketAddress::operator==(const SocketAddress& other) const {
     case AF_INET:
     case AF_INET6:
       return (other.storage_.addr == storage_.addr) && (other.port_ == port_);
+    case AF_UNSPEC:
+      return other.storage_.addr.empty();
     default:
-      throw std::invalid_argument(
-          "SocketAddress: unsupported address family "
-          "for comparison");
+      throw_exception<std::invalid_argument>(
+          "SocketAddress: unsupported address family for comparison");
   }
 }
 
 bool SocketAddress::prefixMatch(
-    const SocketAddress& other,
-    unsigned prefixLength) const {
+    const SocketAddress& other, unsigned prefixLength) const {
   if (other.getFamily() != getFamily()) {
     return false;
   }
@@ -551,7 +564,7 @@ bool SocketAddress::prefixMatch(
   switch (getFamily()) {
     case AF_INET:
       mask_length = 32;
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     case AF_INET6: {
       auto prefix = folly::IPAddress::longestCommonPrefix(
           {storage_.addr, mask_length}, {other.storage_.addr, mask_length});
@@ -575,7 +588,7 @@ size_t SocketAddress::hash() const {
     }
   }
 
-  switch (getFamily()) {
+  switch ((int)getFamily()) {
     case AF_INET:
     case AF_INET6: {
       boost::hash_combine(seed, port_);
@@ -583,20 +596,22 @@ size_t SocketAddress::hash() const {
       break;
     }
     case AF_UNIX:
-      DCHECK(external_);
+      assert(external_);
       break;
     case AF_UNSPEC:
+      assert(storage_.addr.empty());
+      boost::hash_combine(seed, storage_.addr.hash());
+      break;
     default:
-      throw std::invalid_argument(
-          "SocketAddress: unsupported address family "
-          "for hashing");
+      throw_exception<std::invalid_argument>(
+          "SocketAddress: unsupported address family for comparison");
   }
 
   return seed;
 }
 
-struct addrinfo*
-SocketAddress::getAddrInfo(const char* host, uint16_t port, int flags) {
+struct addrinfo* SocketAddress::getAddrInfo(
+    const char* host, uint16_t port, int flags) {
   // getaddrinfo() requires the port number as a string
   char portString[sizeof("65535")];
   snprintf(portString, sizeof(portString), "%" PRIu16, port);
@@ -604,8 +619,8 @@ SocketAddress::getAddrInfo(const char* host, uint16_t port, int flags) {
   return getAddrInfo(host, portString, flags);
 }
 
-struct addrinfo*
-SocketAddress::getAddrInfo(const char* host, const char* port, int flags) {
+struct addrinfo* SocketAddress::getAddrInfo(
+    const char* host, const char* port, int flags) {
   struct addrinfo hints;
   memset(&hints, 0, sizeof(hints));
   hints.ai_family = AF_UNSPEC;
@@ -615,10 +630,10 @@ SocketAddress::getAddrInfo(const char* host, const char* port, int flags) {
   struct addrinfo* results;
   int error = getaddrinfo(host, port, &hints, &results);
   if (error != 0) {
-    auto os = folly::sformat(
+    auto os = fmt::format(
         "Failed to resolve address for '{}': {} (error={})",
         host,
-        gai_strerror(error),
+        GetAddrInfoError(error).str(),
         error);
     throw std::system_error(error, std::generic_category(), os);
   }
@@ -645,8 +660,8 @@ void SocketAddress::setFromLocalAddr(const struct addrinfo* info) {
 }
 
 void SocketAddress::setFromSocket(
-    int socket,
-    int (*fn)(int, struct sockaddr*, socklen_t*)) {
+    NetworkSocket socket,
+    int (*fn)(NetworkSocket, struct sockaddr*, socklen_t*)) {
   // Try to put the address into a local storage buffer.
   sockaddr_storage tmp_sock;
   socklen_t addrLen = sizeof(tmp_sock);
@@ -682,8 +697,9 @@ void SocketAddress::getIpString(char* buf, size_t buflen, int flags) const {
       0,
       flags);
   if (rc != 0) {
-    auto os = sformat(
-        "getnameinfo() failed in getIpString() error = {}", gai_strerror(rc));
+    auto os = fmt::format(
+        "getnameinfo() failed in getIpString() error = {}",
+        GetAddrInfoError(rc).str());
     throw std::system_error(rc, std::generic_category(), os);
   }
 }

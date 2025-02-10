@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,38 +33,57 @@ namespace folly {
  */
 template <typename Tuple>
 using index_sequence_for_tuple =
-    make_index_sequence<std::tuple_size<Tuple>::value>;
+    std::make_index_sequence<std::tuple_size<Tuple>::value>;
 
 namespace detail {
 namespace apply_tuple {
+
 namespace adl {
+
 using std::get;
 
-struct ApplyInvoke {
+template <std::size_t I>
+struct invoke_get_fn {
   template <typename T>
-  using seq = index_sequence_for_tuple<std::remove_reference_t<T>>;
-
-  template <typename F, typename T, std::size_t... I>
-  static constexpr auto invoke_(F&& f, T&& t, index_sequence<I...>) noexcept(
-      is_nothrow_invocable<F&&, decltype(get<I>(std::declval<T>()))...>::value)
-      -> invoke_result_t<F&&, decltype(get<I>(std::declval<T>()))...> {
-    return invoke(static_cast<F&&>(f), get<I>(static_cast<T&&>(t))...);
+  constexpr auto operator()(T&& t) const noexcept(noexcept(
+      get<I>(static_cast<T&&>(t)))) -> decltype(get<I>(static_cast<T&&>(t))) {
+    return get<I>(static_cast<T&&>(t));
   }
 };
+
+} // namespace adl
 
 template <
     typename Tuple,
     std::size_t... Indices,
-    typename ReturnTuple =
-        std::tuple<decltype(get<Indices>(std::declval<Tuple>()))...>>
-auto forward_tuple(Tuple&& tuple, index_sequence<Indices...>) -> ReturnTuple {
-  return ReturnTuple{get<Indices>(std::forward<Tuple>(tuple))...};
+    typename ReturnTuple = std::tuple<
+        decltype(adl::invoke_get_fn<Indices>{}(std::declval<Tuple>()))...>>
+auto forward_tuple(Tuple&& tuple, std::index_sequence<Indices...>)
+    -> ReturnTuple {
+  return ReturnTuple{
+      adl::invoke_get_fn<Indices>{}(static_cast<Tuple&&>(tuple))...};
 }
-} // namespace adl
+
 } // namespace apply_tuple
 } // namespace detail
 
-struct ApplyInvoke : private detail::apply_tuple::adl::ApplyInvoke {
+struct ApplyInvoke {
+ private:
+  template <typename T>
+  using seq = index_sequence_for_tuple<std::remove_reference_t<T>>;
+
+  template <std::size_t I>
+  using get = detail::apply_tuple::adl::invoke_get_fn<I>;
+
+  template <typename F, typename T, std::size_t... I>
+  static constexpr auto
+  invoke_(F&& f, T&& t, std::index_sequence<I...>) noexcept(
+      noexcept(invoke(static_cast<F&&>(f), get<I>{}(static_cast<T&&>(t))...)))
+      -> decltype(invoke(
+          static_cast<F&&>(f), get<I>{}(static_cast<T&&>(t))...)) {
+    return invoke(static_cast<F&&>(f), get<I>{}(static_cast<T&&>(t))...);
+  }
+
  public:
   template <typename F, typename T>
   constexpr auto operator()(F&& f, T&& t) const noexcept(
@@ -76,19 +95,7 @@ struct ApplyInvoke : private detail::apply_tuple::adl::ApplyInvoke {
 
 //////////////////////////////////////////////////////////////////////
 
-#if __cpp_lib_apply >= 201603
-
 /* using override */ using std::apply;
-
-#else // __cpp_lib_apply >= 201603
-
-//  mimic: std::apply, C++17
-template <typename F, typename Tuple>
-constexpr decltype(auto) apply(F&& func, Tuple&& tuple) {
-  return ApplyInvoke{}(static_cast<F&&>(func), static_cast<Tuple&&>(tuple));
-}
-
-#endif // __cpp_lib_apply >= 201603
 
 /**
  * Get a tuple of references from the passed tuple, forwarding will be applied
@@ -108,12 +115,12 @@ constexpr decltype(auto) apply(F&& func, Tuple&& tuple) {
  */
 template <typename Tuple>
 auto forward_tuple(Tuple&& tuple) noexcept
-    -> decltype(detail::apply_tuple::adl::forward_tuple(
+    -> decltype(detail::apply_tuple::forward_tuple(
         std::declval<Tuple>(),
         std::declval<
             index_sequence_for_tuple<std::remove_reference_t<Tuple>>>())) {
-  return detail::apply_tuple::adl::forward_tuple(
-      std::forward<Tuple>(tuple),
+  return detail::apply_tuple::forward_tuple(
+      static_cast<Tuple&&>(tuple),
       index_sequence_for_tuple<std::remove_reference_t<Tuple>>{});
 }
 
@@ -121,18 +128,29 @@ auto forward_tuple(Tuple&& tuple) noexcept
  * Mimic the invoke suite of traits for tuple based apply invocation
  */
 template <typename F, typename Tuple>
-struct apply_result : invoke_result<ApplyInvoke, F, Tuple> {};
+using apply_result = invoke_result<ApplyInvoke, F, Tuple>;
 template <typename F, typename Tuple>
 using apply_result_t = invoke_result_t<ApplyInvoke, F, Tuple>;
 template <typename F, typename Tuple>
-struct is_applicable : is_invocable<ApplyInvoke, F, Tuple> {};
-template <typename R, typename F, typename Tuple>
-struct is_applicable_r : is_invocable_r<R, ApplyInvoke, F, Tuple> {};
+inline constexpr bool is_applicable_v = is_invocable_v<ApplyInvoke, F, Tuple>;
 template <typename F, typename Tuple>
-struct is_nothrow_applicable : is_nothrow_invocable<ApplyInvoke, F, Tuple> {};
+using is_applicable = is_invocable<ApplyInvoke, F, Tuple>;
 template <typename R, typename F, typename Tuple>
-struct is_nothrow_applicable_r
-    : is_nothrow_invocable_r<R, ApplyInvoke, F, Tuple> {};
+inline constexpr bool is_applicable_r_v =
+    is_invocable_r_v<R, ApplyInvoke, F, Tuple>;
+template <typename R, typename F, typename Tuple>
+using is_applicable_r = is_invocable_r<R, ApplyInvoke, F, Tuple>;
+template <typename F, typename Tuple>
+inline constexpr bool is_nothrow_applicable_v =
+    is_nothrow_invocable_v<ApplyInvoke, F, Tuple>;
+template <typename F, typename Tuple>
+using is_nothrow_applicable = is_nothrow_invocable<ApplyInvoke, F, Tuple>;
+template <typename R, typename F, typename Tuple>
+inline constexpr bool is_nothrow_applicable_r_v =
+    is_nothrow_invocable_r_v<R, ApplyInvoke, F, Tuple>;
+template <typename R, typename F, typename Tuple>
+using is_nothrow_applicable_r =
+    is_nothrow_invocable_r<R, ApplyInvoke, F, Tuple>;
 
 namespace detail {
 namespace apply_tuple {
@@ -180,32 +198,6 @@ auto uncurry(F&& f)
   return detail::apply_tuple::Uncurry<typename std::decay<F>::type>(
       std::forward<F>(f));
 }
-
-#if __cpp_lib_make_from_tuple || (_MSC_VER >= 1910 && _MSVC_LANG > 201402)
-
-/* using override */ using std::make_from_tuple;
-
-#else
-
-namespace detail {
-namespace apply_tuple {
-template <class T>
-struct Construct {
-  template <class... Args>
-  constexpr T operator()(Args&&... args) const {
-    return T(std::forward<Args>(args)...);
-  }
-};
-} // namespace apply_tuple
-} // namespace detail
-
-//  mimic: std::make_from_tuple, C++17
-template <class T, class Tuple>
-constexpr T make_from_tuple(Tuple&& t) {
-  return apply(detail::apply_tuple::Construct<T>(), std::forward<Tuple>(t));
-}
-
-#endif
 
 //////////////////////////////////////////////////////////////////////
 } // namespace folly

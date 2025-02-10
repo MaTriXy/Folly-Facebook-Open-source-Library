@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,7 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/StandardLogHandler.h>
+
+#include <utility>
 
 #include <folly/logging/LogFormatter.h>
 #include <folly/logging/LogMessage.h>
@@ -24,20 +27,27 @@ namespace folly {
 StandardLogHandler::StandardLogHandler(
     LogHandlerConfig config,
     std::shared_ptr<LogFormatter> formatter,
-    std::shared_ptr<LogWriter> writer)
-    : formatter_{std::move(formatter)},
+    std::shared_ptr<LogWriter> writer,
+    LogLevel syncLevel)
+    : syncLevel_(syncLevel),
+      formatter_{std::move(formatter)},
       writer_{std::move(writer)},
-      config_{config} {}
+      config_{std::move(config)} {}
 
-StandardLogHandler::~StandardLogHandler() {}
+StandardLogHandler::~StandardLogHandler() = default;
 
 void StandardLogHandler::handleMessage(
-    const LogMessage& message,
-    const LogCategory* handlerCategory) {
+    const LogMessage& message, const LogCategory* handlerCategory) {
   if (message.getLevel() < getLevel()) {
     return;
   }
-  writer_->writeMessage(formatter_->formatMessage(message, handlerCategory));
+  std::string formattedMessage =
+      formatter_->formatMessage(message, handlerCategory);
+  if (message.getLevel() >= syncLevel_.load(std::memory_order_relaxed)) {
+    writer_->writeMessageSync(std::move(formattedMessage));
+  } else {
+    writer_->writeMessage(std::move(formattedMessage));
+  }
 }
 
 void StandardLogHandler::flush() {

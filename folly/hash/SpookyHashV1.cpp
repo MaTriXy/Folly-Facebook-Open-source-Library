@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,21 +26,23 @@
 
 #include <folly/hash/SpookyHashV1.h>
 
-#include <folly/CppAttributes.h>
-
 #include <cstring>
+
+#include <folly/CppAttributes.h>
 
 #define ALLOW_UNALIGNED_READS 1
 
 namespace folly {
 namespace hash {
 
+// clang-format off
+
 //
 // short hash ... it could be used on any message,
 // but it's used by Spooky just for short messages.
 //
 void SpookyHashV1::Short(
-    const void *message,
+    const void* message,
     size_t length,
     uint64_t *hash1,
     uint64_t *hash2)
@@ -99,47 +101,47 @@ void SpookyHashV1::Short(
     {
     case 15:
         d += ((uint64_t)u.p8[14]) << 48;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 14:
         d += ((uint64_t)u.p8[13]) << 40;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 13:
         d += ((uint64_t)u.p8[12]) << 32;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 12:
         d += u.p32[2];
         c += u.p64[0];
         break;
     case 11:
         d += ((uint64_t)u.p8[10]) << 16;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 10:
         d += ((uint64_t)u.p8[9]) << 8;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 9:
         d += (uint64_t)u.p8[8];
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 8:
         c += u.p64[0];
         break;
     case 7:
         c += ((uint64_t)u.p8[6]) << 48;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 6:
         c += ((uint64_t)u.p8[5]) << 40;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 5:
         c += ((uint64_t)u.p8[4]) << 32;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 4:
         c += u.p32[0];
         break;
     case 3:
         c += ((uint64_t)u.p8[2]) << 16;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 2:
         c += ((uint64_t)u.p8[1]) << 8;
-        FOLLY_FALLTHROUGH;
+        [[fallthrough]];
     case 1:
         c += (uint64_t)u.p8[0];
         break;
@@ -346,7 +348,7 @@ void SpookyHashV1::Final(uint64_t *hash1, uint64_t *hash2)
         return;
     }
 
-    const uint64_t *data = (const uint64_t *)m_data;
+    auto data = (const uint64_t *)m_data;
     uint8_t remainder = m_remainder;
 
     uint64_t h0 = m_state[0];
@@ -382,6 +384,8 @@ void SpookyHashV1::Final(uint64_t *hash1, uint64_t *hash2)
     *hash1 = h0;
     *hash2 = h1;
 }
+
+// clang-format on
 
 } // namespace hash
 } // namespace folly

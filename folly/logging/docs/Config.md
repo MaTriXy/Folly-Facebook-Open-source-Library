@@ -36,7 +36,7 @@ In general the basic configuration syntax is convenient for controlling log
 levels, and making minor log handler setting changes (such as controlling if
 logging goes to stdout or stderr, and whether it is logged asynchronously or
 not).  However the JSON format is easier to use to describe more complicated
-settings.
+settings. Some features are not available in the basic configuration syntax.
 
 
 Basic Configuration Syntax
@@ -159,6 +159,12 @@ Example log configuration strings:
   therefore be discarded, even though they are enabled for one of its parent
   categories.
 
+* `folly:=WARN`
+
+  Sets the folly category to WARN level and prevent it from inheriting the
+  default log level, which is likely INFO. This is a useful example for
+  silencing a spammy component while keeping everything else as is.
+
 * `ERROR:stderr, folly=INFO; stderr=stream:stream=stderr`
 
   Sets the root log category level to ERROR, and sets its handler list to
@@ -203,6 +209,15 @@ Example log configuration strings:
   `LoggerDB::updateConfig()`, and cannot be used with
   `LoggerDB::resetConfig()`.
 
+* `INFO; default:async=true,sync_level=WARN`
+
+  Sets the root log category level to INFO, and sets the "async" property to
+  true and "sync_level" property to WARN. Setting "async" property ensures that
+  we enable asynchronous logging but the "sync_level" flag specifies that all
+  logs of the level WARN and above are processed synchronously. This can help
+  ensure that all logs of the level WARN or above are persisted before a
+  potential crash while ensuring that all logs below the level WARN are
+  non-blocking.
 
 JSON Configuration Syntax
 -------------------------
@@ -240,6 +255,13 @@ following fields:
   log level setting.
 
   This field is optional, and defaults to true if not present.
+
+* `propagate`
+
+  This should be a  a string or positive integer value specifying the minimum
+  log level of messages that should be propagated to the parent category.
+
+  This field is optional, and defaults to the minimum log level if not present.
 
 Alternatively, the value for a log category may be a plain string or integer
 instead of a JSON object, in which case case the string or integer is treated
@@ -285,6 +307,7 @@ following fields:
       "options": {
         "stream": "stderr",
         "async": true,
+        "sync_level": "WARN",
         "max_buffer_size": 4096000
       }
     }
@@ -296,7 +319,7 @@ following fields:
 Custom Configuration Mechanisms
 -------------------------------
 
-Internally the the `LogConfig` class represents configuration settings for the
+Internally the `LogConfig` class represents configuration settings for the
 folly logging library.  Users of the logging library can also programmatically
 construct their own `LogConfig` objects and use the `LoggerDB::updateConfig()`
 and `LoggerDB::resetConfig()` APIs to apply the configuration changes.

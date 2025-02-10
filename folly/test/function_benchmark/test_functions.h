@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,9 +22,19 @@
 
 #include <folly/Function.h>
 
+class Exception : public std::exception {
+ public:
+  explicit Exception(const std::string& value) : value_(value) {}
+  ~Exception() noexcept override {}
+
+  const char* what() const noexcept override { return value_.c_str(); }
+
+ private:
+  std::string value_;
+};
+
 void doNothing();
 
-[[noreturn]] void throwException();
 std::exception_ptr returnExceptionPtr();
 void exceptionPtrReturnParam(std::exception_ptr* excReturn);
 std::string returnString();

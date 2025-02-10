@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,11 +16,11 @@
 
 #pragma once
 
-#include <folly/Utility.h>
-#include <folly/functional/Invoke.h>
-
 #include <tuple>
 #include <utility>
+
+#include <folly/Utility.h>
+#include <folly/functional/Invoke.h>
 
 namespace folly {
 
@@ -31,16 +31,18 @@ namespace partial {
 // not accidentally act as copy or move constructor
 struct PartialConstructFromCallable {};
 
-template <typename F, typename Tuple>
+template <typename F, typename... StoredArg>
 class Partial {
-  using Indexes = make_index_sequence<std::tuple_size<Tuple>{}>;
+  using Tuple = std::tuple<StoredArg...>;
+  using Indexes = std::index_sequence_for<StoredArg...>;
 
   template <typename Self, std::size_t... I, typename... Args>
-  static auto invokeForward(Self&& self, index_sequence<I...>, Args&&... args)
-      -> decltype(invoke(
-          std::declval<Self>().f_,
-          std::get<I>(std::declval<Self>().stored_args_)...,
-          std::declval<Args>()...)) {
+  static auto invokeForward(
+      Self&& self, std::index_sequence<I...>, Args&&... args)
+      -> invoke_result_t<
+          like_t<Self&&, F>,
+          like_t<Self&&, StoredArg>...,
+          Args&&...> {
     return invoke(
         std::forward<Self>(self).f_,
         std::get<I>(std::forward<Self>(self).stored_args_)...,
@@ -55,30 +57,32 @@ class Partial {
 
   template <typename... CArgs>
   auto operator()(CArgs&&... cargs) & -> decltype(invokeForward(
-      std::declval<Partial&>(),
-      Indexes{},
-      std::declval<CArgs>()...)) {
+                                          std::declval<Partial&>(),
+                                          Indexes{},
+                                          std::declval<CArgs>()...)) {
     return invokeForward(*this, Indexes{}, std::forward<CArgs>(cargs)...);
   }
   template <typename... CArgs>
-  auto operator()(CArgs&&... cargs) const& -> decltype(invokeForward(
-      std::declval<const Partial&>(),
-      Indexes{},
-      std::declval<CArgs>()...)) {
+  auto operator()(CArgs&&... cargs)
+      const& -> decltype(invokeForward(
+                 std::declval<const Partial&>(),
+                 Indexes{},
+                 std::declval<CArgs>()...)) {
     return invokeForward(*this, Indexes{}, std::forward<CArgs>(cargs)...);
   }
   template <typename... As>
   auto operator()(As&&... a) && -> decltype(invokeForward(
-      std::declval<Partial&&>(),
-      Indexes{},
-      std::declval<As>()...)) {
+                                    std::declval<Partial&&>(),
+                                    Indexes{},
+                                    std::declval<As>()...)) {
     return invokeForward(std::move(*this), Indexes{}, std::forward<As>(a)...);
   }
   template <typename... As>
-  auto operator()(As&&... as) const&& -> decltype(invokeForward(
-      std::declval<const Partial&&>(),
-      Indexes{},
-      std::declval<As>()...)) {
+  auto operator()(As&&... as)
+      const&& -> decltype(invokeForward(
+                  std::declval<const Partial&&>(),
+                  Indexes{},
+                  std::declval<As>()...)) {
     return invokeForward(std::move(*this), Indexes{}, std::forward<As>(as)...);
   }
 
@@ -116,12 +120,14 @@ class Partial {
  * and passed to the original callable.
  */
 template <typename F, typename... Args>
-auto partial(F&& f, Args&&... args) -> detail::partial::Partial<
-    typename std::decay<F>::type,
-    std::tuple<typename std::decay<Args>::type...>> {
-  return {detail::partial::PartialConstructFromCallable{},
-          std::forward<F>(f),
-          std::forward<Args>(args)...};
+auto partial(F&& f, Args&&... args)
+    -> detail::partial::Partial< //
+        typename std::decay<F>::type,
+        typename std::decay<Args>::type...> {
+  return {
+      detail::partial::PartialConstructFromCallable{},
+      std::forward<F>(f),
+      std::forward<Args>(args)...};
 }
 
 } // namespace folly

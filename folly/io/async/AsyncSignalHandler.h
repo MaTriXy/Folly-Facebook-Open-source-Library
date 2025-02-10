@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,11 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
+
+#include <map>
 
 #include <folly/io/async/EventBase.h>
 #include <folly/portability/Event.h>
-#include <map>
 
 namespace folly {
 
@@ -68,9 +70,7 @@ class AsyncSignalHandler {
   /**
    * Get the EventBase used by this AsyncSignalHandler.
    */
-  EventBase* getEventBase() const {
-    return eventBase_;
-  }
+  EventBase* getEventBase() const { return eventBase_; }
 
   /**
    * Register to receive callbacks about the specified signal.
@@ -102,7 +102,10 @@ class AsyncSignalHandler {
   virtual void signalReceived(int signum) noexcept = 0;
 
  private:
-  typedef std::map<int, struct event> SignalEventMap;
+  // we cannot copy the EventBaseEvent instances
+  // so we need to store ptrs to them
+  // Also some backends store ptrs to the EventBaseEvent instances
+  using SignalEventMap = std::map<int, std::unique_ptr<EventBaseEvent>>;
 
   // Forbidden copy constructor and assignment operator
   AsyncSignalHandler(AsyncSignalHandler const&);
@@ -112,6 +115,27 @@ class AsyncSignalHandler {
 
   EventBase* eventBase_{nullptr};
   SignalEventMap signalEvents_;
+};
+
+/**
+ * Derived template class that allows forwarding of a callback to be invoked in
+ * the overridden signalReceived().
+ *
+ * One possible use is passing in a lambda;
+ *   CallbackAsyncSignalHandler handler{evb, [&foo](int) {
+ *     // do something with foo
+ *   }};
+ */
+template <typename Callback>
+class CallbackAsyncSignalHandler : public AsyncSignalHandler {
+ public:
+  CallbackAsyncSignalHandler(folly::EventBase* evb, Callback&& cb)
+      : AsyncSignalHandler{evb}, cb_{std::forward<Callback>(cb)} {}
+
+  void signalReceived(int signum) noexcept override { cb_(signum); }
+
+ private:
+  Callback cb_;
 };
 
 } // namespace folly

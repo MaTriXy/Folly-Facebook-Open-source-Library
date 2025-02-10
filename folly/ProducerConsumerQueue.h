@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,9 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
-// @author Bo Hu (bhu@fb.com)
-// @author Jordan DeLong (delong.j@fb.com)
 
 #pragma once
 
@@ -40,7 +37,7 @@ struct ProducerConsumerQueue {
   typedef T value_type;
 
   ProducerConsumerQueue(const ProducerConsumerQueue&) = delete;
-  ProducerConsumerQueue& operator = (const ProducerConsumerQueue&) = delete;
+  ProducerConsumerQueue& operator=(const ProducerConsumerQueue&) = delete;
 
   // size must be >= 2.
   //
@@ -48,11 +45,10 @@ struct ProducerConsumerQueue {
   // given time is actually (size-1), so if you start with an empty queue,
   // isFull() will return true after size-1 insertions.
   explicit ProducerConsumerQueue(uint32_t size)
-    : size_(size)
-    , records_(static_cast<T*>(std::malloc(sizeof(T) * size)))
-    , readIndex_(0)
-    , writeIndex_(0)
-  {
+      : size_(size),
+        records_(static_cast<T*>(std::malloc(sizeof(T) * size))),
+        readIndex_(0),
+        writeIndex_(0) {
     assert(size >= 2);
     if (!records_) {
       throw std::bad_alloc();
@@ -168,9 +164,7 @@ struct ProducerConsumerQueue {
   }
 
   // maximum number of items in the queue.
-  size_t capacity() const {
-    return size_ - 1;
-  }
+  size_t capacity() const { return size_ - 1; }
 
  private:
   using AtomicIndex = std::atomic<unsigned int>;

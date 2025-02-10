@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,17 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/FileHandlerFactory.h>
-#include <folly/logging/StreamHandlerFactory.h>
 
 #include <folly/Exception.h>
-#include <folly/experimental/TestUtil.h>
 #include <folly/logging/AsyncFileWriter.h>
 #include <folly/logging/GlogStyleFormatter.h>
 #include <folly/logging/ImmediateFileWriter.h>
 #include <folly/logging/StandardLogHandler.h>
+#include <folly/logging/StreamHandlerFactory.h>
 #include <folly/portability/GTest.h>
 #include <folly/test/TestUtils.h>
+#include <folly/testing/TestUtil.h>
 
 using namespace folly;
 using folly::test::TemporaryFile;
@@ -49,9 +50,7 @@ void checkAsyncWriter(
 }
 
 void checkAsyncWriter(
-    const LogWriter* writer,
-    int expectedFD,
-    size_t expectedMaxBufferSize) {
+    const LogWriter* writer, int expectedFD, size_t expectedMaxBufferSize) {
   auto asyncWriter = dynamic_cast<const AsyncFileWriter*>(writer);
   ASSERT_TRUE(asyncWriter)
       << "handler factory should have created an AsyncFileWriter";
@@ -355,5 +354,49 @@ TEST(StreamHandlerFactory, errors) {
         factory.createHandler(options),
         std::invalid_argument,
         "unknown option \"foo\"");
+  }
+}
+
+TEST(StreamHandlerFactory, writerFactory) {
+  StreamHandlerFactory::WriterFactory factory;
+  factory.processOption("stream", "stderr");
+  {
+    auto writer = factory.createWriter();
+    checkAsyncWriter(
+        writer.get(), STDERR_FILENO, AsyncFileWriter::kDefaultMaxBufferSize);
+  }
+
+  // For duplicate option, prefer the latter
+  factory.processOption("stream", "stdout");
+  {
+    auto writer = factory.createWriter();
+    checkAsyncWriter(
+        writer.get(), STDOUT_FILENO, AsyncFileWriter::kDefaultMaxBufferSize);
+  }
+}
+
+TEST(StreamHandlerFactory, writerFactoryError) {
+  {
+    StreamHandlerFactory::WriterFactory factory;
+    factory.processOption("stream", "nope");
+    EXPECT_THROW_RE(
+        factory.createWriter(),
+        std::invalid_argument,
+        "^unknown stream \"nope\": expected one of stdout or stderr$");
+  }
+  {
+    StreamHandlerFactory::WriterFactory factory;
+    EXPECT_THROW_RE(
+        factory.createWriter(),
+        std::invalid_argument,
+        "^no stream name specified for stream handler$");
+  }
+  {
+    StreamHandlerFactory::WriterFactory factory;
+    factory.processOption("stream", "");
+    EXPECT_THROW_RE(
+        factory.createWriter(),
+        std::invalid_argument,
+        "^no stream name specified for stream handler$");
   }
 }

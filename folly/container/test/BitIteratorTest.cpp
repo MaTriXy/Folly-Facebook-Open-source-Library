@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,14 +16,15 @@
 
 #include <folly/container/BitIterator.h>
 
+#include <forward_list>
 #include <limits>
+#include <list>
 #include <type_traits>
 #include <vector>
 
 #include <folly/portability/GTest.h>
 
 using namespace folly;
-using namespace folly::bititerator_detail;
 
 namespace {
 
@@ -65,13 +66,13 @@ TEST(BitIterator, Simple) {
 
   v[0] = 0;
   bi = v.begin();
-  *bi++ = true;     // 1
+  *bi++ = true; // 1
   *bi++ = false;
-  *bi++ = true;     // 4
+  *bi++ = true; // 4
   *bi++ = false;
   *bi++ = false;
-  *bi++ = true;     // 32
-  *++bi = true;     // 128 (note pre-increment)
+  *bi++ = true; // 32
+  *++bi = true; // 128 (note pre-increment)
 
   EXPECT_EQ(165, v[0]);
 }
@@ -83,4 +84,26 @@ TEST(BitIterator, Const) {
   auto bi(makeBitIterator(v.cbegin()));
   checkIt(0x10, bi);
   checkIt(0x42, bi);
+}
+
+TEST(BitIterator, IteratorCategory) {
+  EXPECT_TRUE( //
+      (std::is_same<
+          std::iterator_traits<BitIterator<uint64_t*>>::iterator_category,
+          std::random_access_iterator_tag>::value));
+  EXPECT_TRUE(
+      (std::is_same<
+          std::iterator_traits<
+              BitIterator<std::vector<uint64_t>::iterator>>::iterator_category,
+          std::random_access_iterator_tag>::value));
+  EXPECT_TRUE(
+      (std::is_same<
+          std::iterator_traits<
+              BitIterator<std::list<uint64_t>::iterator>>::iterator_category,
+          std::bidirectional_iterator_tag>::value));
+  EXPECT_TRUE( //
+      (std::is_same<
+          std::iterator_traits<BitIterator<
+              std::forward_list<uint64_t>::iterator>>::iterator_category,
+          std::forward_iterator_tag>::value));
 }

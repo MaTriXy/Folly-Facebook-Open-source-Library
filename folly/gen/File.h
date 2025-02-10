@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -35,7 +35,7 @@ class FileWriter;
  * to hold each value).
  */
 template <class S = detail::FileReader>
-S fromFile(File file, size_t bufferSize=4096) {
+S fromFile(File file, size_t bufferSize = 4096) {
   return S(std::move(file), IOBuf::create(bufferSize));
 }
 
@@ -52,7 +52,7 @@ S fromFile(File file, std::unique_ptr<IOBuf> buffer) {
  * If bufferSize is 0, writes will be unbuffered.
  */
 template <class S = detail::FileWriter>
-S toFile(File file, size_t bufferSize=4096) {
+S toFile(File file, size_t bufferSize = 4096) {
   return S(std::move(file), bufferSize ? nullptr : IOBuf::create(bufferSize));
 }
 

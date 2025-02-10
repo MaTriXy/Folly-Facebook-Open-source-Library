@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,14 +14,13 @@
  * limitations under the License.
  */
 
-#include <folly/Range.h>
-
 #include <algorithm>
 #include <iostream>
 #include <random>
 #include <string>
 
 #include <folly/Benchmark.h>
+#include <folly/Range.h>
 #include <folly/container/Foreach.h>
 
 using namespace folly;
@@ -40,10 +39,12 @@ void initStr(int len) {
   vstr.clear();
   vstrp.clear();
 
-  cout << "string length " << len << ':' << endl;
   str.reserve(len + 1);
   str.append(len, 'a');
   str.append(1, 'b');
+
+  vstr.reserve(kVstrSize);
+  vstrp.reserve(kVstrSize);
 
   // create 16 copies of str, each with a different 16byte alignment.
   // Useful because some implementations of find_first_of have different
@@ -166,8 +167,8 @@ BENCHMARK(FindFirstOf1NeedlesBase, n) {
   findFirstOfRange(delims1, detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOf1NeedlesNoSSE, n) {
-  findFirstOfRange(delims1, detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOf1NeedlesNoSIMD, n) {
+  findFirstOfRange(delims1, detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf1NeedlesStd, n) {
@@ -190,8 +191,8 @@ BENCHMARK(FindFirstOf2NeedlesBase, n) {
   findFirstOfRange(delims2, detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOf2NeedlesNoSSE, n) {
-  findFirstOfRange(delims2, detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOf2NeedlesNoSIMD, n) {
+  findFirstOfRange(delims2, detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf2NeedlesStd, n) {
@@ -214,8 +215,8 @@ BENCHMARK(FindFirstOf4NeedlesBase, n) {
   findFirstOfRange(delims4, detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOf4NeedlesNoSSE, n) {
-  findFirstOfRange(delims4, detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOf4NeedlesNoSIMD, n) {
+  findFirstOfRange(delims4, detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf4NeedlesStd, n) {
@@ -238,8 +239,8 @@ BENCHMARK(FindFirstOf8NeedlesBase, n) {
   findFirstOfRange(delims8, detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOf8NeedlesNoSSE, n) {
-  findFirstOfRange(delims8, detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOf8NeedlesNoSIMD, n) {
+  findFirstOfRange(delims8, detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf8NeedlesStd, n) {
@@ -262,8 +263,8 @@ BENCHMARK(FindFirstOf16NeedlesBase, n) {
   findFirstOfRange(delims16, detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOf16NeedlesNoSSE, n) {
-  findFirstOfRange(delims16, detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOf16NeedlesNoSIMD, n) {
+  findFirstOfRange(delims16, detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf16NeedlesStd, n) {
@@ -286,8 +287,8 @@ BENCHMARK(FindFirstOf32NeedlesBase, n) {
   findFirstOfRange(delims32, detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOf32NeedlesNoSSE, n) {
-  findFirstOfRange(delims32, detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOf32NeedlesNoSIMD, n) {
+  findFirstOfRange(delims32, detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf32NeedlesStd, n) {
@@ -312,8 +313,8 @@ BENCHMARK(FindFirstOf64NeedlesBase, n) {
   findFirstOfRange(delims64, detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOf64NeedlesNoSSE, n) {
-  findFirstOfRange(delims64, detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOf64NeedlesNoSIMD, n) {
+  findFirstOfRange(delims64, detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOf64NeedlesStd, n) {
@@ -343,8 +344,8 @@ BENCHMARK(FindFirstOfRandomBase, n) {
   findFirstOfRandom(detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(FindFirstOfRandomNoSSE, n) {
-  findFirstOfRandom(detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(FindFirstOfRandomNoSIMD, n) {
+  findFirstOfRandom(detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(FindFirstOfRandomStd, n) {
@@ -365,8 +366,8 @@ BENCHMARK(CountDelimsBase, n) {
   countHits(detail::qfind_first_byte_of, n);
 }
 
-BENCHMARK_RELATIVE(CountDelimsNoSSE, n) {
-  countHits(detail::qfind_first_byte_of_nosse, n);
+BENCHMARK_RELATIVE(CountDelimsNoSIMD, n) {
+  countHits(detail::qfind_first_byte_of_nosimd, n);
 }
 
 BENCHMARK_RELATIVE(CountDelimsStd, n) {
@@ -398,7 +399,7 @@ BENCHMARK(FindFirstOfOffsetRange, n) {
 BENCHMARK_DRAW_LINE();
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   for (int len : {1, 8, 10, 16, 32, 64, 128, 256, 10 * 1024, 1024 * 1024}) {
     initStr(len);

@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,17 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
-#include <folly/Conv.h>
-#include <folly/CppAttributes.h>
-#include <folly/Range.h>
-#include <folly/Synchronized.h>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include <folly/Conv.h>
+#include <folly/CppAttributes.h>
+#include <folly/Range.h>
+#include <folly/ScopeGuard.h>
+#include <folly/Synchronized.h>
+#include <folly/detail/StaticSingletonManager.h>
 #include <folly/logging/LogName.h>
 
 namespace folly {
@@ -38,6 +41,8 @@ enum class LogLevel : uint32_t;
  * LoggerDB stores the set of LogCategory objects.
  */
 class LoggerDB {
+  using ContextCallback = folly::Function<std::string() const>;
+
  public:
   /**
    * Get the main LoggerDB singleton.
@@ -105,9 +110,9 @@ class LoggerDB {
    *
    * All LogCategories not mentioned in the new LogConfig will have all
    * currently configured log handlers removed and their log level set to its
-   * default state.  For the root category the default log level is ERR; for
-   * all other categories the default level is MAX_LEVEL with log level
-   * inheritance enabled.
+   * default state.  For the root category the default log level is
+   * kDefaultLogLevel (see LogLevel.h); for all other categories the default
+   * level is MAX_LEVEL with log level inheritance enabled.
    *
    * LogCategories listed in the new config but without LogHandler information
    * defined will have all existing handlers removed.
@@ -145,8 +150,7 @@ class LoggerDB {
    * existing factory.
    */
   void registerHandlerFactory(
-      std::unique_ptr<LogHandlerFactory> factory,
-      bool replaceExisting = false);
+      std::unique_ptr<LogHandlerFactory> factory, bool replaceExisting = false);
 
   /**
    * Remove a registered LogHandlerFactory.
@@ -187,6 +191,23 @@ class LoggerDB {
   explicit LoggerDB(TestConstructorArg);
 
   /**
+   * Add a new context string callback to the list.
+   *
+   * The callbacks will be invoked during the construction of log messages,
+   * and returned strings will be appended in order to the tail of log
+   * log entry prefixes with space prepended to each item.
+   */
+  void addContextCallback(ContextCallback);
+
+  /**
+   * Return a context string to be appended after default log prefixes.
+   *
+   * The context string is cutomized through adding context callbacks to
+   * LoggerDB objects.
+   */
+  std::string getContextString() const;
+
+  /**
    * internalWarning() is used to report a problem when something goes wrong
    * internally in the logging library.
    *
@@ -199,9 +220,7 @@ class LoggerDB {
    */
   template <typename... Args>
   static void internalWarning(
-      folly::StringPiece file,
-      int lineNumber,
-      Args&&... args) noexcept {
+      folly::StringPiece file, int lineNumber, Args&&... args) noexcept {
     internalWarningImpl(
         file, lineNumber, folly::to<std::string>(std::forward<Args>(args)...));
   }
@@ -238,14 +257,25 @@ class LoggerDB {
     HandlerMap handlers;
   };
 
+  class ContextCallbackList {
+   public:
+    void addCallback(ContextCallback);
+    std::string getContextString() const;
+    ~ContextCallbackList();
+
+   private:
+    class CallbacksObj;
+    std::atomic<CallbacksObj*> callbacks_{nullptr};
+    std::mutex writeMutex_;
+  };
+
   // Forbidden copy constructor and assignment operator
   LoggerDB(LoggerDB const&) = delete;
   LoggerDB& operator=(LoggerDB const&) = delete;
 
   LoggerDB();
   LogCategory* getOrCreateCategoryLocked(
-      LoggerNameMap& loggersByName,
-      folly::StringPiece name);
+      LoggerNameMap& loggersByName, folly::StringPiece name);
   LogCategory* createCategoryLocked(
       LoggerNameMap& loggersByName,
       folly::StringPiece name,
@@ -271,13 +301,9 @@ class LoggerDB {
       const std::vector<std::string>& categoryHandlerNames);
 
   static void internalWarningImpl(
-      folly::StringPiece filename,
-      int lineNumber,
-      std::string&& msg) noexcept;
+      folly::StringPiece filename, int lineNumber, std::string&& msg) noexcept;
   static void defaultInternalWarningImpl(
-      folly::StringPiece filename,
-      int lineNumber,
-      std::string&& msg) noexcept;
+      folly::StringPiece filename, int lineNumber, std::string&& msg) noexcept;
 
   /**
    * A map of LogCategory objects by name.
@@ -295,6 +321,13 @@ class LoggerDB {
    */
   folly::Synchronized<HandlerInfo> handlerInfo_;
 
+  /**
+   * Callbacks returning context strings.
+   *
+   * Exceptions from the callbacks are catched and reflected in corresponding
+   * position in log entries.
+   */
+  ContextCallbackList contextCallbacks_;
   static std::atomic<InternalWarningHandler> warningHandler_;
 };
 
@@ -326,5 +359,26 @@ class LoggerDB {
  * that used by GLOG.
  */
 void initializeLoggerDB(LoggerDB& db);
+
+FOLLY_ALWAYS_INLINE LoggerDB& LoggerDB::get() {
+  struct Singleton : LoggerDB {
+    Singleton() {
+      initializeLoggerDB(*this);
+      // This allows log handlers to flush any buffered messages before
+      // the program exits.
+      /* library-local */ static auto guard = makeGuard([this] {
+        cleanupHandlers();
+      });
+    }
+  };
+
+  // We intentionally leak the LoggerDB singleton and all of the LogCategory
+  // objects it contains.
+  //
+  // We want Logger objects to remain valid for the entire lifetime of the
+  // program, without having to worry about destruction ordering issues, or
+  // making the Logger perform reference counting on the LoggerDB.
+  return detail::createGlobal<Singleton, void>();
+}
 
 } // namespace folly

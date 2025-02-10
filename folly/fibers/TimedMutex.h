@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,9 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <folly/IntrusiveList.h>
+#include <folly/Portability.h>
 #include <folly/SpinLock.h>
 #include <folly/fibers/GenericBaton.h>
 
@@ -29,7 +31,16 @@ namespace fibers {
  **/
 class TimedMutex {
  public:
-  TimedMutex() noexcept {}
+  struct Options {
+    constexpr Options(bool stealing = true) : stealing_(stealing) {}
+    /**
+     * Prefer thread waiter and steal from fiber waiters if possible
+     */
+    bool stealing_ = true;
+  };
+
+  TimedMutex(Options options = Options()) noexcept
+      : options_(std::move(options)) {}
 
   ~TimedMutex() {
     DCHECK(threadWaiters_.empty());
@@ -45,11 +56,17 @@ class TimedMutex {
   // Lock the mutex. The thread / fiber is blocked until the mutex is free
   void lock();
 
-  // Lock the mutex. The thread / fiber will be blocked for a time duration.
+  // Lock the mutex. The thread / fiber will be blocked until a timeout elapses.
   //
   // @return        true if the mutex was locked, false otherwise
   template <typename Rep, typename Period>
-  bool timed_lock(const std::chrono::duration<Rep, Period>& duration);
+  bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout);
+
+  // Lock the mutex. The thread / fiber will be blocked until a deadline
+  //
+  // @return        true if the mutex was locked, false otherwise
+  template <typename Clock, typename Duration>
+  bool try_lock_until(const std::chrono::time_point<Clock, Duration>& deadline);
 
   // Try to obtain lock without blocking the thread or fiber
   bool try_lock();
@@ -72,6 +89,7 @@ class TimedMutex {
 
   using MutexWaiterList = folly::IntrusiveList<MutexWaiter, &MutexWaiter::hook>;
 
+  const Options options_;
   folly::SpinLock lock_; //< lock to protect waiter list
   bool locked_ = false; //< is this locked by some thread?
   MutexWaiterList threadWaiters_; //< list of waiters
@@ -80,57 +98,76 @@ class TimedMutex {
 };
 
 /**
- * @class TimedRWMutex
+ * @class TimedRWMutexImpl
  *
  * A readers-writer lock which allows multiple readers to hold the
  * lock simultaneously or only one writer.
  *
- * NOTE: This is a reader-preferred RWLock i.e. readers are give priority
- * when there are both readers and writers waiting to get the lock.
+ * NOTE: When ReaderPriority is set to true then the lock is a reader-preferred
+ * RWLock i.e. readers are given priority when there are both readers and
+ * writers waiting to get the lock.
+ *
+ * When ReaderPriority is set to false then the lock is a writer-preferred
+ * RWLock i.e. writers are given priority when there are both readers and
+ * writers waiting to get the lock. Note that when the lock is in
+ * writer-preferred mode, the readers are not re-entrant (e.g. if a caller owns
+ * a read lock, it can't attempt to acquire the read lock again as it can
+ * deadlock.)
  **/
-template <typename BatonType>
-class TimedRWMutex {
+template <bool ReaderPriority, typename BatonType>
+class TimedRWMutexImpl {
  public:
-  TimedRWMutex() = default;
-  ~TimedRWMutex() = default;
+  TimedRWMutexImpl() = default;
+  ~TimedRWMutexImpl() = default;
 
-  TimedRWMutex(const TimedRWMutex& rhs) = delete;
-  TimedRWMutex& operator=(const TimedRWMutex& rhs) = delete;
-  TimedRWMutex(TimedRWMutex&& rhs) = delete;
-  TimedRWMutex& operator=(TimedRWMutex&& rhs) = delete;
+  TimedRWMutexImpl(const TimedRWMutexImpl& rhs) = delete;
+  TimedRWMutexImpl& operator=(const TimedRWMutexImpl& rhs) = delete;
+  TimedRWMutexImpl(TimedRWMutexImpl&& rhs) = delete;
+  TimedRWMutexImpl& operator=(TimedRWMutexImpl&& rhs) = delete;
 
   // Lock for shared access. The thread / fiber is blocked until the lock
   // can be acquired.
-  void read_lock();
+  void lock_shared();
 
-  // Like read_lock except the thread /fiber is blocked for a time duration
+  // Like lock_shared except the thread / fiber is blocked until a timeout
+  // elapses
   // @return        true if locked successfully, false otherwise.
   template <typename Rep, typename Period>
-  bool timed_read_lock(const std::chrono::duration<Rep, Period>& duration);
+  bool try_lock_shared_for(const std::chrono::duration<Rep, Period>& timeout);
 
-  // Like read_lock but doesn't block the thread / fiber if the lock can't
+  // Like lock_shared except the thread / fiber is blocked until a deadline
+  // @return        true if locked successfully, false otherwise.
+  template <typename Clock, typename Duration>
+  bool try_lock_shared_until(
+      const std::chrono::time_point<Clock, Duration>& deadline);
+
+  // Like lock_shared but doesn't block the thread / fiber if the lock can't
   // be acquired.
   // @return        true if lock was acquired, false otherwise.
-  bool try_read_lock();
+  bool try_lock_shared();
+
+  // Release the lock. The thread / fiber will wake up a writer if there is one
+  // and if this is the last concurrently-held read lock to be released.
+  void unlock_shared();
 
   // Obtain an exclusive lock. The thread / fiber is blocked until the lock
   // is available.
-  void write_lock();
+  void lock();
 
-  // Like write_lock except the thread / fiber is blocked for a time duration
+  // Like lock except the thread / fiber is blocked until a timeout elapses
   // @return        true if locked successfully, false otherwise.
   template <typename Rep, typename Period>
-  bool timed_write_lock(const std::chrono::duration<Rep, Period>& duration);
+  bool try_lock_for(const std::chrono::duration<Rep, Period>& timeout);
 
-  // Like write_lock but doesn't block the thread / fiber if the lock cant be
+  // Like lock except the thread / fiber is blocked until a deadline
+  // @return        true if locked successfully, false otherwise.
+  template <typename Clock, typename Duration>
+  bool try_lock_until(const std::chrono::time_point<Clock, Duration>& deadline);
+
+  // Like lock but doesn't block the thread / fiber if the lock cant be
   // obtained.
   // @return        true if lock was acquired, false otherwise.
-  bool try_write_lock();
-
-  // Wrapper for write_lock() for compatibility with Mutex
-  void lock() {
-    write_lock();
-  }
+  bool try_lock();
 
   // Realease the lock. The thread / fiber will wake up all readers if there are
   // any. If there are waiting writers then only one of them will be woken up.
@@ -139,49 +176,7 @@ class TimedRWMutex {
 
   // Downgrade the lock. The thread / fiber will wake up all readers if there
   // are any.
-  void downgrade();
-
-  class ReadHolder {
-   public:
-    explicit ReadHolder(TimedRWMutex& lock) : lock_(&lock) {
-      lock_->read_lock();
-    }
-
-    ~ReadHolder() {
-      if (lock_) {
-        lock_->unlock();
-      }
-    }
-
-    ReadHolder(const ReadHolder& rhs) = delete;
-    ReadHolder& operator=(const ReadHolder& rhs) = delete;
-    ReadHolder(ReadHolder&& rhs) = delete;
-    ReadHolder& operator=(ReadHolder&& rhs) = delete;
-
-   private:
-    TimedRWMutex* lock_;
-  };
-
-  class WriteHolder {
-   public:
-    explicit WriteHolder(TimedRWMutex& lock) : lock_(&lock) {
-      lock_->write_lock();
-    }
-
-    ~WriteHolder() {
-      if (lock_) {
-        lock_->unlock();
-      }
-    }
-
-    WriteHolder(const WriteHolder& rhs) = delete;
-    WriteHolder& operator=(const WriteHolder& rhs) = delete;
-    WriteHolder(WriteHolder&& rhs) = delete;
-    WriteHolder& operator=(WriteHolder&& rhs) = delete;
-
-   private:
-    TimedRWMutex* lock_;
-  };
+  void unlock_and_lock_shared();
 
  private:
   // invariants that must hold when the lock is not held by anyone
@@ -190,6 +185,10 @@ class TimedRWMutex {
     assert(read_waiters_.empty());
     assert(write_waiters_.empty());
   }
+
+  bool shouldReadersWait() const;
+
+  void unlock_();
 
   // Different states the lock can be in
   enum class State {
@@ -228,6 +227,16 @@ class TimedRWMutex {
   MutexWaiterList read_waiters_; //< List of thread / fibers waiting for
   //  shared access
 };
+
+template <typename BatonType>
+using TimedRWMutexReadPriority = TimedRWMutexImpl<true, BatonType>;
+
+template <typename BatonType>
+using TimedRWMutexWritePriority = TimedRWMutexImpl<false, BatonType>;
+
+template <typename BatonType>
+using TimedRWMutex = TimedRWMutexReadPriority<BatonType>;
+
 } // namespace fibers
 } // namespace folly
 

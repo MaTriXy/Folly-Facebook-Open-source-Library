@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,17 +15,6 @@
  */
 
 #include <folly/portability/String.h>
-
-#if !FOLLY_HAVE_MEMRCHR
-extern "C" void* memrchr(const void* s, int c, size_t n) {
-  for (auto p = ((const char*)s) + n - 1; p >= (const char*)s; p--) {
-    if (*p == (char)c) {
-      return (void*)p;
-    }
-  }
-  return nullptr;
-}
-#endif
 
 #if defined(_WIN32) || defined(__FreeBSD__)
 extern "C" char* strndup(const char* a, size_t len) {

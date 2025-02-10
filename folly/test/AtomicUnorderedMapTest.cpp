@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,11 +23,9 @@
 #include <folly/Benchmark.h>
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
-#include <folly/portability/Semaphore.h>
 #include <folly/test/DeterministicSchedule.h>
 
 using namespace folly;
-using namespace folly::test;
 
 template <class T>
 struct non_atomic {
@@ -35,24 +33,27 @@ struct non_atomic {
 
   non_atomic() = default;
   non_atomic(const non_atomic&) = delete;
-  constexpr /* implicit */ non_atomic(T desired): value(desired) {}
+  constexpr /* implicit */ non_atomic(T desired) : value(desired) {}
 
-  T operator+=(T arg) { value += arg; return load();}
+  T operator+=(T arg) {
+    value += arg;
+    return load();
+  }
 
   T load(std::memory_order /* order */ = std::memory_order_seq_cst) const {
     return value;
   }
 
   /* implicit */
-  operator T() const {return load();}
+  operator T() const { return load(); }
 
-  void store(T desired,
-             std::memory_order /* order */ = std::memory_order_seq_cst) {
+  void store(
+      T desired, std::memory_order /* order */ = std::memory_order_seq_cst) {
     value = desired;
   }
 
-  T exchange(T desired,
-             std::memory_order /* order */ = std::memory_order_seq_cst) {
+  T exchange(
+      T desired, std::memory_order /* order */ = std::memory_order_seq_cst) {
     T old = load();
     store(desired);
     return old;
@@ -86,7 +87,7 @@ struct non_atomic {
     return false;
   }
 
-  bool is_lock_free() const {return true;}
+  bool is_lock_free() const { return true; }
 };
 
 template <
@@ -95,16 +96,16 @@ template <
     typename IndexType,
     template <typename> class Atom = std::atomic,
     typename Allocator = std::allocator<char>>
-using UIM =
-    AtomicUnorderedInsertMap<Key,
-                             Value,
-                             std::hash<Key>,
-                             std::equal_to<Key>,
-                             (boost::has_trivial_destructor<Key>::value &&
-                              boost::has_trivial_destructor<Value>::value),
-                             Atom,
-                             IndexType,
-                             Allocator>;
+using UIM = AtomicUnorderedInsertMap<
+    Key,
+    Value,
+    std::hash<Key>,
+    std::equal_to<Key>,
+    (std::is_trivially_destructible<Key>::value &&
+     std::is_trivially_destructible<Value>::value),
+    Atom,
+    IndexType,
+    Allocator>;
 
 namespace {
 template <typename T>
@@ -114,14 +115,15 @@ struct AtomicUnorderedInsertMapTest : public ::testing::Test {};
 // uint16_t doesn't make sense for most platforms, but we might as well
 // test it
 using IndexTypesToTest = ::testing::Types<uint16_t, uint32_t, uint64_t>;
-TYPED_TEST_CASE(AtomicUnorderedInsertMapTest, IndexTypesToTest);
+TYPED_TEST_SUITE(AtomicUnorderedInsertMapTest, IndexTypesToTest);
 
 TYPED_TEST(AtomicUnorderedInsertMapTest, basic) {
   UIM<std::string,
       std::string,
       TypeParam,
       std::atomic,
-      folly::detail::MMapAlloc> m(100);
+      folly::detail::MMapAlloc>
+      m(100);
 
   m.emplace("abc", "ABC");
   EXPECT_TRUE(m.find("abc") != m.cend());
@@ -141,9 +143,17 @@ TYPED_TEST(AtomicUnorderedInsertMapTest, basic) {
   a++;
   EXPECT_TRUE(a == iter);
   EXPECT_TRUE(a != b);
+
+  auto rangeIter = m.cbegin();
+  for (const auto& [key, value] : m) {
+    EXPECT_EQ(key, rangeIter->first);
+    EXPECT_EQ(value, rangeIter->second);
+    rangeIter++;
+  }
+  EXPECT_EQ(m.end(), m.cend());
 }
 
-TEST(AtomicUnorderedInsertMap, load_factor) {
+TEST(AtomicUnorderedInsertMap, loadFactor) {
   AtomicUnorderedInsertMap<int, bool> m(5000, 0.5f);
 
   // we should be able to put in much more than 5000 things because of
@@ -153,17 +163,19 @@ TEST(AtomicUnorderedInsertMap, load_factor) {
   }
 }
 
-TEST(AtomicUnorderedInsertMap, capacity_exceeded) {
+TEST(AtomicUnorderedInsertMap, capacityExceeded) {
   AtomicUnorderedInsertMap<int, bool> m(5000, 1.0f);
 
-  EXPECT_THROW({
-    for (int i = 0; i < 6000; ++i) {
-      m.emplace(i, false);
-    }
-  }, std::bad_alloc);
+  EXPECT_THROW(
+      {
+        for (int i = 0; i < 6000; ++i) {
+          m.emplace(i, false);
+        }
+      },
+      std::bad_alloc);
 }
 
-TYPED_TEST(AtomicUnorderedInsertMapTest, value_mutation) {
+TYPED_TEST(AtomicUnorderedInsertMapTest, valueMutation) {
   UIM<int, MutableAtom<int>, TypeParam> m(100);
 
   for (int i = 0; i < 50; ++i) {
@@ -173,7 +185,7 @@ TYPED_TEST(AtomicUnorderedInsertMapTest, value_mutation) {
   m.find(1)->second.data++;
 }
 
-TEST(UnorderedInsertMap, value_mutation) {
+TEST(UnorderedInsertMap, valueMutation) {
   UIM<int, MutableData<int>, uint32_t, non_atomic> m(100);
 
   for (int i = 0; i < 50; ++i) {
@@ -186,9 +198,9 @@ TEST(UnorderedInsertMap, value_mutation) {
 
 // This test is too expensive to run automatically.  On my dev server it
 // takes about 10 minutes for dbg build, 2 for opt.
-TEST(AtomicUnorderedInsertMap, DISABLED_mega_map) {
+TEST(AtomicUnorderedInsertMap, DISABLED_MegaMap) {
   size_t capacity = 2000000000;
-  AtomicUnorderedInsertMap64<size_t,size_t> big(capacity);
+  AtomicUnorderedInsertMap64<size_t, size_t> big(capacity);
   for (size_t i = 0; i < capacity * 2; i += 2) {
     big.emplace(i, i * 10);
   }
@@ -203,7 +215,7 @@ TEST(AtomicUnorderedInsertMap, DISABLED_mega_map) {
 }
 
 BENCHMARK(lookup_int_int_hit, iters) {
-  std::unique_ptr<AtomicUnorderedInsertMap<int,size_t>> ptr = {};
+  std::unique_ptr<AtomicUnorderedInsertMap<int, size_t>> ptr = {};
 
   size_t capacity = 100000;
 
@@ -219,8 +231,7 @@ BENCHMARK(lookup_int_int_hit, iters) {
   for (size_t i = 0; i < iters; ++i) {
     size_t k = 3 * (((i * 7919) ^ (i * 4001)) % capacity);
     auto iter = ptr->find(k);
-    if (iter == ptr->cend() ||
-        iter->second != k + 1) {
+    if (iter == ptr->cend() || iter->second != k + 1) {
       auto jter = ptr->find(k);
       EXPECT_TRUE(iter == jter);
     }
@@ -233,26 +244,27 @@ BENCHMARK(lookup_int_int_hit, iters) {
 }
 
 struct PairHash {
-  size_t operator()(const std::pair<uint64_t,uint64_t>& pr) const {
+  size_t operator()(const std::pair<uint64_t, uint64_t>& pr) const {
     return pr.first ^ pr.second;
   }
 };
 
-void contendedRW(size_t itersPerThread,
-                 size_t capacity,
-                 size_t numThreads,
-                 size_t readsPerWrite) {
-  typedef std::pair<uint64_t,uint64_t> Key;
-  typedef AtomicUnorderedInsertMap<Key,MutableAtom<uint32_t>,PairHash> Map;
+void contendedRW(
+    size_t itersPerThread,
+    size_t capacity,
+    size_t numThreads,
+    size_t readsPerWrite) {
+  typedef std::pair<uint64_t, uint64_t> Key;
+  typedef AtomicUnorderedInsertMap<Key, MutableAtom<uint32_t>, PairHash> Map;
 
   std::unique_ptr<Map> ptr = {};
-  std::atomic<bool> go;
+  std::atomic<bool> go{false};
   std::vector<std::thread> threads;
 
   BENCHMARK_SUSPEND {
     ptr = std::make_unique<Map>(capacity);
     while (threads.size() < numThreads) {
-      threads.emplace_back([&](){
+      threads.emplace_back([&]() {
         while (!go) {
           std::this_thread::yield();
         }
@@ -297,6 +309,7 @@ void contendedRW(size_t itersPerThread,
   }
 }
 
+// clang-format off
 // sudo nice -n -20 ~/fbcode/_bin/common/concurrency/experimental/atomic_unordered_map --benchmark --bm_min_iters=1000000
 //
 // without MAP_HUGETLB (default)
@@ -318,12 +331,14 @@ void contendedRW(size_t itersPerThread,
 // contendedRW(large_32thr_99pct)                             119.41ns    8.37M
 // contendedRW(large_32thr_99_9pct)                           111.23ns    8.99M
 // ============================================================================
+// clang-format on
 BENCHMARK_NAMED_PARAM(contendedRW, small_32thr_99pct, 100000, 32, 99)
 BENCHMARK_NAMED_PARAM(contendedRW, large_32thr_99pct, 100000000, 32, 99)
 BENCHMARK_NAMED_PARAM(contendedRW, large_32thr_99_9pct, 100000000, 32, 999)
 
 BENCHMARK_DRAW_LINE();
 
+// clang-format off
 // sudo nice -n -20 ~/fbcode/_build/opt/site_integrity/quasar/experimental/atomic_unordered_map_test --benchmark --bm_min_iters=10000
 // Single threaded benchmarks to test how much better we are than
 // std::unordered_map and what is the cost of using atomic operations
@@ -333,15 +348,16 @@ BENCHMARK_DRAW_LINE();
 // atomic_fast_map                                            511.35us    1.96K
 // fast_map                                                   196.28us    5.09K
 // ============================================================================
+// clang-format on
 
 BENCHMARK(std_map) {
   std::unordered_map<long, long> m;
   m.reserve(10000);
-  for (int i=0; i<10000; ++i) {
-    m.emplace(i,i);
+  for (int i = 0; i < 10000; ++i) {
+    m.emplace(i, i);
   }
 
-  for (int i=0; i<10000; ++i) {
+  for (int i = 0; i < 10000; ++i) {
     auto a = m.find(i);
     folly::doNotOptimizeAway(&*a);
   }
@@ -349,11 +365,11 @@ BENCHMARK(std_map) {
 
 BENCHMARK(atomic_fast_map) {
   UIM<long, long, uint32_t, std::atomic> m(10000);
-  for (int i=0; i<10000; ++i) {
-    m.emplace(i,i);
+  for (int i = 0; i < 10000; ++i) {
+    m.emplace(i, i);
   }
 
-  for (int i=0; i<10000; ++i) {
+  for (int i = 0; i < 10000; ++i) {
     auto a = m.find(i);
     folly::doNotOptimizeAway(&*a);
   }
@@ -361,11 +377,11 @@ BENCHMARK(atomic_fast_map) {
 
 BENCHMARK(fast_map) {
   UIM<long, long, uint32_t, non_atomic> m(10000);
-  for (int i=0; i<10000; ++i) {
-    m.emplace(i,i);
+  for (int i = 0; i < 10000; ++i) {
+    m.emplace(i, i);
   }
 
-  for (int i=0; i<10000; ++i) {
+  for (int i = 0; i < 10000; ++i) {
     auto a = m.find(i);
     folly::doNotOptimizeAway(&*a);
   }
@@ -373,11 +389,11 @@ BENCHMARK(fast_map) {
 
 BENCHMARK(atomic_fast_map_64) {
   UIM<long, long, uint64_t, std::atomic> m(10000);
-  for (int i=0; i<10000; ++i) {
-    m.emplace(i,i);
+  for (int i = 0; i < 10000; ++i) {
+    m.emplace(i, i);
   }
 
-  for (int i=0; i<10000; ++i) {
+  for (int i = 0; i < 10000; ++i) {
     auto a = m.find(i);
     folly::doNotOptimizeAway(&*a);
   }
@@ -385,20 +401,19 @@ BENCHMARK(atomic_fast_map_64) {
 
 BENCHMARK(fast_map_64) {
   UIM<long, long, uint64_t, non_atomic> m(10000);
-  for (int i=0; i<10000; ++i) {
-    m.emplace(i,i);
+  for (int i = 0; i < 10000; ++i) {
+    m.emplace(i, i);
   }
 
-  for (int i=0; i<10000; ++i) {
+  for (int i = 0; i < 10000; ++i) {
     auto a = m.find(i);
     folly::doNotOptimizeAway(&*a);
   }
 }
 
-
-int main(int argc, char ** argv) {
+int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   int rv = RUN_ALL_TESTS();
   folly::runBenchmarksOnFlag();
   return rv;

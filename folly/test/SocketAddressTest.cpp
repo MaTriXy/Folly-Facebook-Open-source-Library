@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,20 +22,18 @@
 
 #include <folly/String.h>
 #include <folly/container/Array.h>
-#include <folly/experimental/TestUtil.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/Sockets.h>
 #include <folly/test/SocketAddressTestHelper.h>
+#include <folly/testing/TestUtil.h>
 
-using namespace boost;
-using std::string;
-using std::cerr;
-using std::endl;
+using folly::NetworkSocket;
 using folly::SocketAddress;
 using folly::SocketAddressTestHelper;
 using folly::test::TemporaryDirectory;
+using std::string;
 
-namespace fsp = folly::portability::sockets;
+namespace netops = folly::netops;
 
 TEST(SocketAddress, Size) {
   SocketAddress addr;
@@ -197,6 +195,11 @@ TEST(SocketAddress, SetFromStrings) {
 }
 
 TEST(SocketAddress, EqualityAndHash) {
+  SocketAddress empty1;
+  SocketAddress empty2;
+  EXPECT_EQ(empty1, empty2);
+  EXPECT_EQ(empty1.hash(), empty2.hash());
+
   // IPv4
   SocketAddress local1("127.0.0.1", 1234);
   EXPECT_EQ(local1, local1);
@@ -605,7 +608,6 @@ TEST(SocketAddress, Unix) {
     EXPECT_EQ(copy, addr);
   }
 
-#if __GXX_EXPERIMENTAL_CXX0X__
   {
     SocketAddress copy;
     {
@@ -637,13 +639,12 @@ TEST(SocketAddress, Unix) {
     EXPECT_EQ(other, addr);
     EXPECT_EQ(other.getPath(), addr.getPath());
   }
-#endif
 }
 
 TEST(SocketAddress, AnonymousUnix) {
   // Create a unix socket pair, and get the addresses.
-  int fds[2];
-  int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+  NetworkSocket fds[2];
+  int rc = netops::socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
   EXPECT_EQ(rc, 0);
 
   SocketAddress addr0;
@@ -654,8 +655,8 @@ TEST(SocketAddress, AnonymousUnix) {
   peer0.setFromPeerAddress(fds[0]);
   addr1.setFromLocalAddress(fds[1]);
   peer1.setFromPeerAddress(fds[1]);
-  close(fds[0]);
-  close(fds[1]);
+  netops::close(fds[0]);
+  netops::close(fds[1]);
 
   EXPECT_EQ(addr0.describe(), "<anonymous unix address>");
   EXPECT_EQ(addr1.describe(), "<anonymous unix address>");
@@ -673,12 +674,9 @@ TEST(SocketAddress, AnonymousUnix) {
   EXPECT_NE(addr0, addr0);
 }
 
-#define REQUIRE_ERRNO(cond, msg)                                   \
-  if (!(cond)) {                                                   \
-    int _requireErrnoCopy_ = errno;                                \
-    std::ostringstream _requireMsg_;                               \
-    _requireMsg_ << (msg) << ": " << strerror(_requireErrnoCopy_); \
-    ADD_FAILURE();                                                 \
+#define REQUIRE_ERRNO(cond, msg)                                \
+  if (!(cond)) {                                                \
+    ADD_FAILURE() << (msg) << ": " << ::folly::errnoStr(errno); \
   }
 
 void testSetFromSocket(
@@ -690,14 +688,16 @@ void testSetFromSocket(
     SocketAddress* serverPeerAddrRet,
     SocketAddress* clientAddrRet,
     SocketAddress* clientPeerAddrRet) {
-  int listenSock = fsp::socket(serverBindAddr->getFamily(), SOCK_STREAM, 0);
-  REQUIRE_ERRNO(listenSock > 0, "failed to create listen socket");
+  auto listenSock = netops::socket(serverBindAddr->getFamily(), SOCK_STREAM, 0);
+  REQUIRE_ERRNO(
+      listenSock != NetworkSocket(), "failed to create listen socket");
   sockaddr_storage laddr;
   serverBindAddr->getAddress(&laddr);
   socklen_t laddrLen = serverBindAddr->getActualSize();
-  int rc = bind(listenSock, reinterpret_cast<sockaddr*>(&laddr), laddrLen);
+  int rc =
+      netops::bind(listenSock, reinterpret_cast<sockaddr*>(&laddr), laddrLen);
   REQUIRE_ERRNO(rc == 0, "failed to bind to server socket");
-  rc = listen(listenSock, 10);
+  rc = netops::listen(listenSock, 10);
   REQUIRE_ERRNO(rc == 0, "failed to listen");
 
   listenAddrRet->setFromLocalAddress(listenSock);
@@ -708,13 +708,14 @@ void testSetFromSocket(
 
   // Note that we use the family from serverBindAddr here, since we allow
   // clientBindAddr to be nullptr.
-  int clientSock = fsp::socket(serverBindAddr->getFamily(), SOCK_STREAM, 0);
-  REQUIRE_ERRNO(clientSock > 0, "failed to create client socket");
+  auto clientSock = netops::socket(serverBindAddr->getFamily(), SOCK_STREAM, 0);
+  REQUIRE_ERRNO(
+      clientSock != NetworkSocket(), "failed to create client socket");
   if (clientBindAddr != nullptr) {
     sockaddr_storage clientAddr;
     clientBindAddr->getAddress(&clientAddr);
 
-    rc = bind(
+    rc = netops::bind(
         clientSock,
         reinterpret_cast<sockaddr*>(&clientAddr),
         clientBindAddr->getActualSize());
@@ -723,7 +724,7 @@ void testSetFromSocket(
 
   sockaddr_storage listenAddr;
   listenAddrRet->getAddress(&listenAddr);
-  rc = connect(
+  rc = netops::connect(
       clientSock,
       reinterpret_cast<sockaddr*>(&listenAddr),
       listenAddrRet->getActualSize());
@@ -731,9 +732,9 @@ void testSetFromSocket(
 
   sockaddr_storage acceptAddr;
   socklen_t acceptAddrLen = sizeof(acceptAddr);
-  int serverSock = accept(
+  auto serverSock = netops::accept(
       listenSock, reinterpret_cast<sockaddr*>(&acceptAddr), &acceptAddrLen);
-  REQUIRE_ERRNO(serverSock > 0, "failed to accept");
+  REQUIRE_ERRNO(serverSock != NetworkSocket(), "failed to accept");
   acceptAddrRet->setFromSockaddr(
       reinterpret_cast<sockaddr*>(&acceptAddr), acceptAddrLen);
 
@@ -742,9 +743,9 @@ void testSetFromSocket(
   clientAddrRet->setFromLocalAddress(clientSock);
   clientPeerAddrRet->setFromPeerAddress(clientSock);
 
-  close(clientSock);
-  close(serverSock);
-  close(listenSock);
+  netops::close(clientSock);
+  netops::close(serverSock);
+  netops::close(listenSock);
 }
 
 TEST(SocketAddress, SetFromSocketIPv4) {

@@ -1,21 +1,17 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- */
-
-/*
- * @author: Marcelo Juchem <marcelo@fb.com>
  */
 
 #include <folly/Memory.h>
@@ -25,7 +21,7 @@
 using namespace folly;
 
 struct global_counter {
-  global_counter(): count_(0) {}
+  global_counter() : count_(0) {}
 
   void increase() { ++count_; }
   void decrease() {
@@ -40,15 +36,11 @@ struct global_counter {
 };
 
 struct Foo {
-  explicit Foo(global_counter& counter):
-    counter_(counter)
-  {
+  explicit Foo(global_counter& counter) : counter_(counter) {
     counter_.increase();
   }
 
-  ~Foo() {
-    counter_.decrease();
-  }
+  ~Foo() { counter_.decrease(); }
 
  private:
   global_counter& counter_;
@@ -82,7 +74,7 @@ void unique_ptr_test(Allocator& allocator) {
     auto p = folly::allocate_unique<Foo>(allocator, counter);
     EXPECT_EQ(counter.count(), 2);
 
-    [&](ptr_type g) {
+    [&counter](ptr_type g) {
       EXPECT_EQ(counter.count(), 2);
       g.reset();
       EXPECT_EQ(counter.count(), 1);
@@ -94,7 +86,7 @@ void unique_ptr_test(Allocator& allocator) {
   EXPECT_EQ(counter.count(), 0);
 }
 
-TEST(ArenaSmartPtr, unique_ptr_SysArena) {
+TEST(ArenaSmartPtr, uniquePtrSysarena) {
   SysArena arena;
   SysArenaAllocator<Foo> alloc(arena);
   unique_ptr_test(alloc);
@@ -135,7 +127,7 @@ void shared_ptr_test(Allocator& allocator) {
     EXPECT_EQ(counter.count(), 1);
     EXPECT_EQ(p.use_count(), 2);
 
-    [&](ptr_type g) {
+    [&counter, &p](ptr_type g) {
       EXPECT_EQ(counter.count(), 1);
       EXPECT_EQ(p.use_count(), 3);
       EXPECT_EQ(g.use_count(), 3);
@@ -155,13 +147,13 @@ void shared_ptr_test(Allocator& allocator) {
   EXPECT_EQ(foo.use_count(), 0);
 }
 
-TEST(ArenaSmartPtr, shared_ptr_SysArena) {
+TEST(ArenaSmartPtr, sharedPtrSysarena) {
   SysArena arena;
   SysArenaAllocator<Foo> alloc(arena);
   shared_ptr_test(alloc);
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,15 +16,16 @@
 
 #include <folly/Conv.h>
 
+#include <array>
+#include <limits>
+#include <stdexcept>
+
 #include <boost/lexical_cast.hpp>
 
 #include <folly/Benchmark.h>
 #include <folly/CppAttributes.h>
 #include <folly/container/Foreach.h>
-
-#include <array>
-#include <limits>
-#include <stdexcept>
+#include <folly/lang/ToAscii.h>
 
 using namespace std;
 using namespace folly;
@@ -260,10 +261,8 @@ void checkArrayIndex(const T& array, size_t index) {
 ////////////////////////////////////////////////////////////////////////////////
 // Benchmarks for ASCII to int conversion
 ////////////////////////////////////////////////////////////////////////////////
-// @author: Rajat Goel (rajat)
 
 static int64_t handwrittenAtoi(const char* start, const char* end) {
-
   bool positive = true;
   int64_t retVal = 0;
 
@@ -278,10 +277,10 @@ static int64_t handwrittenAtoi(const char* start, const char* end) {
   switch (*start) {
     case '-':
       positive = false;
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     case '+':
       ++start;
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     default:
       break;
   }
@@ -305,14 +304,14 @@ static StringPiece pc1 = "1234567890123456789";
 
 void handwrittenAtoiMeasure(unsigned int n, unsigned int digits) {
   auto p = pc1.subpiece(pc1.size() - digits, digits);
-  FOR_EACH_RANGE(i, 0, n) {
+  FOR_EACH_RANGE (i, 0, n) {
     doNotOptimizeAway(handwrittenAtoi(p.begin(), p.end()));
   }
 }
 
 void follyAtoiMeasure(unsigned int n, unsigned int digits) {
   auto p = pc1.subpiece(pc1.size() - digits, digits);
-  FOR_EACH_RANGE(i, 0, n) {
+  FOR_EACH_RANGE (i, 0, n) {
     doNotOptimizeAway(folly::to<int64_t>(p.begin(), p.end()));
   }
 }
@@ -320,13 +319,15 @@ void follyAtoiMeasure(unsigned int n, unsigned int digits) {
 void clibAtoiMeasure(unsigned int n, unsigned int digits) {
   auto p = pc1.subpiece(pc1.size() - digits, digits);
   assert(*p.end() == 0);
-  FOR_EACH_RANGE(i, 0, n) { doNotOptimizeAway(atoll(p.begin())); }
+  FOR_EACH_RANGE (i, 0, n) {
+    doNotOptimizeAway(atoll(p.begin()));
+  }
 }
 
 void lexicalCastMeasure(unsigned int n, unsigned int digits) {
   auto p = pc1.subpiece(pc1.size() - digits, digits);
   assert(*p.end() == 0);
-  FOR_EACH_RANGE(i, 0, n) {
+  FOR_EACH_RANGE (i, 0, n) {
     doNotOptimizeAway(boost::lexical_cast<uint64_t>(p.begin()));
   }
 }
@@ -346,8 +347,8 @@ unsigned u64ToAsciiTable(uint64_t value, char* dst) {
       "80818283848586878889"
       "90919293949596979899";
 
-  uint32_t const length = digits10(value);
-  uint32_t next = length - 1;
+  auto const length = to_ascii_size_decimal(value);
+  auto next = length - 1;
   while (value >= 100) {
     auto const i = (value % 100) * 2;
     value /= 100;
@@ -369,7 +370,7 @@ unsigned u64ToAsciiTable(uint64_t value, char* dst) {
 void u64ToAsciiTableBM(unsigned int n, size_t index) {
   checkArrayIndex(uint64Num, index);
   char buf[20];
-  FOR_EACH_RANGE(i, 0, n) {
+  FOR_EACH_RANGE (i, 0, n) {
     doNotOptimizeAway(u64ToAsciiTable(uint64Num[index] + (i % 8), buf));
   }
 }
@@ -399,7 +400,7 @@ unsigned u64ToAsciiClassic(uint64_t value, char* dst) {
 void u64ToAsciiClassicBM(unsigned int n, size_t index) {
   checkArrayIndex(uint64Num, index);
   char buf[20];
-  FOR_EACH_RANGE(i, 0, n) {
+  FOR_EACH_RANGE (i, 0, n) {
     doNotOptimizeAway(u64ToAsciiClassic(uint64Num[index] + (i % 8), buf));
   }
 }
@@ -407,8 +408,8 @@ void u64ToAsciiClassicBM(unsigned int n, size_t index) {
 void u64ToAsciiFollyBM(unsigned int n, size_t index) {
   checkArrayIndex(uint64Num, index);
   char buf[20];
-  FOR_EACH_RANGE(i, 0, n) {
-    doNotOptimizeAway(uint64ToBufferUnsafe(uint64Num[index] + (i % 8), buf));
+  FOR_EACH_RANGE (i, 0, n) {
+    doNotOptimizeAway(to_ascii_decimal(buf, uint64Num[index] + (i % 8)));
   }
 }
 
@@ -452,7 +453,7 @@ void i64ToStringFollyMeasureNeg(unsigned int n, size_t index) {
 void u2aAppendClassicBM(unsigned int n, size_t index) {
   checkArrayIndex(uint64Num, index);
   string s;
-  FOR_EACH_RANGE(i, 0, n) {
+  FOR_EACH_RANGE (i, 0, n) {
     // auto buf = &s.back() + 1;
     char buffer[20];
     s.append(buffer, u64ToAsciiClassic(uint64Num[index] + (i % 8), buffer));
@@ -463,10 +464,10 @@ void u2aAppendClassicBM(unsigned int n, size_t index) {
 void u2aAppendFollyBM(unsigned int n, size_t index) {
   checkArrayIndex(uint64Num, index);
   string s;
-  FOR_EACH_RANGE(i, 0, n) {
+  FOR_EACH_RANGE (i, 0, n) {
     // auto buf = &s.back() + 1;
     char buffer[20];
-    s.append(buffer, uint64ToBufferUnsafe(uint64Num[index] + (i % 8), buffer));
+    s.append(buffer, to_ascii_decimal(buffer, uint64Num[index] + (i % 8)));
     doNotOptimizeAway(s.size());
   }
 }
@@ -476,8 +477,10 @@ struct StringIdenticalToBM {
   StringIdenticalToBM() {}
   void operator()(unsigned int n, size_t len) const {
     String s;
-    BENCHMARK_SUSPEND { s.append(len, '0'); }
-    FOR_EACH_RANGE(i, 0, n) {
+    BENCHMARK_SUSPEND {
+      s.append(len, '0');
+    }
+    FOR_EACH_RANGE (i, 0, n) {
       String result = to<String>(s);
       doNotOptimizeAway(result.size());
     }
@@ -489,8 +492,10 @@ struct StringVariadicToBM {
   StringVariadicToBM() {}
   void operator()(unsigned int n, size_t len) const {
     String s;
-    BENCHMARK_SUSPEND { s.append(len, '0'); }
-    FOR_EACH_RANGE(i, 0, n) {
+    BENCHMARK_SUSPEND {
+      s.append(len, '0');
+    }
+    FOR_EACH_RANGE (i, 0, n) {
       String result = to<String>(s, nullptr);
       doNotOptimizeAway(result.size());
     }
@@ -591,73 +596,77 @@ uint64_t u64s[] = {
 
 BENCHMARK(preallocateTestInt8, n) {
   for (size_t i = 0; i < n; ++i) {
-    doNotOptimizeAway(to<std::string>(
-                          i8s[0],
-                          ',',
-                          u8s[0],
-                          ',',
-                          i8s[1],
-                          ',',
-                          u8s[1],
-                          ',',
-                          i8s[2],
-                          ',',
-                          u8s[2])
-                          .size());
+    doNotOptimizeAway(
+        to<std::string>(
+            i8s[0],
+            ',',
+            u8s[0],
+            ',',
+            i8s[1],
+            ',',
+            u8s[1],
+            ',',
+            i8s[2],
+            ',',
+            u8s[2])
+            .size());
   }
 }
 
 BENCHMARK(preallocateTestInt16, n) {
   for (size_t i = 0; i < n; ++i) {
-    doNotOptimizeAway(to<std::string>(
-                          i16s[0],
-                          ',',
-                          u16s[0],
-                          ',',
-                          i16s[1],
-                          ',',
-                          u16s[1],
-                          ',',
-                          i16s[2],
-                          ',',
-                          u16s[2])
-                          .size());
+    doNotOptimizeAway(
+        to<std::string>(
+            i16s[0],
+            ',',
+            u16s[0],
+            ',',
+            i16s[1],
+            ',',
+            u16s[1],
+            ',',
+            i16s[2],
+            ',',
+            u16s[2])
+            .size());
   }
 }
 
 BENCHMARK(preallocateTestInt32, n) {
   for (size_t i = 0; i < n; ++i) {
-    doNotOptimizeAway(to<std::string>(
-                          i32s[0],
-                          ',',
-                          u32s[0],
-                          ',',
-                          i32s[1],
-                          ',',
-                          u32s[1],
-                          ',',
-                          i32s[2],
-                          ',',
-                          u32s[2])
-                          .size());
+    doNotOptimizeAway(
+        to<std::string>(
+            i32s[0],
+            ',',
+            u32s[0],
+            ',',
+            i32s[1],
+            ',',
+            u32s[1],
+            ',',
+            i32s[2],
+            ',',
+            u32s[2])
+            .size());
   }
 }
 
 BENCHMARK(preallocateTestInt64, n) {
   for (size_t i = 0; i < n; ++i) {
-    doNotOptimizeAway(to<std::string>(
-                          i64s[0],
-                          ',',
-                          u64s[0],
-                          ',',
-                          i64s[1],
-                          ',',
-                          u64s[1],
-                          ',',
-                          i64s[2],
-                          ',',
-                          u64s[2])
-                          .size());
+    doNotOptimizeAway(
+        to<std::string>(
+            i64s[0],
+            ',',
+            u64s[0],
+            ',',
+            i64s[1],
+            ',',
+            u64s[1],
+            ',',
+            i64s[2],
+            ',',
+            u64s[2])
+            .size());
   }
 }
 
@@ -679,19 +688,20 @@ unsigned __int128 u128s[] = {
 
 BENCHMARK(preallocateTestInt128, n) {
   for (size_t i = 0; i < n; ++i) {
-    doNotOptimizeAway(to<std::string>(
-                          i128s[0],
-                          ',',
-                          u128s[0],
-                          ',',
-                          i128s[1],
-                          ',',
-                          u128s[1],
-                          ',',
-                          i128s[2],
-                          ',',
-                          u128s[2])
-                          .size());
+    doNotOptimizeAway(
+        to<std::string>(
+            i128s[0],
+            ',',
+            u128s[0],
+            ',',
+            i128s[1],
+            ',',
+            u128s[1],
+            ',',
+            i128s[2],
+            ',',
+            u128s[2])
+            .size());
   }
 }
 
@@ -1081,20 +1091,14 @@ STRING_TO_TYPE_BENCHMARK(
     " -8123456789123456789 ",
     "-10000000000000000000000")
 STRING_TO_TYPE_BENCHMARK(
-    unsigned long long,
-    LongLongUnsigned,
-    " 18123456789123456789 ",
-    "-4711")
+    unsigned long long, LongLongUnsigned, " 18123456789123456789 ", "-4711")
 BENCHMARK_DRAW_LINE();
 
 PTR_PAIR_TO_INT_BENCHMARK(signed char, CharSigned, "-47", "1000")
 PTR_PAIR_TO_INT_BENCHMARK(unsigned char, CharUnsigned, "47", "1000")
 PTR_PAIR_TO_INT_BENCHMARK(int, IntSigned, "-4711", "-10000000000000000000000")
 PTR_PAIR_TO_INT_BENCHMARK(
-    unsigned int,
-    IntUnsigned,
-    "4711",
-    "10000000000000000000000")
+    unsigned int, IntUnsigned, "4711", "10000000000000000000000")
 PTR_PAIR_TO_INT_BENCHMARK(
     long long,
     LongLongSigned,
@@ -1125,7 +1129,7 @@ FLOAT_TO_ARITH_BENCHMARK(int, Int, double2IntGood, double2IntBad)
 #undef FLOAT_TO_ARITH_BENCHMARK
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

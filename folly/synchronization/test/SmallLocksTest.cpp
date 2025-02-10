@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,9 +16,12 @@
 
 #include <folly/synchronization/SmallLocks.h>
 
+#include <atomic>
 #include <cassert>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -28,18 +31,20 @@
 
 #include <folly/Random.h>
 #include <folly/portability/Asm.h>
+#include <folly/portability/GFlags.h>
+#include <folly/portability/GMock.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/PThread.h>
 #include <folly/portability/Unistd.h>
+#include <folly/test/TestUtils.h>
 
-using folly::MSLGuard;
 using folly::MicroLock;
 using folly::MicroSpinLock;
-using std::string;
-
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
+using folly::MSLGuard;
 using folly::PicoSpinLock;
-#endif
+
+DEFINE_int64(
+    stress_test_seconds, 2, "Number of seconds for which to run stress tests");
 
 namespace {
 
@@ -56,36 +61,36 @@ struct LockedVal {
 // Compile time test for packed struct support (requires that both of
 // these classes are POD).
 FOLLY_PACK_PUSH
-struct ignore1 { MicroSpinLock msl; int16_t foo; } FOLLY_PACK_ATTR;
+struct ignore1 {
+  MicroSpinLock msl;
+  int16_t foo;
+} FOLLY_PACK_ATTR;
 static_assert(sizeof(ignore1) == 3, "Size check failed");
 static_assert(sizeof(MicroSpinLock) == 1, "Size check failed");
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
-struct ignore2 { PicoSpinLock<uint32_t> psl; int16_t foo; } FOLLY_PACK_ATTR;
-static_assert(sizeof(ignore2) == 6, "Size check failed");
-#endif
+struct ignore2 {
+  PicoSpinLock<uint32_t> psl;
+  int16_t foo;
+} FOLLY_PACK_ATTR;
+static_assert(folly::kMscVer || sizeof(ignore2) == 6, "Size check failed");
 FOLLY_PACK_POP
 
 LockedVal v;
-void splock_test() {
-
-  const int max = 1000;
+void splock_test(std::atomic<bool>* go) {
+  CHECK(go);
   auto rng = folly::ThreadLocalPRNG();
-  for (int i = 0; i < max; i++) {
+  while (go->load(std::memory_order_relaxed)) {
     folly::asm_volatile_pause();
     MSLGuard g(v.lock);
 
-    int first = v.ar[0];
-    for (size_t j = 1; j < sizeof v.ar / sizeof j; ++j) {
-      EXPECT_EQ(first, v.ar[j]);
-    }
+    EXPECT_THAT(v.ar, testing::Each(testing::Eq(v.ar[0])));
 
     int byte = folly::Random::rand32(rng);
     memset(v.ar, char(byte), sizeof v.ar);
   }
 }
 
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
-template <class T> struct PslTest {
+template <class T>
+struct PslTest {
   PicoSpinLock<T> lock;
 
   PslTest() { lock.init(); }
@@ -117,12 +122,9 @@ void doPslTest() {
     t.join();
   }
 }
-#endif
 
 struct TestClobber {
-  TestClobber() {
-    lock_.init();
-  }
+  TestClobber() { lock_.init(); }
 
   void go() {
     std::lock_guard<MicroSpinLock> g(lock_);
@@ -140,17 +142,19 @@ struct TestClobber {
 TEST(SmallLocks, SpinLockCorrectness) {
   EXPECT_EQ(sizeof(MicroSpinLock), 1);
 
+  std::atomic<bool> go = true;
   int nthrs = sysconf(_SC_NPROCESSORS_ONLN) * 2;
   std::vector<std::thread> threads;
   for (int i = 0; i < nthrs; ++i) {
-    threads.push_back(std::thread(splock_test));
+    threads.push_back(std::thread(splock_test, &go));
   }
+  /* sleep override */ std::this_thread::sleep_for(std::chrono::seconds(1));
+  go.store(false, std::memory_order_relaxed);
   for (auto& t : threads) {
     t.join();
   }
 }
 
-#ifdef FOLLY_PICO_SPIN_LOCK_H_
 TEST(SmallLocks, PicoSpinCorrectness) {
   doPslTest<int16_t>();
   doPslTest<uint16_t>();
@@ -161,7 +165,7 @@ TEST(SmallLocks, PicoSpinCorrectness) {
 }
 
 TEST(SmallLocks, PicoSpinSigned) {
-  typedef PicoSpinLock<int16_t,0> Lock;
+  typedef PicoSpinLock<int16_t, 0> Lock;
   Lock val;
   val.init(-4);
   EXPECT_EQ(val.getData(), -4);
@@ -174,25 +178,44 @@ TEST(SmallLocks, PicoSpinSigned) {
   }
   EXPECT_EQ(val.getData(), -8);
 }
-#endif
+
+TEST(SmallLocks, PicoSpinLockThreadSanitizer) {
+  SKIP_IF(!folly::kIsSanitizeThread) << "Enabled in TSAN mode only";
+
+  typedef PicoSpinLock<int16_t, 0> Lock;
+
+  {
+    Lock a;
+    Lock b;
+    a.init(-8);
+    b.init(-8);
+    {
+      std::lock_guard<Lock> ga(a);
+      std::lock_guard<Lock> gb(b);
+    }
+    {
+      std::lock_guard<Lock> gb(b);
+      EXPECT_DEATH(
+          [&]() {
+            std::lock_guard<Lock> ga(a);
+            // If halt_on_error is turned off for TSAN, then death would
+            // happen on exit, so give that a chance as well.
+            std::_Exit(1);
+          }(),
+          "Cycle in lock order graph");
+    }
+  }
+}
 
 TEST(SmallLocks, RegClobber) {
   TestClobber().go();
 }
 
-FOLLY_PACK_PUSH
-#if defined(__SANITIZE_ADDRESS__) && !defined(__clang__) && \
-    (defined(__GNUC__) || defined(__GNUG__))
-static_assert(sizeof(MicroLock) == 4, "Size check failed");
-#else
 static_assert(sizeof(MicroLock) == 1, "Size check failed");
-#endif
-FOLLY_PACK_POP
 
 namespace {
 
 struct SimpleBarrier {
-
   SimpleBarrier() : lock_(), cv_(), ready_(false) {}
 
   void wait() {
@@ -219,13 +242,11 @@ struct SimpleBarrier {
 } // namespace
 
 TEST(SmallLocks, MicroLock) {
-  volatile uint64_t counters[4] = {0, 0, 0, 0};
+  volatile uint64_t counter = 0;
   std::vector<std::thread> threads;
   static const unsigned nrThreads = 20;
   static const unsigned iterPerThread = 10000;
   SimpleBarrier startBarrier;
-
-  assert(iterPerThread % 4 == 0);
 
   // Embed the lock in a larger structure to ensure that we do not
   // affect bits outside the ones MicroLock is defined to affect.
@@ -241,7 +262,6 @@ TEST(SmallLocks, MicroLock) {
 
   x.a = 'a';
   x.b = origB;
-  x.alock.init();
   x.d = origD;
 
   // This thread touches other parts of the host word to show that
@@ -262,16 +282,15 @@ TEST(SmallLocks, MicroLock) {
     threads.emplace_back([&] {
       startBarrier.wait();
       for (unsigned iter = 0; iter < iterPerThread; ++iter) {
-        unsigned slotNo = iter % 4;
-        x.alock.lock(slotNo);
-        counters[slotNo] += 1;
+        x.alock.lock();
+        counter += 1;
         // The occasional sleep makes it more likely that we'll
         // exercise the futex-wait path inside MicroLock.
         if (iter % 1000 == 0) {
           struct timespec ts = {0, 10000};
           (void)nanosleep(&ts, nullptr);
         }
-        x.alock.unlock(slotNo);
+        x.alock.unlock();
       }
     });
   }
@@ -287,15 +306,205 @@ TEST(SmallLocks, MicroLock) {
   EXPECT_EQ(x.a, 'a');
   EXPECT_EQ(x.b, (uint8_t)(origB + iterPerThread / 2));
   EXPECT_EQ(x.d, (uint8_t)(origD + iterPerThread / 2));
-  for (unsigned i = 0; i < 4; ++i) {
-    EXPECT_EQ(counters[i], ((uint64_t)nrThreads * iterPerThread) / 4);
-  }
+  EXPECT_EQ(counter, ((uint64_t)nrThreads * iterPerThread));
 }
 
 TEST(SmallLocks, MicroLockTryLock) {
   MicroLock lock;
-  lock.init();
   EXPECT_TRUE(lock.try_lock());
   EXPECT_FALSE(lock.try_lock());
   lock.unlock();
+}
+
+TEST(SmallLocks, MicroLockWithData) {
+  MicroLock lock;
+  EXPECT_EQ(lock.load(std::memory_order_relaxed), 0);
+
+  EXPECT_EQ(lock.lockAndLoad(), 0);
+  lock.unlockAndStore(42);
+  EXPECT_EQ(lock.load(std::memory_order_relaxed), 42);
+
+  EXPECT_EQ(lock.lockAndLoad(), 42);
+  lock.unlock();
+  EXPECT_EQ(lock.load(std::memory_order_relaxed), 42);
+
+  lock.store(12, std::memory_order_relaxed);
+  {
+    MicroLock::LockGuardWithData guard{lock};
+    EXPECT_EQ(guard.loadedValue(), 12);
+    EXPECT_EQ(lock.load(std::memory_order_relaxed), 12);
+    guard.storeValue(24);
+    // Should not have immediate effect
+    EXPECT_EQ(guard.loadedValue(), 12);
+    EXPECT_EQ(lock.load(std::memory_order_relaxed), 12);
+  }
+  EXPECT_EQ(lock.load(std::memory_order_relaxed), 24);
+
+  // Drop the two most significant bits
+  lock.lock();
+  lock.unlockAndStore(0b10011001);
+  EXPECT_EQ(lock.load(std::memory_order_relaxed), 0b00011001);
+  lock.store(0b11101110, std::memory_order_relaxed);
+  EXPECT_EQ(lock.load(std::memory_order_relaxed), 0b00101110);
+}
+
+TEST(SmallLocks, MicroLockDataAlignment) {
+  struct alignas(uint32_t) Thing {
+    uint8_t padding1[2];
+    MicroLock lock;
+    uint8_t padding2;
+  } thing;
+  auto& lock = thing.lock;
+
+  EXPECT_EQ(lock.lockAndLoad(), 0);
+  lock.unlockAndStore(60);
+  EXPECT_EQ(lock.load(std::memory_order_relaxed), 60);
+}
+
+namespace {
+template <typename Mutex, typename Duration>
+void simpleStressTest(Duration duration, int numThreads) {
+  auto&& mutex = Mutex{};
+  auto&& data = std::atomic<std::uint64_t>{0};
+  auto&& threads = std::vector<std::thread>{};
+  auto&& stop = std::atomic<bool>{true};
+
+  for (auto i = 0; i < numThreads; ++i) {
+    threads.emplace_back([&mutex, &data, &stop] {
+      while (!stop.load(std::memory_order_relaxed)) {
+        auto lck = std::unique_lock<Mutex>{mutex};
+        EXPECT_EQ(data.fetch_add(1, std::memory_order_relaxed), 0);
+        EXPECT_EQ(data.fetch_sub(1, std::memory_order_relaxed), 1);
+      }
+    });
+  }
+
+  std::this_thread::sleep_for(duration);
+  stop.store(true);
+  for (auto& thread : threads) {
+    thread.join();
+  }
+}
+} // namespace
+
+TEST(SmallLocks, MicroSpinLockStressTestLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTest<MicroSpinLock>(duration, 2);
+}
+
+TEST(SmallLocks, MicroSpinLockStressTestLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTest<MicroSpinLock>(duration, threads);
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTest<PicoSpinLock<std::uint16_t>>(duration, 2);
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTest<PicoSpinLock<std::uint16_t>>(duration, threads);
+}
+
+namespace {
+template <typename Mutex>
+class MutexWrapper {
+ public:
+  void lock() {
+    while (!mutex_.try_lock()) {
+    }
+  }
+  void unlock() { mutex_.unlock(); }
+
+  Mutex mutex_;
+};
+
+template <typename Mutex, typename Duration>
+void simpleStressTestTryLock(Duration duration, int numThreads) {
+  simpleStressTest<MutexWrapper<Mutex>>(duration, numThreads);
+}
+} // namespace
+
+TEST(SmallLocks, MicroSpinLockStressTestTryLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTestTryLock<MicroSpinLock>(duration, 2);
+}
+
+TEST(SmallLocks, MicroSpinLockStressTestTryLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTestTryLock<MicroSpinLock>(duration, threads);
+}
+
+TEST(SmallLocksk, MicroSpinLockThreadSanitizer) {
+  SKIP_IF(!folly::kIsSanitizeThread) << "Enabled in TSAN mode only";
+
+  uint8_t val = 0;
+  static_assert(sizeof(uint8_t) == sizeof(MicroSpinLock), "sanity check");
+  // make sure TSAN handles this case too:
+  // same lock but initialized via setting a value
+  for (int i = 0; i < 10; i++) {
+    val = 0;
+    std::lock_guard<MicroSpinLock> g(*reinterpret_cast<MicroSpinLock*>(&val));
+  }
+
+  {
+    MicroSpinLock a;
+    MicroSpinLock b;
+    a.init();
+    b.init();
+    {
+      std::lock_guard<MicroSpinLock> ga(a);
+      std::lock_guard<MicroSpinLock> gb(b);
+    }
+    {
+      std::lock_guard<MicroSpinLock> gb(b);
+      EXPECT_DEATH(
+          [&]() {
+            std::lock_guard<MicroSpinLock> ga(a);
+            // If halt_on_error is turned off for TSAN, then death would
+            // happen on exit, so give that a chance as well.
+            std::_Exit(1);
+          }(),
+          "Cycle in lock order graph");
+    }
+  }
+
+  {
+    uint8_t a = 0;
+    uint8_t b = 0;
+    {
+      std::lock_guard<MicroSpinLock> ga(*reinterpret_cast<MicroSpinLock*>(&a));
+      std::lock_guard<MicroSpinLock> gb(*reinterpret_cast<MicroSpinLock*>(&b));
+    }
+
+    a = 0;
+    b = 0;
+    {
+      std::lock_guard<MicroSpinLock> gb(*reinterpret_cast<MicroSpinLock*>(&b));
+      EXPECT_DEATH(
+          [&]() {
+            std::lock_guard<MicroSpinLock> ga(
+                *reinterpret_cast<MicroSpinLock*>(&a));
+            // If halt_on_error is turned off for TSAN, then death would
+            // happen on exit, so give that a chance as well.
+            std::_Exit(1);
+          }(),
+          "Cycle in lock order graph");
+    }
+  }
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestTryLockTwoThreads) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  simpleStressTestTryLock<PicoSpinLock<std::uint16_t>>(duration, 2);
+}
+
+TEST(SmallLocks, PicoSpinLockStressTestTryLockHardwareConcurrency) {
+  auto duration = std::chrono::seconds{FLAGS_stress_test_seconds};
+  auto threads = std::thread::hardware_concurrency();
+  simpleStressTestTryLock<PicoSpinLock<std::uint16_t>>(duration, threads);
 }

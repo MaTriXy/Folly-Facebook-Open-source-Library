@@ -1,3 +1,17 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 function(auto_sources RETURN_VALUE PATTERN SOURCE_SUBDIRS)
   if ("${SOURCE_SUBDIRS}" STREQUAL "RECURSE")
     SET(PATH ".")
@@ -174,21 +188,25 @@ function(folly_define_tests)
       while (currentArg LESS ${ARGC})
         if ("x${ARGV${currentArg}}" STREQUAL "xDIRECTORY")
           break()
-        elseif ("x${ARGV${currentArg}}" STREQUAL "xTEST")
+        elseif ("x${ARGV${currentArg}}" STREQUAL "xTEST" OR
+                "x${ARGV${currentArg}}" STREQUAL "xBENCHMARK")
+          set(cur_test ${test_count})
+          math(EXPR test_count "${test_count} + 1")
+
+          set(test_${cur_test}_is_benchmark $<STREQUAL:"x${ARGV${currentArg}}","xBENCHMARK">)
+
           math(EXPR currentArg "${currentArg} + 1")
           if (NOT currentArg LESS ${ARGC})
             message(FATAL_ERROR "Expected test name!")
           endif()
 
-          set(cur_test ${test_count})
-          math(EXPR test_count "${test_count} + 1")
           set(test_${cur_test}_name "${ARGV${currentArg}}")
           math(EXPR currentArg "${currentArg} + 1")
           set(test_${cur_test}_directory ${cur_dir})
           set(test_${cur_test}_content_dir)
           set(test_${cur_test}_headers)
           set(test_${cur_test}_sources)
-          set(test_${cur_test}_tag "NONE")
+          set(test_${cur_test}_tag)
 
           set(argumentState 0)
           while (currentArg LESS ${ARGC})
@@ -203,15 +221,20 @@ function(folly_define_tests)
               endif()
               set(test_${cur_test}_content_dir "${ARGV${currentArg}}")
             elseif ("x${ARGV${currentArg}}" STREQUAL "xTEST" OR
+                    "x${ARGV${currentArg}}" STREQUAL "xBENCHMARK" OR
                     "x${ARGV${currentArg}}" STREQUAL "xDIRECTORY")
               break()
             elseif (argumentState EQUAL 0)
               if ("x${ARGV${currentArg}}" STREQUAL "xBROKEN")
-                set(test_${cur_test}_tag "BROKEN")
+                list(APPEND test_${cur_test}_tag "BROKEN")
               elseif ("x${ARGV${currentArg}}" STREQUAL "xHANGING")
-                set(test_${cur_test}_tag "HANGING")
+                list(APPEND test_${cur_test}_tag "HANGING")
               elseif ("x${ARGV${currentArg}}" STREQUAL "xSLOW")
-                set(test_${cur_test}_tag "SLOW")
+                list(APPEND test_${cur_test}_tag "SLOW")
+              elseif ("x${ARGV${currentArg}}" STREQUAL "xWINDOWS_DISABLED")
+                list(APPEND test_${cur_test}_tag "WINDOWS_DISABLED")
+              elseif ("x${ARGV${currentArg}}" STREQUAL "xAPPLE_DISABLED")
+                list(APPEND test_${cur_test}_tag "APPLE_DISABLED")
               else()
                 message(FATAL_ERROR "Unknown test tag '${ARGV${currentArg}}'!")
               endif()
@@ -248,33 +271,43 @@ function(folly_define_tests)
 
   set(cur_test 0)
   while (cur_test LESS test_count)
-    if ("x${test_${cur_test}_tag}" STREQUAL "xNONE" OR
-        ("x${test_${cur_test}_tag}" STREQUAL "xBROKEN" AND BUILD_BROKEN_TESTS) OR
-        ("x${test_${cur_test}_tag}" STREQUAL "xSLOW" AND BUILD_SLOW_TESTS) OR
-        ("x${test_${cur_test}_tag}" STREQUAL "xHANGING" AND BUILD_HANGING_TESTS)
-    )
-      set(cur_test_name ${test_${cur_test}_name})
-      set(cur_dir_name ${directory_${test_${cur_test}_directory}_name})
+    set(cur_test_name ${test_${cur_test}_name})
+    set(cur_dir_name ${directory_${test_${cur_test}_directory}_name})
+    if ("BROKEN" IN_LIST test_${cur_test}_tag AND NOT BUILD_BROKEN_TESTS)
+      message("Skipping broken test ${cur_dir_name}${cur_test_name}, enable with BUILD_BROKEN_TESTS")
+    elseif ("SLOW" IN_LIST test_${cur_test}_tag AND NOT BUILD_SLOW_TESTS)
+      message("Skipping slow test ${cur_dir_name}${cur_test_name}, enable with BUILD_SLOW_TESTS")
+    elseif ("HANGING" IN_LIST test_${cur_test}_tag AND NOT BUILD_HANGING_TESTS)
+      message("Skipping hanging test ${cur_dir_name}${cur_test_name}, enable with BUILD_HANGING_TESTS")
+    elseif ("WINDOWS_DISABLED" IN_LIST test_${cur_test}_tag AND WIN32 AND NOT BUILD_WINDOWS_DISABLED)
+      message("Skipping windows disabled test ${cur_dir_name}${cur_test_name}, enable with BUILD_WINDOWS_DISABLED")
+    elseif ("APPLE_DISABLED" IN_LIST test_${cur_test}_tag AND APPLE AND NOT BUILD_APPLE_DISABLED)
+      message("Skipping apple disabled test ${cur_dir_name}${cur_test_name}, enable with BUILD_APPLE_DISABLED")
+    elseif (${test_${cur_test}_is_benchmark} AND NOT BUILD_BENCHMARKS)
+      message("Skipping benchmark ${cur_dir_name}${cur_test_name}, enable with BUILD_BENCHMARKS")
+    else()
       add_executable(${cur_test_name}
         ${test_${cur_test}_headers}
         ${test_${cur_test}_sources}
       )
-      if (HAVE_CMAKE_GTEST)
-        # If we have CMake's built-in gtest support use it to add each test
-        # function as a separate test.
-        gtest_add_tests(TARGET ${cur_test_name}
-                        WORKING_DIRECTORY "${TOP_DIR}"
-                        TEST_PREFIX "${cur_test_name}."
-                        TEST_LIST test_cases)
-        set_tests_properties(${test_cases} PROPERTIES TIMEOUT 120)
-      else()
-        # Otherwise add each test executable as a single test.
-        add_test(
-          NAME ${cur_test_name}
-          COMMAND ${cur_test_name}
-          WORKING_DIRECTORY "${TOP_DIR}"
-        )
-        set_tests_properties(${cur_test_name} PROPERTIES TIMEOUT 120)
+      if (NOT ${test_${cur_test}_is_benchmark})
+        if (HAVE_CMAKE_GTEST)
+          # If we have CMake's built-in gtest support use it to add each test
+          # function as a separate test.
+          gtest_add_tests(TARGET ${cur_test_name}
+                          WORKING_DIRECTORY "${TOP_DIR}"
+                          TEST_PREFIX "${cur_test_name}."
+                          TEST_LIST test_cases)
+          set_tests_properties(${test_cases} PROPERTIES TIMEOUT 120)
+        else()
+          # Otherwise add each test executable as a single test.
+          add_test(
+            NAME ${cur_test_name}
+            COMMAND ${cur_test_name}
+            WORKING_DIRECTORY "${TOP_DIR}"
+          )
+          set_tests_properties(${cur_test_name} PROPERTIES TIMEOUT 120)
+        endif()
       endif()
       if (NOT "x${test_${cur_test}_content_dir}" STREQUAL "x")
         # Copy the content directory to the output directory tree so that

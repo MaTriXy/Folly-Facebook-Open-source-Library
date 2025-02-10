@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,7 +44,7 @@ class ThreadCachedArena {
 
   void* allocate(size_t size) {
     SysArena* arena = arena_.get();
-    if (UNLIKELY(!arena)) {
+    if (FOLLY_UNLIKELY(!arena)) {
       arena = allocateThreadLocalArena();
     }
 
@@ -75,7 +75,7 @@ class ThreadCachedArena {
   const size_t minBlockSize_;
   const size_t maxAlign_;
 
-  ThreadLocalPtr<SysArena, ThreadLocalPtrTag> arena_;  // Per-thread arena.
+  ThreadLocalPtr<SysArena, ThreadLocalPtrTag> arena_; // Per-thread arena.
 
   // Allocations from threads that are now dead.
   Synchronized<SysArena> zombies_;

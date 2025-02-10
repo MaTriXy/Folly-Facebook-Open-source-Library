@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,19 +14,15 @@
  * limitations under the License.
  */
 
-// @author Tudor Bosman (tudorb@fb.com)
+#include <folly/lang/Bits.h>
 
 #include <algorithm>
 #include <vector>
 
+#include <folly/Benchmark.h>
 #include <folly/CppAttributes.h>
 #include <folly/Random.h>
 #include <folly/lang/Assume.h>
-#include <folly/lang/Bits.h>
-
-#include <folly/Benchmark.h>
-
-using namespace folly;
 
 BENCHMARK(nextPowTwoClz, iters) {
   for (unsigned long i = 0; i < iters; ++i) {
@@ -62,8 +58,9 @@ void testPartialLoadUnaligned(F f, size_t iters) {
   std::vector<char> buf;
   BENCHMARK_SUSPEND {
     buf.resize(kBufSize + 7); // Allow unguarded tail reads.
-    std::generate(
-        buf.begin(), buf.end(), [] { return folly::Random::rand32(255); });
+    std::generate(buf.begin(), buf.end(), [] {
+      return folly::Random::rand32(255);
+    });
   }
 
   uint64_t ret = 0;
@@ -88,17 +85,17 @@ uint64_t partialLoadUnalignedSwitch(const char* p, size_t l) {
   switch (l) {
     case 7:
       r = static_cast<uint64_t>(folly::loadUnaligned<uint32_t>(p + 3)) << 24;
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     case 3:
       r |= static_cast<uint64_t>(folly::loadUnaligned<uint16_t>(p + 1)) << 8;
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     case 1:
       r |= *p;
       break;
 
     case 6:
       r = static_cast<uint64_t>(folly::loadUnaligned<uint16_t>(p + 4)) << 32;
-      FOLLY_FALLTHROUGH;
+      [[fallthrough]];
     case 4:
       r |= folly::loadUnaligned<uint32_t>(p);
       break;
@@ -144,7 +141,7 @@ BENCHMARK(PartialLoadUnalignedSwitch, iters) {
 }
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

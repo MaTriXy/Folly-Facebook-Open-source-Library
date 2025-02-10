@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,13 +15,17 @@
  */
 
 #include <folly/futures/Barrier.h>
-#include <folly/lang/Exception.h>
 
-namespace folly { namespace futures {
+#include <glog/logging.h>
+
+#include <folly/ScopeGuard.h>
+#include <folly/lang/New.h>
+
+namespace folly {
+namespace futures {
 
 Barrier::Barrier(uint32_t n)
-  : size_(n),
-    controlBlock_(allocateControlBlock()) { }
+    : size_(n), controlBlock_(allocateControlBlock()) {}
 
 Barrier::~Barrier() {
   auto block = controlBlock_.load(std::memory_order_relaxed);
@@ -39,24 +43,22 @@ Barrier::~Barrier() {
 }
 
 auto Barrier::allocateControlBlock() -> ControlBlock* {
-  auto storage = malloc(controlBlockSize(size_));
-  if (!storage) {
-    throw_exception<std::bad_alloc>();
-  }
+  auto storage = operator_new(
+      controlBlockSize(size_),
+      std::align_val_t(alignof(ControlBlockAndPromise)));
   auto block = ::new (storage) ControlBlock();
 
   auto p = promises(block);
   uint32_t i = 0;
-  try {
-    for (i = 0; i < size_; ++i) {
-      new (p + i) BoolPromise();
-    }
-  } catch (...) {
+  auto rollback = makeGuard([&] {
     for (; i != 0; --i) {
       p[i - 1].~BoolPromise();
     }
-    throw;
+  });
+  for (i = 0; i < size_; ++i) {
+    ::new (p + i) BoolPromise();
   }
+  rollback.dismiss();
 
   return block;
 }
@@ -66,7 +68,10 @@ void Barrier::freeControlBlock(ControlBlock* block) {
   for (uint32_t i = size_; i != 0; --i) {
     p[i - 1].~BoolPromise();
   }
-  free(block);
+  operator_delete(
+      block,
+      controlBlockSize(size_),
+      std::align_val_t(alignof(ControlBlockAndPromise)));
 }
 
 folly::Future<bool> Barrier::wait() {
@@ -78,8 +83,8 @@ folly::Future<bool> Barrier::wait() {
 
   // Bump the value and record ourselves as reader.
   // This ensures that block stays allocated, as the reader count is > 0.
-  auto prev = block->valueAndReaderCount.fetch_add(kReader + 1,
-                                                   std::memory_order_acquire);
+  auto prev = block->valueAndReaderCount.fetch_add(
+      kReader + 1, std::memory_order_acquire);
 
   auto prevValue = static_cast<uint32_t>(prev & kValueMask);
   DCHECK_LT(prevValue, size_);
@@ -97,8 +102,8 @@ folly::Future<bool> Barrier::wait() {
   }
 
   // Free the control block if we're the last reader at max value.
-  prev = block->valueAndReaderCount.fetch_sub(kReader,
-                                              std::memory_order_acq_rel);
+  prev =
+      block->valueAndReaderCount.fetch_sub(kReader, std::memory_order_acq_rel);
   if (prev == (kReader | uint64_t(size_))) {
     freeControlBlock(block);
   }

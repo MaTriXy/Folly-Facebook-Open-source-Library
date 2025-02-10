@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,10 @@
 #include <thread>
 
 #include <folly/Benchmark.h>
-#include <folly/portability/Semaphore.h>
+#include <folly/synchronization/NativeSemaphore.h>
 #include <folly/synchronization/test/BatonTestHelpers.h>
 #include <folly/test/DeterministicSchedule.h>
 
-using namespace folly;
 using namespace folly::test;
 using folly::detail::EmulatedFutexAtomic;
 
@@ -47,22 +46,21 @@ BENCHMARK(baton_pingpong_emulated_futex_nonblocking, iters) {
 
 BENCHMARK_DRAW_LINE();
 
-BENCHMARK(posix_sem_pingpong, iters) {
-  sem_t sems[3];
-  sem_t* a = sems + 0;
-  sem_t* b = sems + 2; // to get it on a different cache line
+BENCHMARK(native_sem_pingpong, iters) {
+  alignas(folly::hardware_destructive_interference_size)
+      folly::NativeSemaphore a;
+  alignas(folly::hardware_destructive_interference_size)
+      folly::NativeSemaphore b;
 
-  sem_init(a, 0, 0);
-  sem_init(b, 0, 0);
-  auto thr = std::thread([=] {
+  auto thr = std::thread([&] {
     for (size_t i = 0; i < iters; ++i) {
-      sem_wait(a);
-      sem_post(b);
+      a.wait();
+      b.post();
     }
   });
   for (size_t i = 0; i < iters; ++i) {
-    sem_post(a);
-    sem_wait(b);
+    a.post();
+    b.wait();
   }
   thr.join();
 }
@@ -73,7 +71,7 @@ BENCHMARK(posix_sem_pingpong, iters) {
 // to the required futex calls for the blocking case
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

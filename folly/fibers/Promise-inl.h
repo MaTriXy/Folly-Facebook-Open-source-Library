@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/fibers/Baton.h>
 
 namespace folly {
@@ -91,7 +92,8 @@ void Promise<T, BatonT>::setWith(F&& func) {
 
 template <class T, class BatonT>
 template <class F>
-typename Promise<T, BatonT>::value_type Promise<T, BatonT>::await(F&& func) {
+typename Promise<T, BatonT>::value_type Promise<T, BatonT>::await_async(
+    F&& func) {
   folly::Try<value_type> result;
   std::exception_ptr funcException;
 
@@ -102,11 +104,11 @@ typename Promise<T, BatonT>::value_type Promise<T, BatonT>::await(F&& func) {
     } catch (...) {
       // Save the exception, but still wait for baton to be posted by user code
       // or promise destructor.
-      funcException = std::current_exception();
+      funcException = current_exception();
     }
   });
 
-  if (UNLIKELY(funcException != nullptr)) {
+  if (FOLLY_UNLIKELY(funcException != nullptr)) {
     std::rethrow_exception(funcException);
   }
 

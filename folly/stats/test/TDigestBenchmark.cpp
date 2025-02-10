@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <folly/stats/DigestBuilder.h>
 #include <folly/stats/TDigest.h>
 
 #include <algorithm>
@@ -23,6 +25,51 @@
 #include <folly/portability/GFlags.h>
 
 using folly::TDigest;
+
+void addValueMultithreaded(unsigned int iters, size_t nThreads) {
+  // This is a rather huge buffer size because it will allocate over 8k bytes
+  // per CPU. However, it seems to be the typical size used by ODS. The TDigest
+  // algorithm does see substantial speedups by having a large number of
+  // unsorted values to process in a batch.
+  folly::DigestBuilder<TDigest> digestBuilder(
+      /*bufferSize=*/1000, /*digestSize=*/100);
+
+  constexpr int kNumValues = 512;
+  std::vector<std::vector<double>> valuesPerThread;
+
+  BENCHMARK_SUSPEND {
+    std::default_random_engine generator;
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
+
+    valuesPerThread.reserve(nThreads);
+    for (size_t threadIndex = 0; threadIndex < nThreads; threadIndex++) {
+      valuesPerThread.push_back(std::vector<double>{});
+      auto& values = valuesPerThread.back();
+      values.reserve(kNumValues);
+      for (size_t i = 0; i < kNumValues; i++) {
+        values.push_back(dist(generator));
+      }
+    }
+  }
+
+  std::atomic<int> remainingBatches{static_cast<int>(iters / kNumValues)};
+  std::vector<std::thread> threads(nThreads);
+  for (size_t threadIndex = 0; threadIndex < nThreads; threadIndex++) {
+    threads[threadIndex] = std::thread(
+        [&](size_t index) {
+          while (remainingBatches.fetch_sub(1, std::memory_order_acq_rel) > 0) {
+            for (const auto v : valuesPerThread[index]) {
+              digestBuilder.append(v);
+            }
+          }
+        },
+        threadIndex);
+  }
+
+  for (auto& th : threads) {
+    th.join();
+  }
+}
 
 void merge(unsigned int iters, size_t maxSize, size_t bufSize) {
   TDigest digest(maxSize);
@@ -46,7 +93,7 @@ void merge(unsigned int iters, size_t maxSize, size_t bufSize) {
   }
 
   for (const auto& buffer : buffers) {
-    digest = digest.merge(buffer);
+    digest = digest.merge(folly::sorted_equivalent, buffer);
   }
 }
 
@@ -64,7 +111,6 @@ void mergeDigests(unsigned int iters, size_t maxSize, size_t nDigests) {
       for (size_t j = 0; j < maxSize; ++j) {
         buffer.push_back(distribution(generator));
       }
-      std::sort(buffer.begin(), buffer.end());
       digests.push_back(digest.merge(buffer));
     }
   }
@@ -95,7 +141,6 @@ void estimateQuantile(unsigned int iters, size_t maxSize, double quantile) {
       for (size_t j = 0; j < bufSize; ++j) {
         buffer.push_back(values[i * bufSize + j]);
       }
-      std::sort(buffer.begin(), buffer.end());
       digest = digest.merge(buffer);
     }
   }
@@ -105,17 +150,27 @@ void estimateQuantile(unsigned int iters, size_t maxSize, double quantile) {
   }
 }
 
+BENCHMARK_NAMED_PARAM(addValueMultithreaded, 1, 1)
+BENCHMARK_NAMED_PARAM(addValueMultithreaded, 2, 2)
+BENCHMARK_NAMED_PARAM(addValueMultithreaded, 4, 4)
+BENCHMARK_NAMED_PARAM(addValueMultithreaded, 8, 8)
+BENCHMARK_NAMED_PARAM(addValueMultithreaded, 16, 16)
+BENCHMARK_NAMED_PARAM(addValueMultithreaded, 32, 32)
+
+BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(merge, 100x1, 100, 100)
 BENCHMARK_RELATIVE_NAMED_PARAM(merge, 100x5, 100, 500)
 BENCHMARK_RELATIVE_NAMED_PARAM(merge, 100x10, 100, 1000)
 BENCHMARK_RELATIVE_NAMED_PARAM(merge, 1000x1, 1000, 1000)
 BENCHMARK_RELATIVE_NAMED_PARAM(merge, 1000x5, 1000, 5000)
 BENCHMARK_RELATIVE_NAMED_PARAM(merge, 1000x10, 1000, 10000)
+
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(mergeDigests, 100x10, 100, 10)
 BENCHMARK_RELATIVE_NAMED_PARAM(mergeDigests, 100x30, 100, 30)
 BENCHMARK_RELATIVE_NAMED_PARAM(mergeDigests, 100x60, 100, 60)
 BENCHMARK_RELATIVE_NAMED_PARAM(mergeDigests, 1000x60, 1000, 60)
+
 BENCHMARK_DRAW_LINE();
 BENCHMARK_NAMED_PARAM(estimateQuantile, 100x1_p001, 100, 0.001)
 BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 100_p01, 100, 0.01)
@@ -124,6 +179,7 @@ BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 100_p50, 100, 0.5)
 BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 100_p75, 100, 0.75)
 BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 100_p99, 100, 0.99)
 BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 100_p999, 100, 0.999)
+
 BENCHMARK_DRAW_LINE();
 BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 1000_p001, 1000, 0.001)
 BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 1000_p01, 1000, 0.01)
@@ -138,38 +194,38 @@ BENCHMARK_RELATIVE_NAMED_PARAM(estimateQuantile, 1000_p999, 1000, 0.999)
  * ============================================================================
  * folly/stats/test/TDigestBenchmark.cpp           relative  time/iter  iters/s
  * ============================================================================
- * merge(100x1)                                                 2.23us  449.36K
- * merge(100x5)                                      59.15%     3.76us  265.78K
- * merge(100x10)                                     41.72%     5.33us  187.46K
- * merge(1000x1)                                     10.18%    21.86us   45.75K
- * merge(1000x5)                                      6.34%    35.11us   28.48K
- * merge(1000x10)                                     4.45%    50.01us   19.99K
+ * merge(100x1)                                                 2.30us  434.11K
+ * merge(100x5)                                      65.52%     3.52us  284.42K
+ * merge(100x10)                                     48.66%     4.73us  211.26K
+ * merge(1000x1)                                      9.37%    24.59us   40.67K
+ * merge(1000x5)                                      6.22%    37.03us   27.00K
+ * merge(1000x10)                                     4.60%    50.03us   19.99K
  * ----------------------------------------------------------------------------
- * mergeDigests(100x10)                                        24.65us   40.57K
- * mergeDigests(100x30)                              21.03%   117.21us    8.53K
- * mergeDigests(100x60)                               8.92%   276.47us    3.62K
- * mergeDigests(1000x60)                              0.88%     2.80ms   357.15
+ * mergeDigests(100x10)                                        21.50us   46.52K
+ * mergeDigests(100x30)                              20.03%   107.34us    9.32K
+ * mergeDigests(100x60)                               8.66%   248.29us    4.03K
+ * mergeDigests(1000x60)                              0.78%     2.75ms   363.17
  * ----------------------------------------------------------------------------
- * estimateQuantile(100x1_p001)                                 9.40ns  106.40M
- * estimateQuantile(100_p01)                         63.42%    14.82ns   67.49M
- * estimateQuantile(100_p25)                         14.81%    63.47ns   15.75M
- * estimateQuantile(100_p50)                         11.26%    83.47ns   11.98M
- * estimateQuantile(100_p75)                         15.22%    61.76ns   16.19M
- * estimateQuantile(100_p99)                         76.04%    12.36ns   80.91M
- * estimateQuantile(100_p999)                       115.85%     8.11ns  123.27M
+ * estimateQuantile(100x1_p001)                                 7.34ns  136.21M
+ * estimateQuantile(100_p01)                         68.10%    10.78ns   92.76M
+ * estimateQuantile(100_p25)                         11.51%    63.77ns   15.68M
+ * estimateQuantile(100_p50)                          7.98%    92.03ns   10.87M
+ * estimateQuantile(100_p75)                         14.99%    48.98ns   20.42M
+ * estimateQuantile(100_p99)                         77.57%     9.46ns  105.65M
+ * estimateQuantile(100_p999)                       130.42%     5.63ns  177.64M
  * ----------------------------------------------------------------------------
- * estimateQuantile(1000_p001)                       27.57%    34.08ns   29.34M
- * estimateQuantile(1000_p01)                         8.53%   110.24ns    9.07M
- * estimateQuantile(1000_p25)                         1.92%   488.24ns    2.05M
- * estimateQuantile(1000_p50)                         1.37%   684.40ns    1.46M
- * estimateQuantile(1000_p75)                         1.94%   485.23ns    2.06M
- * estimateQuantile(1000_p99)                         8.87%   105.90ns    9.44M
- * estimateQuantile(1000_p999)                       36.64%    25.65ns   38.99M
+ * estimateQuantile(1000_p001)                       16.69%    43.99ns   22.73M
+ * estimateQuantile(1000_p01)                         6.08%   120.74ns    8.28M
+ * estimateQuantile(1000_p25)                         1.43%   513.01ns    1.95M
+ * estimateQuantile(1000_p50)                         1.06%   693.28ns    1.44M
+ * estimateQuantile(1000_p75)                         1.66%   442.20ns    2.26M
+ * estimateQuantile(1000_p99)                         7.12%   103.08ns    9.70M
+ * estimateQuantile(1000_p999)                       22.98%    31.94ns   31.30M
  * ============================================================================
  */
 
 int main(int argc, char* argv[]) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,16 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/GlogStyleFormatter.h>
 
 #include <folly/Format.h>
 #include <folly/logging/LogLevel.h>
 #include <folly/logging/LogMessage.h>
 #include <folly/portability/Time.h>
+#include <folly/system/ThreadName.h>
 
 namespace {
-using folly::StringPiece;
 using folly::LogLevel;
+using folly::StringPiece;
 
 StringPiece getGlogLevelName(LogLevel level) {
   if (level < LogLevel::INFO) {
@@ -33,16 +35,17 @@ StringPiece getGlogLevelName(LogLevel level) {
     return "WARNING";
   } else if (level < LogLevel::CRITICAL) {
     return "ERROR";
+  } else if (level < LogLevel::DFATAL) {
+    return "CRITICAL";
   }
-  return "CRITICAL";
+  return "FATAL";
 }
 } // namespace
 
 namespace folly {
 
 std::string GlogStyleFormatter::formatMessage(
-    const LogMessage& message,
-    const LogCategory* /* handlerCategory */) {
+    const LogMessage& message, const LogCategory* /* handlerCategory */) {
   // Get the local time info
   struct tm ltime;
   auto timeSinceEpoch = message.getTimestamp().time_since_epoch();
@@ -57,18 +60,34 @@ std::string GlogStyleFormatter::formatMessage(
   }
 
   auto basename = message.getFileBaseName();
-  auto headerFormatter = folly::format(
-      "{}{:02d}{:02d} {:02d}:{:02d}:{:02d}.{:06d} {:5d} {}:{}] ",
-      getGlogLevelName(message.getLevel())[0],
-      ltime.tm_mon + 1,
-      ltime.tm_mday,
-      ltime.tm_hour,
-      ltime.tm_min,
-      ltime.tm_sec,
-      usecs.count(),
-      message.getThreadID(),
-      basename,
-      message.getLineNumber());
+  auto header = log_thread_name_
+      ? folly::sformat(
+            "{}{:02d}{:02d} {:02d}:{:02d}:{:02d}.{:06d} {:5d} [{}] {}:{}{}] ",
+            getGlogLevelName(message.getLevel())[0],
+            ltime.tm_mon + 1,
+            ltime.tm_mday,
+            ltime.tm_hour,
+            ltime.tm_min,
+            ltime.tm_sec,
+            usecs.count(),
+            message.getThreadID(),
+            getCurrentThreadName().value_or("Unknown"),
+            basename,
+            message.getLineNumber(),
+            message.getContextString())
+      : folly::sformat(
+            "{}{:02d}{:02d} {:02d}:{:02d}:{:02d}.{:06d} {:5d} {}:{}{}] ",
+            getGlogLevelName(message.getLevel())[0],
+            ltime.tm_mon + 1,
+            ltime.tm_mday,
+            ltime.tm_hour,
+            ltime.tm_min,
+            ltime.tm_sec,
+            usecs.count(),
+            message.getThreadID(),
+            basename,
+            message.getLineNumber(),
+            message.getContextString());
 
   // TODO: Support including thread names and thread context info.
 
@@ -89,16 +108,9 @@ std::string GlogStyleFormatter::formatMessage(
   if (message.containsNewlines()) {
     // If there are multiple lines in the log message, add a header
     // before each one.
-    std::string header;
-    header.reserve(headerLengthGuess);
-    headerFormatter.appendTo(header);
 
-    // Make a guess at how many lines will be in the message, just to make an
-    // initial buffer allocation.  If the guess is too small then the string
-    // will reallocate and grow as necessary, it will just be slightly less
-    // efficient than if we had guessed enough space.
-    size_t numLinesGuess = 4;
-    buffer.reserve(((header.size() + 1) * numLinesGuess) + msgData.size());
+    buffer.reserve(
+        ((header.size() + 1) * message.getNumNewlines()) + msgData.size());
 
     size_t idx = 0;
     while (true) {
@@ -119,7 +131,7 @@ std::string GlogStyleFormatter::formatMessage(
     }
   } else {
     buffer.reserve(headerLengthGuess + msgData.size());
-    headerFormatter.appendTo(buffer);
+    buffer.append(header);
     buffer.append(msgData.data(), msgData.size());
     buffer.push_back('\n');
   }

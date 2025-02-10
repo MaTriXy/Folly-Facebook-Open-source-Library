@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,13 +16,54 @@
 
 #pragma once
 
-#include <boost/intrusive/list.hpp>
+#include <thread>
+#include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
 
+#include <folly/ScopeGuard.h>
 #include <folly/ThreadLocal.h>
+#include <folly/detail/Iterators.h>
 #include <folly/detail/Singleton.h>
+#include <folly/detail/UniqueInstance.h>
 #include <folly/functional/Invoke.h>
+#include <folly/lang/Hint.h>
 
 namespace folly {
+
+namespace detail {
+
+struct SingletonThreadLocalState {
+  struct LocalCache {
+    void* object; // type-erased pointer to the object field of wrapper, below
+  };
+  static_assert( // pod avoids tls-init guard var and tls-fini ub use-after-dtor
+      std::is_standard_layout<LocalCache>::value &&
+          std::is_trivial<LocalCache>::value,
+      "non-pod");
+
+  struct LocalLifetime;
+
+  struct Tracking {
+    using LocalCacheSet = std::unordered_set<LocalCache*>;
+
+    // per-cache refcounts, the number of lifetimes tracking that cache
+    std::unordered_map<LocalCache*, size_t> caches;
+
+    // per-lifetime cache tracking; 1-M lifetimes may track 1-N caches
+    std::unordered_map<LocalLifetime*, LocalCacheSet> lifetimes;
+
+    Tracking() noexcept;
+    ~Tracking();
+  };
+
+  struct LocalLifetime {
+    void destroy(Tracking& tracking) noexcept;
+    void track(LocalCache& cache, Tracking& tracking, void* object) noexcept;
+  };
+};
+
+} // namespace detail
 
 /// SingletonThreadLocal
 ///
@@ -60,109 +101,163 @@ template <
     typename T,
     typename Tag = detail::DefaultTag,
     typename Make = detail::DefaultMake<T>,
-    typename TLTag = _t<std::conditional<
-        std::is_same<Tag, detail::DefaultTag>::value,
-        void,
-        Tag>>>
+    typename TLTag = std::
+        conditional_t<std::is_same<Tag, detail::DefaultTag>::value, void, Tag>>
 class SingletonThreadLocal {
  private:
-  struct Wrapper;
+  static detail::UniqueInstance unique;
 
-  using NodeBase = boost::intrusive::list_base_hook<
-      boost::intrusive::link_mode<boost::intrusive::auto_unlink>>;
+  using State = detail::SingletonThreadLocalState;
+  using LocalCache = State::LocalCache;
 
-  struct Node : NodeBase {
-    Wrapper*& cache;
-    bool& stale;
+  using Object = invoke_result_t<Make>;
+  static_assert(std::is_convertible<Object&, T&>::value, "inconvertible");
 
-    Node(Wrapper*& cache_, bool& stale_) : cache(cache_), stale(stale_) {
-      auto& wrapper = getWrapper();
-      wrapper.caches.push_front(*this);
-      cache = &wrapper;
-    }
-    ~Node() {
-      clear();
-    }
-
-    void clear() {
-      cache = nullptr;
-      stale = true;
-    }
+  struct ObjectWrapper {
+    // keep as first field in first base, to save 1 instr in the fast path
+    Object object{Make{}()};
   };
-
-  using List =
-      boost::intrusive::list<Node, boost::intrusive::constant_time_size<false>>;
-
-  struct Wrapper {
-    template <typename S>
-    using MakeRet = is_invocable_r<S, Make>;
-
-    // keep as first field, to save 1 instr in the fast path
-    union {
-      alignas(alignof(T)) unsigned char storage[sizeof(T)];
-      T object;
-    };
-    List caches;
-
-    /* implicit */ operator T&() {
-      return object;
-    }
-
-    // normal make types
-    template <typename S = T, _t<std::enable_if<MakeRet<S>::value, int>> = 0>
-    Wrapper() {
-      (void)new (storage) S(Make{}());
-    }
-    // default and special make types for non-move-constructible T, until C++17
-    template <typename S = T, _t<std::enable_if<!MakeRet<S>::value, int>> = 0>
-    Wrapper() {
-      (void)Make{}(storage);
-    }
-    ~Wrapper() {
-      for (auto& node : caches) {
-        node.clear();
-      }
-      caches.clear();
-      object.~T();
-    }
+  struct Wrapper : ObjectWrapper, State::Tracking {
+    /* implicit */ operator T&() { return ObjectWrapper::object; }
   };
 
   using WrapperTL = ThreadLocal<Wrapper, TLTag>;
 
+  struct LocalLifetime : State::LocalLifetime {
+    ~LocalLifetime() { destroy(getWrapper()); }
+  };
+
   SingletonThreadLocal() = delete;
 
-  FOLLY_EXPORT FOLLY_NOINLINE static WrapperTL& getWrapperTL() {
-    static auto& entry = *detail::createGlobal<WrapperTL, Tag>();
-    return entry;
+  FOLLY_ALWAYS_INLINE static WrapperTL& getWrapperTL() {
+    (void)unique; // force the object not to be thrown out as unused
+    return detail::createGlobal<WrapperTL, Tag>();
   }
 
-  FOLLY_NOINLINE static Wrapper& getWrapper() {
-    return *getWrapperTL();
-  }
+  FOLLY_NOINLINE static Wrapper& getWrapper() { return *getWrapperTL(); }
 
-#ifdef FOLLY_TLS
-  FOLLY_NOINLINE static T& getSlow(Wrapper*& cache) {
-    static thread_local Wrapper** check = &cache;
-    CHECK_EQ(check, &cache) << "inline function static thread_local merging";
-    static thread_local bool stale;
-    static thread_local Node node(cache, stale);
-    return !stale && node.cache ? *node.cache : getWrapper();
+  FOLLY_NOINLINE static Wrapper& getSlow(LocalCache& cache) {
+    auto& wrapper = getWrapper();
+    if (threadlocal_detail::StaticMetaBase::dying()) {
+      return wrapper;
+    }
+    static thread_local LocalLifetime lifetime;
+    lifetime.track(cache, wrapper, &wrapper.object); // idempotent
+    return wrapper;
   }
-#endif
 
  public:
   FOLLY_EXPORT FOLLY_ALWAYS_INLINE static T& get() {
-#ifdef FOLLY_TLS
-    static thread_local Wrapper* cache;
-    return FOLLY_LIKELY(!!cache) ? *cache : getSlow(cache);
-#else
-    return getWrapper();
-#endif
+    if (kIsMobile) {
+      return getWrapper();
+    }
+    static thread_local LocalCache cache;
+    auto* object = static_cast<Object*>(cache.object);
+    return FOLLY_LIKELY(!!object) ? *object : getSlow(cache).object;
   }
 
+  static T* try_get() {
+    auto* wrapper = getWrapperTL().get_existing();
+    return wrapper ? &static_cast<T&>(*wrapper) : nullptr;
+  }
+
+  class Accessor {
+   private:
+    using Inner = typename WrapperTL::Accessor;
+    using IteratorBase = typename Inner::Iterator;
+    using IteratorTag = typename IteratorBase::iterator_category;
+
+    Inner inner_;
+
+    explicit Accessor(Inner inner) noexcept : inner_(std::move(inner)) {}
+
+   public:
+    friend class SingletonThreadLocal<T, Tag, Make, TLTag>;
+
+    class Iterator
+        : public detail::
+              IteratorAdaptor<Iterator, IteratorBase, T, IteratorTag> {
+     private:
+      using Super =
+          detail::IteratorAdaptor<Iterator, IteratorBase, T, IteratorTag>;
+      using Super::Super;
+
+     public:
+      friend class Accessor;
+
+      T& dereference() const {
+        return const_cast<Iterator*>(this)->base()->object;
+      }
+
+      std::thread::id getThreadId() const { return this->base().getThreadId(); }
+
+      uint64_t getOSThreadId() const { return this->base().getOSThreadId(); }
+    };
+
+    Accessor(const Accessor&) = delete;
+    Accessor& operator=(const Accessor&) = delete;
+    Accessor(Accessor&&) = default;
+    Accessor& operator=(Accessor&&) = default;
+
+    Iterator begin() const { return Iterator(inner_.begin()); }
+
+    Iterator end() const { return Iterator(inner_.end()); }
+  };
+
   // Must use a unique Tag, takes a lock that is one per Tag
-  static typename WrapperTL::Accessor accessAllThreads() {
-    return getWrapperTL().accessAllThreads();
+  static Accessor accessAllThreads() {
+    return Accessor(getWrapperTL().accessAllThreads());
   }
 };
+
+FOLLY_PUSH_WARNING
+FOLLY_CLANG_DISABLE_WARNING("-Wglobal-constructors")
+template <typename T, typename Tag, typename Make, typename TLTag>
+detail::UniqueInstance SingletonThreadLocal<T, Tag, Make, TLTag>::unique{
+    tag<SingletonThreadLocal>, tag<T, Tag>, tag<Make, TLTag>};
+FOLLY_POP_WARNING
+
 } // namespace folly
+
+/// FOLLY_DECLARE_REUSED
+///
+/// Useful for local variables of container types, where it is desired to avoid
+/// the overhead associated with the local variable entering and leaving scope.
+/// Rather, where it is desired that the memory be reused between invocations
+/// of the same scope in the same thread rather than deallocated and reallocated
+/// between invocations of the same scope in the same thread. Note that the
+/// container will always be cleared between invocations; it is only the backing
+/// memory allocation which is reused.
+///
+/// Example:
+///
+///   void traverse_perform(int root);
+///   template <typename F>
+///   void traverse_each_child_r(int root, F const&);
+///   void traverse_depthwise(int root) {
+///     // preserves some of the memory backing these per-thread data structures
+///     FOLLY_DECLARE_REUSED(seen, std::unordered_set<int>);
+///     FOLLY_DECLARE_REUSED(work, std::vector<int>);
+///     // example algorithm that uses these per-thread data structures
+///     work.push_back(root);
+///     while (!work.empty()) {
+///       root = work.back();
+///       work.pop_back();
+///       seen.insert(root);
+///       traverse_perform(root);
+///       traverse_each_child_r(root, [&](int item) {
+///         if (!seen.count(item)) {
+///           work.push_back(item);
+///         }
+///       });
+///     }
+///   }
+#define FOLLY_DECLARE_REUSED(name, ...)                                        \
+  struct __folly_reused_type_##name {                                          \
+    __VA_ARGS__ object;                                                        \
+  };                                                                           \
+  [[maybe_unused]] ::folly::unsafe_for_async_usage                             \
+      __folly_reused_g_prevent_async_##name;                                   \
+  auto& name =                                                                 \
+      ::folly::SingletonThreadLocal<__folly_reused_type_##name>::get().object; \
+  auto __folly_reused_g_##name = ::folly::makeGuard([&] { name.clear(); })

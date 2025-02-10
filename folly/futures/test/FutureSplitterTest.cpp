@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,8 @@
  */
 
 #include <folly/futures/FutureSplitter.h>
+
+#include <folly/executors/ManualExecutor.h>
 #include <folly/portability/GTest.h>
 
 using namespace folly;
@@ -163,14 +165,24 @@ TEST(FutureSplitter, splitFutureFailure) {
       p.getSemiFuture().via(&InlineExecutor::instance()));
   auto f1 = sp.getFuture();
   EXPECT_FALSE(f1.isReady());
-  try {
-    throw std::runtime_error("Oops");
-  } catch (std::exception& e) {
-    p.setException(exception_wrapper(std::current_exception(), e));
-  }
+  p.setException(exception_wrapper{std::runtime_error("Oops")});
   EXPECT_TRUE(f1.isReady());
   EXPECT_TRUE(f1.hasException());
   auto f2 = sp.getFuture();
   EXPECT_TRUE(f2.isReady());
   EXPECT_TRUE(f2.hasException());
+}
+
+TEST(FutureSplitter, lifetime) {
+  struct ManualExecutorWithPriority : folly::ManualExecutor {
+    void addWithPriority(Func func, int8_t) override { add(std::move(func)); }
+  };
+  ManualExecutorWithPriority ex;
+  auto ka = folly::ExecutorWithPriority::create(
+      folly::getKeepAliveToken(ex), folly::Executor::MID_PRI);
+  auto split = folly::splitFuture(folly::via(std::move(ka), [] { return 3; }));
+  ex.drain();
+  auto fut = split.getFuture().thenValue([](auto i) { return i + 1; });
+  ex.drain();
+  EXPECT_EQ(4, fut.value());
 }

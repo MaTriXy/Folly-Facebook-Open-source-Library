@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,16 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/LogConfigParser.h>
 
 #include <folly/Conv.h>
 #include <folly/String.h>
-#include <folly/dynamic.h>
-#include <folly/json.h>
+#include <folly/json/dynamic.h>
+#include <folly/json/json.h>
 #include <folly/lang/SafeAssert.h>
 #include <folly/logging/LogName.h>
 
-using std::shared_ptr;
 using std::string;
 
 namespace folly {
@@ -64,9 +64,7 @@ std::string dynamicTypename(const dynamic& value) {
  * Throws a LogConfigParseError on other errors.
  */
 bool parseJsonLevel(
-    const dynamic& value,
-    StringPiece categoryName,
-    LogLevel& result) {
+    const dynamic& value, StringPiece categoryName, LogLevel& result) {
   if (value.isString()) {
     auto levelString = value.asString();
     try {
@@ -98,8 +96,7 @@ bool parseJsonLevel(
 }
 
 LogCategoryConfig parseJsonCategoryConfig(
-    const dynamic& value,
-    StringPiece categoryName) {
+    const dynamic& value, StringPiece categoryName) {
   LogCategoryConfig config;
 
   // If the input is not an object, allow it to be
@@ -144,6 +141,19 @@ LogCategoryConfig parseJsonCategoryConfig(
     config.inheritParentLevel = inherit->asBool();
   }
 
+  auto* propagate = value.get_ptr("propagate");
+  if (propagate) {
+    if (!parseJsonLevel(
+            *propagate, categoryName, config.propagateLevelMessagesToParent)) {
+      throw LogConfigParseError{to<string>(
+          "unexpected data type for propagate field of category \"",
+          categoryName,
+          "\": got ",
+          dynamicTypename(*propagate),
+          ", expected a string or integer")};
+    }
+  }
+
   auto* handlers = value.get_ptr("handlers");
   if (handlers) {
     if (!handlers->isArray()) {
@@ -168,8 +178,7 @@ LogCategoryConfig parseJsonCategoryConfig(
 }
 
 LogHandlerConfig parseJsonHandlerConfig(
-    const dynamic& value,
-    StringPiece handlerName) {
+    const dynamic& value, StringPiece handlerName) {
   if (!value.isObject()) {
     throw LogConfigParseError{to<string>(
         "unexpected data type for configuration of handler \"",
@@ -277,7 +286,7 @@ LogConfig::CategoryConfigMap parseCategoryConfigs(StringPiece value) {
     std::vector<StringPiece> handlerPieces;
     folly::split(":", configString, handlerPieces);
     FOLLY_SAFE_DCHECK(
-        handlerPieces.size() >= 1,
+        !handlerPieces.empty(),
         "folly::split() always returns a list of length 1");
     auto levelString = trimWhitespace(handlerPieces[0]);
 
@@ -340,9 +349,7 @@ LogConfig::CategoryConfigMap parseCategoryConfigs(StringPiece value) {
 }
 
 bool splitNameValue(
-    StringPiece input,
-    StringPiece* outName,
-    StringPiece* outValue) {
+    StringPiece input, StringPiece* outName, StringPiece* outValue) {
   size_t equalIndex = input.find('=');
   if (equalIndex == StringPiece::npos) {
     return false;
@@ -369,7 +376,7 @@ std::pair<std::string, LogHandlerConfig> parseHandlerConfig(StringPiece value) {
   }
 
   StringPiece handlerName;
-  Optional<StringPiece> handlerType(in_place);
+  Optional<StringPiece> handlerType(std::in_place);
   if (!splitNameValue(namePortion, &handlerName, &handlerType.value())) {
     handlerName = trimWhitespace(namePortion);
     handlerType = folly::none;
@@ -389,7 +396,7 @@ std::pair<std::string, LogHandlerConfig> parseHandlerConfig(StringPiece value) {
         handlerName,
         "\": name cannot contain a comma when using the basic config format")};
   }
-  if (handlerType.hasValue()) {
+  if (handlerType.has_value()) {
     if (handlerType->empty()) {
       throw LogConfigParseError{to<string>(
           "error parsing configuration for log handler \"",
@@ -414,7 +421,7 @@ std::pair<std::string, LogHandlerConfig> parseHandlerConfig(StringPiece value) {
     std::vector<StringPiece> pieces;
     folly::split(",", optionsStr, pieces);
     FOLLY_SAFE_DCHECK(
-        pieces.size() >= 1, "folly::split() always returns a list of length 1");
+        !pieces.empty(), "folly::split() always returns a list of length 1");
 
     for (const auto& piece : pieces) {
       StringPiece optionName;
@@ -455,7 +462,7 @@ LogConfig parseLogConfig(StringPiece value) {
   std::vector<StringPiece> pieces;
   folly::split(";", value, pieces);
   FOLLY_SAFE_DCHECK(
-      pieces.size() >= 1, "folly::split() always returns a list of length 1");
+      !pieces.empty(), "folly::split() always returns a list of length 1");
 
   auto categoryConfigs = parseCategoryConfigs(pieces[0]);
   LogConfig::HandlerConfigMap handlerConfigs;
@@ -571,23 +578,24 @@ dynamic logConfigToDynamic(const LogHandlerConfig& config) {
     options.insert(opt.first, opt.second);
   }
   auto result = dynamic::object("options", options);
-  if (config.type.hasValue()) {
+  if (config.type.has_value()) {
     result("type", config.type.value());
   }
-  return std::move(result);
+  return result;
 }
 
 dynamic logConfigToDynamic(const LogCategoryConfig& config) {
   auto value = dynamic::object("level", logLevelToString(config.level))(
-      "inherit", config.inheritParentLevel);
-  if (config.handlers.hasValue()) {
+      "inherit", config.inheritParentLevel)(
+      "propagate", logLevelToString(config.propagateLevelMessagesToParent));
+  if (config.handlers.has_value()) {
     auto handlers = dynamic::array();
     for (const auto& handlerName : config.handlers.value()) {
       handlers.push_back(handlerName);
     }
     value("handlers", std::move(handlers));
   }
-  return std::move(value);
+  return value;
 }
 
 } // namespace folly

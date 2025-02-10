@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -37,7 +37,9 @@ BENCHMARK(minstdrand, n) {
 
   braces.dismiss();
 
-  FOR_EACH_RANGE(i, 0, n) { doNotOptimizeAway(rng()); }
+  FOR_EACH_RANGE (i, 0, n) {
+    doNotOptimizeAway(rng());
+  }
 }
 
 BENCHMARK(mt19937, n) {
@@ -47,7 +49,9 @@ BENCHMARK(mt19937, n) {
 
   braces.dismiss();
 
-  FOR_EACH_RANGE(i, 0, n) { doNotOptimizeAway(rng()); }
+  FOR_EACH_RANGE (i, 0, n) {
+    doNotOptimizeAway(rng());
+  }
 }
 
 #if FOLLY_HAVE_EXTRANDOM_SFMT19937
@@ -58,7 +62,9 @@ BENCHMARK(sfmt19937, n) {
 
   braces.dismiss();
 
-  FOR_EACH_RANGE(i, 0, n) { doNotOptimizeAway(rng()); }
+  FOR_EACH_RANGE (i, 0, n) {
+    doNotOptimizeAway(rng());
+  }
 }
 #endif
 
@@ -69,18 +75,32 @@ BENCHMARK(threadprng, n) {
 
   braces.dismiss();
 
-  FOR_EACH_RANGE(i, 0, n) { doNotOptimizeAway(tprng()); }
+  FOR_EACH_RANGE (i, 0, n) {
+    doNotOptimizeAway(tprng());
+  }
 }
 
-BENCHMARK(RandomDouble) { doNotOptimizeAway(Random::randDouble01()); }
-BENCHMARK(Random32) { doNotOptimizeAway(Random::rand32()); }
-BENCHMARK(Random32Num) { doNotOptimizeAway(Random::rand32(100)); }
-BENCHMARK(Random64) { doNotOptimizeAway(Random::rand64()); }
-BENCHMARK(Random64Num) { doNotOptimizeAway(Random::rand64(100ull << 32)); }
-BENCHMARK(Random64OneIn) { doNotOptimizeAway(Random::oneIn(100)); }
+BENCHMARK(RandomDouble) {
+  doNotOptimizeAway(Random::randDouble01());
+}
+BENCHMARK(Random32) {
+  doNotOptimizeAway(Random::rand32());
+}
+BENCHMARK(Random32Num) {
+  doNotOptimizeAway(Random::rand32(100));
+}
+BENCHMARK(Random64) {
+  doNotOptimizeAway(Random::rand64());
+}
+BENCHMARK(Random64Num) {
+  doNotOptimizeAway(Random::rand64(100ull << 32));
+}
+BENCHMARK(Random64OneIn) {
+  doNotOptimizeAway(Random::oneIn(100));
+}
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

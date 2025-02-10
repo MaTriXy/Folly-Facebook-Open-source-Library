@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,9 +30,10 @@ void runClient(
             << " numLoops = " << numLoops << " zeroCopy = " << zeroCopy
             << " bufferSize = " << bufferSize;
 
+  size_t counter = 1;
   EventBase evb;
-  std::unique_ptr<ZeroCopyTestAsyncSocket> client(
-      new ZeroCopyTestAsyncSocket(&evb, numLoops, bufferSize, zeroCopy));
+  std::unique_ptr<ZeroCopyTestAsyncSocket> client(new ZeroCopyTestAsyncSocket(
+      &counter, &evb, numLoops, bufferSize, zeroCopy));
   SocketAddress addr(host, port);
   evb.runInEventBaseThread([&]() { client->connect(addr); });
 
@@ -63,14 +64,30 @@ void runServer(uint16_t port, int numLoops, bool zeroCopy, size_t bufferSize) {
 
 static auto constexpr kMaxLoops = 20000;
 
-void zeroCopyOn(unsigned /* unused */, size_t bufferSize) {
-  ZeroCopyTest test(kMaxLoops, true, bufferSize);
+void zeroCopyOn(unsigned iters, size_t bufferSize, size_t numClients = 1) {
+  BenchmarkSuspender susp;
+  ZeroCopyTest test(numClients, iters, true, bufferSize);
+  susp.dismiss();
   test.run();
+  susp.rehire();
 }
 
-void zeroCopyOff(unsigned /* unused */, size_t bufferSize) {
-  ZeroCopyTest test(kMaxLoops, false, bufferSize);
+void zeroCopyOff(unsigned iters, size_t bufferSize, size_t numClients = 1) {
+  BenchmarkSuspender susp;
+  ZeroCopyTest test(numClients, iters, false, bufferSize);
+  susp.dismiss();
   test.run();
+  susp.rehire();
+}
+
+static auto constexpr kNumClients = 40;
+
+void zeroCopyOnMulti(unsigned iters, size_t bufferSize) {
+  zeroCopyOn(iters, bufferSize, kNumClients);
+}
+
+void zeroCopyOffMulti(unsigned iters, size_t bufferSize) {
+  zeroCopyOff(iters, bufferSize, kNumClients);
 }
 
 BENCHMARK_PARAM(zeroCopyOn, 4096)
@@ -100,6 +117,9 @@ BENCHMARK_DRAW_LINE();
 BENCHMARK_PARAM(zeroCopyOn, 1048576)
 BENCHMARK_PARAM(zeroCopyOff, 1048576)
 BENCHMARK_DRAW_LINE();
+BENCHMARK_PARAM(zeroCopyOnMulti, 1048576)
+BENCHMARK_PARAM(zeroCopyOffMulti, 1048576)
+BENCHMARK_DRAW_LINE();
 
 DEFINE_bool(client, false, "client mode");
 DEFINE_bool(server, false, "server mode");
@@ -110,7 +130,7 @@ DEFINE_int32(port, 33130, "port");
 DEFINE_string(host, "::1", "host");
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   if (FLAGS_client) {
     runClient(

@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,11 +13,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/test/TestLogHandler.h>
 
 #include <folly/MapUtil.h>
 
 namespace folly {
+
+std::vector<std::string> TestLogHandler::getMessageValues() const {
+  std::vector<std::string> values;
+  values.reserve(messages_.size());
+  for (const auto& msgInfo : messages_) {
+    values.push_back(msgInfo.first.getMessage());
+  }
+  return values;
+}
 
 std::shared_ptr<LogHandler> TestLogHandlerFactory::createHandler(
     const Options& options) {

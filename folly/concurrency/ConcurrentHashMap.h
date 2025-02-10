@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,21 +13,30 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
+
+#include <atomic>
+#include <mutex>
 
 #include <folly/Optional.h>
 #include <folly/concurrency/detail/ConcurrentHashMap-detail.h>
 #include <folly/synchronization/Hazptr.h>
-#include <atomic>
-#include <mutex>
 
 namespace folly {
 
 /**
- * Based on Java's ConcurrentHashMap
+ * Implementations of high-performance Concurrent Hashmaps that
+ * support erase and update.
  *
  * Readers are always wait-free.
- * Writers are sharded, but take a lock.
+ * Writers are sharded, but take a lock that only locks part of the map.
+ *
+ * Multithreaded performance beats anything except the lock-free
+ *      atomic maps (AtomicUnorderedMap, AtomicHashMap), BUT only
+ *      if you can perfectly size the atomic maps, and you don't
+ *      need erase().  If you don't know the size in advance or
+ *      your workload needs erase(), this is the better choice.
  *
  * The interface is as close to std::unordered_map as possible, but there
  * are a handful of changes:
@@ -53,22 +62,63 @@ namespace folly {
  *   std::unordered_map which iterates over a linked list of elements.
  *   If the table is sparse, this may be more expensive.
  *
- * * rehash policy is a power of two, using supplied factor.
- *
  * * Allocator must be stateless.
  *
- * * ValueTypes without copy constructors will work, but pessimize the
- *   implementation.
+ * 1: ConcurrentHashMap, based on Java's ConcurrentHashMap.
+ *    Very similar to std::unordered_map in performance.
  *
- * Comparisons:
- *      Single-threaded performance is extremely similar to std::unordered_map.
+ * 2: ConcurrentHashMapSIMD, based on F14ValueMap.  If the map is
+ *    larger than the cache size, it has superior performance due to
+ *    vectorized key lookup.
  *
- *      Multithreaded performance beats anything except the lock-free
- *           atomic maps (AtomicUnorderedMap, AtomicHashMap), BUT only
- *           if you can perfectly size the atomic maps, and you don't
- *           need erase().  If you don't know the size in advance or
- *           your workload frequently calls erase(), this is the
- *           better choice.
+ *
+ *
+ * USAGE FAQs
+ *
+ * Q: Is simultaneous iteration and erase() threadsafe?
+ *       Example:
+ *
+ *       ConcurrentHashMap<int, int> map;
+ *
+ *       Thread 1: auto it = map.begin();
+ *                   while (it != map.end()) {
+ *                      // Do something with it
+ *                      it++;
+ *                   }
+ *
+ *       Thread 2:    map.insert(2, 2);  map.erase(2);
+ *
+ * A: Yes, this is safe.  However, the iterating thread is not
+ * guaranteed to see (or not see) concurrent insertions and erasures.
+ * Inserts may cause a rehash, but the old table is still valid as
+ * long as any iterator pointing to it exists.
+ *
+ * Q: How do I update an existing object atomically?
+ *
+ * A: assign_if_equal is the recommended way - readers will see the
+ * old value until the new value is completely constructed and
+ * inserted.
+ *
+ * Q: Why do map.erase() and clear() not actually destroy elements?
+ *
+ * A: Hazard Pointers are used to improve the performance of
+ * concurrent access.  They can be thought of as a simple Garbage
+ * Collector.  To reduce the GC overhead, a GC pass is only run after
+ * reaching a certain memory bound.  erase() will remove the element
+ * from being accessed via the map, but actual destruction may happen
+ * later, after iterators that may point to it have been deleted.
+ *
+ * The only guarantee is that a GC pass will be run on map destruction
+ * - no elements will remain after map destruction.
+ *
+ * Q: Are pointers to values safe to access *without* holding an
+ * iterator?
+ *
+ * A: The SIMD version guarantees that references to elements are
+ * stable across rehashes, the non-SIMD version does *not*.  Note that
+ * unless you hold an iterator, you need to ensure there are no
+ * concurrent deletes/updates to that key if you are accessing it via
+ * reference.
  */
 
 template <
@@ -79,7 +129,18 @@ template <
     typename Allocator = std::allocator<uint8_t>,
     uint8_t ShardBits = 8,
     template <typename> class Atom = std::atomic,
-    class Mutex = std::mutex>
+    class Mutex = std::mutex,
+    template <
+        typename,
+        typename,
+        uint8_t,
+        typename,
+        typename,
+        typename,
+        template <typename>
+        class,
+        class>
+    class Impl = detail::concurrenthashmap::bucket::BucketTable>
 class ConcurrentHashMap {
   using SegmentT = detail::ConcurrentHashMapSegment<
       KeyType,
@@ -89,12 +150,18 @@ class ConcurrentHashMap {
       KeyEqual,
       Allocator,
       Atom,
-      Mutex>;
+      Mutex,
+      Impl>;
+  using SegmentTAllocator = typename std::allocator_traits<
+      Allocator>::template rebind_alloc<SegmentT>;
+  template <typename K, typename T>
+  using EnableHeterogeneousFind = std::enable_if_t<
+      detail::EligibleForHeterogeneousFind<KeyType, HashFn, KeyEqual, K>::value,
+      T>;
+
+  float load_factor_ = SegmentT::kDefaultLoadFactor;
+
   static constexpr uint64_t NumShards = (1 << ShardBits);
-  // Slightly higher than 1.0, in case hashing to shards isn't
-  // perfectly balanced, reserve(size) will still work without
-  // rehashing.
-  float load_factor_ = 1.05;
 
  public:
   class ConstIterator;
@@ -107,6 +174,27 @@ class ConcurrentHashMap {
   typedef KeyEqual key_equal;
   typedef ConstIterator const_iterator;
 
+ private:
+  template <typename K, typename T>
+  using EnableHeterogeneousInsert = std::enable_if_t<
+      ::folly::detail::
+          EligibleForHeterogeneousInsert<KeyType, HashFn, KeyEqual, K>::value,
+      T>;
+
+  template <typename K>
+  using IsIter = std::is_same<ConstIterator, remove_cvref_t<K>>;
+
+  template <typename K, typename T>
+  using EnableHeterogeneousErase = std::enable_if_t<
+      ::folly::detail::EligibleForHeterogeneousFind<
+          KeyType,
+          HashFn,
+          KeyEqual,
+          std::conditional_t<IsIter<K>::value, KeyType, K>>::value &&
+          !IsIter<K>::value,
+      T>;
+
+ public:
   /*
    * Construct a ConcurrentHashMap with 1 << ShardBits shards, size
    * and max_size given.  Both size and max_size will be rounded up to
@@ -134,6 +222,14 @@ class ConcurrentHashMap {
           std::memory_order_relaxed);
       o.segments_[i].store(nullptr, std::memory_order_relaxed);
     }
+    cohort_.store(o.cohort(), std::memory_order_relaxed);
+    o.cohort_.store(nullptr, std::memory_order_relaxed);
+    beginSeg_.store(
+        o.beginSeg_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    o.beginSeg_.store(NumShards, std::memory_order_relaxed);
+    endSeg_.store(
+        o.endSeg_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    o.endSeg_.store(0, std::memory_order_relaxed);
   }
 
   ConcurrentHashMap& operator=(ConcurrentHashMap&& o) {
@@ -141,7 +237,7 @@ class ConcurrentHashMap {
       auto seg = segments_[i].load(std::memory_order_relaxed);
       if (seg) {
         seg->~SegmentT();
-        Allocator().deallocate((uint8_t*)seg, sizeof(SegmentT));
+        SegmentTAllocator().deallocate(seg, 1);
       }
       segments_[i].store(
           o.segments_[i].load(std::memory_order_relaxed),
@@ -150,26 +246,38 @@ class ConcurrentHashMap {
     }
     size_ = o.size_;
     max_size_ = o.max_size_;
+    cohort_shutdown_cleanup();
+    cohort_.store(o.cohort(), std::memory_order_relaxed);
+    o.cohort_.store(nullptr, std::memory_order_relaxed);
+    beginSeg_.store(
+        o.beginSeg_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    o.beginSeg_.store(NumShards, std::memory_order_relaxed);
+    endSeg_.store(
+        o.endSeg_.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    o.endSeg_.store(0, std::memory_order_relaxed);
     return *this;
   }
 
-  /* Note that some objects stored in ConcurrentHashMap may outlive the
-   * ConcurrentHashMap's destructor, if you need immediate cleanup, call
-   * hazptr_cleanup(), which guarantees all objects are destructed after
-   * it completes.
-   */
   ~ConcurrentHashMap() {
-    for (uint64_t i = 0; i < NumShards; i++) {
+    uint64_t begin = beginSeg_.load(std::memory_order_acquire);
+    uint64_t end = endSeg_.load(std::memory_order_acquire);
+    for (uint64_t i = begin; i < end; ++i) {
       auto seg = segments_[i].load(std::memory_order_relaxed);
       if (seg) {
         seg->~SegmentT();
-        Allocator().deallocate((uint8_t*)seg, sizeof(SegmentT));
+        SegmentTAllocator().deallocate(seg, 1);
       }
     }
+    cohort_shutdown_cleanup();
   }
 
   bool empty() const noexcept {
-    for (uint64_t i = 0; i < NumShards; i++) {
+    uint64_t begin = beginSeg_.load(std::memory_order_acquire);
+    uint64_t end = endSeg_.load(std::memory_order_acquire);
+    // Note: beginSeg_ and endSeg_ are only conservative hints of the
+    // range of non-empty segments. This function cannot conclude that
+    // a map is nonempty merely because beginSeg_ < endSeg_.
+    for (uint64_t i = begin; i < end; ++i) {
       auto seg = segments_[i].load(std::memory_order_acquire);
       if (seg) {
         if (!seg->empty()) {
@@ -180,64 +288,54 @@ class ConcurrentHashMap {
     return true;
   }
 
-  ConstIterator find(const KeyType& k) const {
-    auto segment = pickSegment(k);
-    ConstIterator res(this, segment);
-    auto seg = segments_[segment].load(std::memory_order_acquire);
-    if (!seg || !seg->find(res.it_, k)) {
-      res.segment_ = NumShards;
-    }
-    return res;
+  ConstIterator find(const KeyType& k) const { return findImpl(k); }
+
+  template <typename K, EnableHeterogeneousFind<K, int> = 0>
+  ConstIterator find(const K& k) const {
+    return findImpl(k);
   }
 
-  ConstIterator cend() const noexcept {
-    return ConstIterator(NumShards);
-  }
+  ConstIterator cend() const noexcept { return ConstIterator(NumShards); }
 
-  ConstIterator cbegin() const noexcept {
-    return ConstIterator(this);
-  }
+  ConstIterator cbegin() const noexcept { return ConstIterator(this); }
 
-  ConstIterator end() const noexcept {
-    return cend();
-  }
+  ConstIterator end() const noexcept { return cend(); }
 
-  ConstIterator begin() const noexcept {
-    return cbegin();
-  }
+  ConstIterator begin() const noexcept { return cbegin(); }
 
   std::pair<ConstIterator, bool> insert(
       std::pair<key_type, mapped_type>&& foo) {
-    auto segment = pickSegment(foo.first);
-    std::pair<ConstIterator, bool> res(
-        std::piecewise_construct,
-        std::forward_as_tuple(this, segment),
-        std::forward_as_tuple(false));
-    res.second = ensureSegment(segment)->insert(res.first.it_, std::move(foo));
-    return res;
+    return insertImpl(std::move(foo));
+  }
+
+  template <typename Key, EnableHeterogeneousInsert<Key, int> = 0>
+  std::pair<ConstIterator, bool> insert(std::pair<Key, mapped_type>&& foo) {
+    return insertImpl(std::move(foo));
   }
 
   template <typename Key, typename Value>
   std::pair<ConstIterator, bool> insert(Key&& k, Value&& v) {
-    auto segment = pickSegment(k);
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
     std::pair<ConstIterator, bool> res(
         std::piecewise_construct,
         std::forward_as_tuple(this, segment),
         std::forward_as_tuple(false));
     res.second = ensureSegment(segment)->insert(
-        res.first.it_, std::forward<Key>(k), std::forward<Value>(v));
+        res.first.it_, h, std::forward<Key>(k), std::forward<Value>(v));
     return res;
   }
 
   template <typename Key, typename... Args>
   std::pair<ConstIterator, bool> try_emplace(Key&& k, Args&&... args) {
-    auto segment = pickSegment(k);
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
     std::pair<ConstIterator, bool> res(
         std::piecewise_construct,
         std::forward_as_tuple(this, segment),
         std::forward_as_tuple(false));
     res.second = ensureSegment(segment)->try_emplace(
-        res.first.it_, std::forward<Key>(k), std::forward<Args>(args)...);
+        res.first.it_, h, std::forward<Key>(k), std::forward<Args>(args)...);
     return res;
   }
 
@@ -245,14 +343,15 @@ class ConcurrentHashMap {
   std::pair<ConstIterator, bool> emplace(Args&&... args) {
     using Node = typename SegmentT::Node;
     auto node = (Node*)Allocator().allocate(sizeof(Node));
-    new (node) Node(std::forward<Args>(args)...);
-    auto segment = pickSegment(node->getItem().first);
+    new (node) Node(ensureCohort(), std::forward<Args>(args)...);
+    auto h = HashFn{}(node->getItem().first);
+    auto segment = pickSegment(h);
     std::pair<ConstIterator, bool> res(
         std::piecewise_construct,
         std::forward_as_tuple(this, segment),
         std::forward_as_tuple(false));
     res.second = ensureSegment(segment)->emplace(
-        res.first.it_, node->getItem().first, node);
+        res.first.it_, h, node->getItem().first, node);
     if (!res.second) {
       node->~Node();
       Allocator().deallocate((uint8_t*)node, sizeof(Node));
@@ -260,28 +359,35 @@ class ConcurrentHashMap {
     return res;
   }
 
+  /*
+   * The bool component will always be true if the map has been updated via
+   * either insertion or assignment. Note that this is different from the
+   * std::map::insert_or_assign interface.
+   */
   template <typename Key, typename Value>
   std::pair<ConstIterator, bool> insert_or_assign(Key&& k, Value&& v) {
-    auto segment = pickSegment(k);
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
     std::pair<ConstIterator, bool> res(
         std::piecewise_construct,
         std::forward_as_tuple(this, segment),
         std::forward_as_tuple(false));
     res.second = ensureSegment(segment)->insert_or_assign(
-        res.first.it_, std::forward<Key>(k), std::forward<Value>(v));
+        res.first.it_, h, std::forward<Key>(k), std::forward<Value>(v));
     return res;
   }
 
   template <typename Key, typename Value>
   folly::Optional<ConstIterator> assign(Key&& k, Value&& v) {
-    auto segment = pickSegment(k);
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
     ConstIterator res(this, segment);
     auto seg = segments_[segment].load(std::memory_order_acquire);
     if (!seg) {
       return none;
     } else {
       auto r =
-          seg->assign(res.it_, std::forward<Key>(k), std::forward<Value>(v));
+          seg->assign(res.it_, h, std::forward<Key>(k), std::forward<Value>(v));
       if (!r) {
         return none;
       }
@@ -289,11 +395,37 @@ class ConcurrentHashMap {
     return std::move(res);
   }
 
-  // Assign to desired if and only if key k is equal to expected
+  // Assign to desired if and only if the predicate returns true
+  // for the current value.
+  template <typename Key, typename Value, typename Predicate>
+  folly::Optional<ConstIterator> assign_if(
+      Key&& k, Value&& desired, Predicate&& predicate) {
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
+    ConstIterator res(this, segment);
+    auto seg = segments_[segment].load(std::memory_order_acquire);
+    if (!seg) {
+      return none;
+    } else {
+      auto r = seg->assign_if(
+          res.it_,
+          h,
+          std::forward<Key>(k),
+          std::forward<Value>(desired),
+          std::forward<Predicate>(predicate));
+      if (!r) {
+        return none;
+      }
+    }
+    return std::move(res);
+  }
+
+  // Assign to desired if and only if current value is equal to expected
   template <typename Key, typename Value>
-  folly::Optional<ConstIterator>
-  assign_if_equal(Key&& k, const ValueType& expected, Value&& desired) {
-    auto segment = pickSegment(k);
+  folly::Optional<ConstIterator> assign_if_equal(
+      Key&& k, const ValueType& expected, Value&& desired) {
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
     ConstIterator res(this, segment);
     auto seg = segments_[segment].load(std::memory_order_acquire);
     if (!seg) {
@@ -301,6 +433,7 @@ class ConcurrentHashMap {
     } else {
       auto r = seg->assign_if_equal(
           res.it_,
+          h,
           std::forward<Key>(k),
           expected,
           std::forward<Value>(desired));
@@ -318,38 +451,75 @@ class ConcurrentHashMap {
     return item.first->second;
   }
 
-  const ValueType at(const KeyType& key) const {
-    auto item = find(key);
-    if (item == cend()) {
-      throw std::out_of_range("at(): value out of range");
-    }
-    return item->second;
+  template <typename Key, EnableHeterogeneousInsert<Key, int> = 0>
+  const ValueType operator[](const Key& key) {
+    auto item = insert(key, ValueType());
+    return item.first->second;
+  }
+
+  const ValueType at(const KeyType& key) const { return atImpl(key); }
+
+  template <typename K, EnableHeterogeneousFind<K, int> = 0>
+  const ValueType at(const K& key) const {
+    return atImpl(key);
   }
 
   // TODO update assign interface, operator[], at
 
-  size_type erase(const key_type& k) {
-    auto segment = pickSegment(k);
-    auto seg = segments_[segment].load(std::memory_order_acquire);
-    if (!seg) {
-      return 0;
-    } else {
-      return seg->erase(k);
-    }
+  size_type erase(const key_type& k) { return eraseImpl(k); }
+
+  template <typename K, EnableHeterogeneousErase<K, int> = 0>
+  size_type erase(const K& k) {
+    return eraseImpl(k);
   }
 
   // Calls the hash function, and therefore may throw.
+  // This function doesn't necessarily delete the item that pos points to.
+  // It simply tries erasing the item associated with the same key.
+  // While this behavior can be confusing, erase(iterator) is often found in
+  // std data structures so we follow a similar pattern here.
   ConstIterator erase(ConstIterator& pos) {
-    auto segment = pickSegment(pos->first);
+    auto h = HashFn{}(pos->first);
+    auto segment = pickSegment(h);
     ConstIterator res(this, segment);
-    ensureSegment(segment)->erase(res.it_, pos.it_);
-    res.next(); // May point to segment end, and need to advance.
+    ensureSegment(segment)->erase(res.it_, pos.it_, h);
+    res.advanceIfAtSegmentEnd();
     return res;
+  }
+
+  // Erase if and only if key k is equal to expected
+  size_type erase_if_equal(const key_type& k, const ValueType& expected) {
+    return erase_key_if(k, [&expected](const ValueType& v) {
+      return v == expected;
+    });
+  }
+
+  template <typename K, EnableHeterogeneousErase<K, int> = 0>
+  size_type erase_if_equal(const K& k, const ValueType& expected) {
+    return erase_key_if(k, [&expected](const ValueType& v) {
+      return v == expected;
+    });
+  }
+
+  // Erase if predicate evaluates to true on the existing value
+  template <typename Predicate>
+  size_type erase_key_if(const key_type& k, Predicate&& predicate) {
+    return eraseKeyIfImpl(k, std::forward<Predicate>(predicate));
+  }
+
+  template <
+      typename K,
+      typename Predicate,
+      EnableHeterogeneousErase<K, int> = 0>
+  size_type erase_key_if(const K& k, Predicate&& predicate) {
+    return eraseKeyIfImpl(k, std::forward<Predicate>(predicate));
   }
 
   // NOT noexcept, initializes new shard segments vs.
   void clear() {
-    for (uint64_t i = 0; i < NumShards; i++) {
+    uint64_t begin = beginSeg_.load(std::memory_order_acquire);
+    uint64_t end = endSeg_.load(std::memory_order_acquire);
+    for (uint64_t i = begin; i < end; ++i) {
       auto seg = segments_[i].load(std::memory_order_acquire);
       if (seg) {
         seg->clear();
@@ -359,7 +529,11 @@ class ConcurrentHashMap {
 
   void reserve(size_t count) {
     count = count >> ShardBits;
-    for (uint64_t i = 0; i < NumShards; i++) {
+    if (!count)
+      return;
+    uint64_t begin = beginSeg_.load(std::memory_order_acquire);
+    uint64_t end = endSeg_.load(std::memory_order_acquire);
+    for (uint64_t i = begin; i < end; ++i) {
       auto seg = segments_[i].load(std::memory_order_acquire);
       if (seg) {
         seg->rehash(count);
@@ -370,7 +544,9 @@ class ConcurrentHashMap {
   // This is a rolling size, and is not exact at any moment in time.
   size_t size() const noexcept {
     size_t res = 0;
-    for (uint64_t i = 0; i < NumShards; i++) {
+    uint64_t begin = beginSeg_.load(std::memory_order_acquire);
+    uint64_t end = endSeg_.load(std::memory_order_acquire);
+    for (uint64_t i = begin; i < end; ++i) {
       auto seg = segments_[i].load(std::memory_order_acquire);
       if (seg) {
         res += seg->size();
@@ -379,12 +555,12 @@ class ConcurrentHashMap {
     return res;
   }
 
-  float max_load_factor() const {
-    return load_factor_;
-  }
+  float max_load_factor() const { return load_factor_; }
 
   void max_load_factor(float factor) {
-    for (uint64_t i = 0; i < NumShards; i++) {
+    uint64_t begin = beginSeg_.load(std::memory_order_acquire);
+    uint64_t end = endSeg_.load(std::memory_order_acquire);
+    for (uint64_t i = begin; i < end; ++i) {
       auto seg = segments_[i].load(std::memory_order_acquire);
       if (seg) {
         seg->max_load_factor(factor);
@@ -396,17 +572,13 @@ class ConcurrentHashMap {
    public:
     friend class ConcurrentHashMap;
 
-    const value_type& operator*() const {
-      return *it_;
-    }
+    const value_type& operator*() const { return *it_; }
 
-    const value_type* operator->() const {
-      return &*it_;
-    }
+    const value_type* operator->() const { return &*it_; }
 
     ConstIterator& operator++() {
       ++it_;
-      next();
+      advanceIfAtSegmentEnd();
       return *this;
     }
 
@@ -414,9 +586,7 @@ class ConcurrentHashMap {
       return it_ == o.it_ && segment_ == o.segment_;
     }
 
-    bool operator!=(const ConstIterator& o) const {
-      return !(*this == o);
-    }
+    bool operator!=(const ConstIterator& o) const { return !(*this == o); }
 
     ConstIterator& operator=(const ConstIterator& o) = delete;
 
@@ -442,32 +612,43 @@ class ConcurrentHashMap {
    private:
     // cbegin iterator
     explicit ConstIterator(const ConcurrentHashMap* parent)
-        : it_(parent->ensureSegment(0)->cbegin()),
-          segment_(0),
+        : it_(nullptr),
+          segment_(parent->beginSeg_.load(std::memory_order_acquire)),
           parent_(parent) {
-      // Always iterate to the first element, could be in any shard.
-      next();
+      advanceToSegmentBegin();
     }
 
     // cend iterator
     explicit ConstIterator(uint64_t shards) : it_(nullptr), segment_(shards) {}
 
-    void next() {
-      while (it_ == parent_->ensureSegment(segment_)->cend() &&
-             segment_ < parent_->NumShards) {
-        SegmentT* seg{nullptr};
-        while (!seg) {
-          segment_++;
-          seg = parent_->segments_[segment_].load(std::memory_order_acquire);
-          if (segment_ < parent_->NumShards) {
-            if (!seg) {
-              continue;
-            }
-            it_ = seg->cbegin();
-          }
-          break;
-        }
+    void advanceIfAtSegmentEnd() {
+      DCHECK_LT(segment_, parent_->NumShards);
+      SegmentT* seg =
+          parent_->segments_[segment_].load(std::memory_order_acquire);
+      DCHECK(seg);
+      if (it_ == seg->cend()) {
+        ++segment_;
+        advanceToSegmentBegin();
       }
+    }
+
+    FOLLY_ALWAYS_INLINE void advanceToSegmentBegin() {
+      // Advance to the beginning of the next nonempty segment
+      // starting from segment_.
+      uint64_t end = parent_->endSeg_.load(std::memory_order_acquire);
+      while (segment_ < end) {
+        SegmentT* seg =
+            parent_->segments_[segment_].load(std::memory_order_acquire);
+        if (seg) {
+          it_ = seg->cbegin();
+          if (it_ != seg->cend()) {
+            return;
+          }
+        }
+        ++segment_;
+      }
+      // All segments are empty. Advance to end.
+      segment_ = parent_->NumShards;
     }
 
     typename SegmentT::Iterator it_;
@@ -476,8 +657,64 @@ class ConcurrentHashMap {
   };
 
  private:
-  uint64_t pickSegment(const KeyType& k) const {
-    auto h = HashFn()(k);
+  template <typename K>
+  ConstIterator findImpl(const K& k) const {
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
+    ConstIterator res(this, segment);
+    auto seg = segments_[segment].load(std::memory_order_acquire);
+    if (!seg || !seg->find(res.it_, h, k)) {
+      res.segment_ = NumShards;
+    }
+    return res;
+  }
+
+  template <typename K>
+  const ValueType atImpl(const K& k) const {
+    auto item = find(k);
+    if (item == cend()) {
+      throw_exception<std::out_of_range>("at(): key not in map");
+    }
+    return item->second;
+  }
+
+  template <typename Key>
+  std::pair<ConstIterator, bool> insertImpl(std::pair<Key, mapped_type>&& foo) {
+    auto h = HashFn{}(foo.first);
+    auto segment = pickSegment(h);
+    std::pair<ConstIterator, bool> res(
+        std::piecewise_construct,
+        std::forward_as_tuple(this, segment),
+        std::forward_as_tuple(false));
+    res.second =
+        ensureSegment(segment)->insert(res.first.it_, h, std::move(foo));
+    return res;
+  }
+
+  template <typename K>
+  size_type eraseImpl(const K& k) {
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
+    auto seg = segments_[segment].load(std::memory_order_acquire);
+    if (!seg) {
+      return 0;
+    } else {
+      return seg->erase(h, k);
+    }
+  }
+
+  template <typename K, typename Predicate>
+  size_type eraseKeyIfImpl(const K& k, Predicate&& predicate) {
+    auto h = HashFn{}(k);
+    auto segment = pickSegment(h);
+    auto seg = segments_[segment].load(std::memory_order_acquire);
+    if (!seg) {
+      return 0;
+    }
+    return seg->erase_key_if(h, k, std::forward<Predicate>(predicate));
+  }
+
+  uint64_t pickSegment(size_t h) const {
     // Use the lowest bits for our shard bits.
     //
     // This works well even if the hash function is biased towards the
@@ -493,23 +730,95 @@ class ConcurrentHashMap {
   SegmentT* ensureSegment(uint64_t i) const {
     SegmentT* seg = segments_[i].load(std::memory_order_acquire);
     if (!seg) {
-      SegmentT* newseg = (SegmentT*)Allocator().allocate(sizeof(SegmentT));
+      auto b = ensureCohort();
+      SegmentT* newseg = SegmentTAllocator().allocate(1);
       newseg = new (newseg)
-          SegmentT(size_ >> ShardBits, load_factor_, max_size_ >> ShardBits);
+          SegmentT(size_ >> ShardBits, load_factor_, max_size_ >> ShardBits, b);
       if (!segments_[i].compare_exchange_strong(seg, newseg)) {
         // seg is updated with new value, delete ours.
         newseg->~SegmentT();
-        Allocator().deallocate((uint8_t*)newseg, sizeof(SegmentT));
+        SegmentTAllocator().deallocate(newseg, 1);
       } else {
         seg = newseg;
+        updateBeginAndEndSegments(i);
       }
     }
     return seg;
   }
 
+  void updateBeginAndEndSegments(uint64_t i) const {
+    uint64_t val = beginSeg_.load(std::memory_order_acquire);
+    while (i < val && !casSeg(beginSeg_, val, i)) {
+    }
+    val = endSeg_.load(std::memory_order_acquire);
+    while (i + 1 > val && !casSeg(endSeg_, val, i + 1)) {
+    }
+  }
+
+  bool casSeg(Atom<uint64_t>& seg, uint64_t& expval, uint64_t newval) const {
+    return seg.compare_exchange_weak(
+        expval, newval, std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+
+  hazptr_obj_cohort<Atom>* cohort() const noexcept {
+    return cohort_.load(std::memory_order_acquire);
+  }
+
+  hazptr_obj_cohort<Atom>* ensureCohort() const {
+    auto b = cohort();
+    if (!b) {
+      auto storage = Allocator().allocate(sizeof(hazptr_obj_cohort<Atom>));
+      auto newcohort = new (storage) hazptr_obj_cohort<Atom>();
+      if (cohort_.compare_exchange_strong(b, newcohort)) {
+        b = newcohort;
+      } else {
+        newcohort->~hazptr_obj_cohort<Atom>();
+        Allocator().deallocate(storage, sizeof(hazptr_obj_cohort<Atom>));
+      }
+    }
+    return b;
+  }
+
+  void cohort_shutdown_cleanup() {
+    auto b = cohort();
+    if (b) {
+      b->~hazptr_obj_cohort<Atom>();
+      Allocator().deallocate((uint8_t*)b, sizeof(hazptr_obj_cohort<Atom>));
+    }
+  }
+
   mutable Atom<SegmentT*> segments_[NumShards];
   size_t size_{0};
   size_t max_size_{0};
+  mutable Atom<hazptr_obj_cohort<Atom>*> cohort_{nullptr};
+  mutable Atom<uint64_t> beginSeg_{NumShards};
+  mutable Atom<uint64_t> endSeg_{0};
 };
+
+template <
+    typename KeyType,
+    typename ValueType,
+    typename HashFn = std::hash<KeyType>,
+    typename KeyEqual = std::equal_to<KeyType>,
+    typename Allocator = std::allocator<uint8_t>,
+    uint8_t ShardBits = 8,
+    template <typename> class Atom = std::atomic,
+    class Mutex = std::mutex>
+using ConcurrentHashMapSIMD = ConcurrentHashMap<
+    KeyType,
+    ValueType,
+    HashFn,
+    KeyEqual,
+    Allocator,
+    ShardBits,
+    Atom,
+    Mutex,
+#if FOLLY_SSE_PREREQ(4, 2) && FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+    detail::concurrenthashmap::simd::SIMDTable
+#else
+    // fallback to regular impl
+    detail::concurrenthashmap::bucket::BucketTable
+#endif
+    >;
 
 } // namespace folly

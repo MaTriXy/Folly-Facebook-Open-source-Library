@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,74 +16,42 @@
 
 #pragma once
 
-#include <initializer_list>
-#include <iterator>
-
-/**
- *  include or backport:
- *  * std::size
- *  * std::empty
- *  * std::data
- */
-
-#if __cpp_lib_nonmember_container_access >= 201411 || _MSC_VER
+#include <folly/functional/Invoke.h>
 
 namespace folly {
 
-/* using override */ using std::size;
-/* using override */ using std::empty;
-/* using override */ using std::data;
+namespace access {
 
-}
+/// size_fn
+/// size
+///
+/// Invokes unqualified size with std::size in scope.
+FOLLY_CREATE_FREE_INVOKER_SUITE(size, std);
 
-#else
+/// empty_fn
+/// empty
+///
+/// Invokes unqualified empty with std::empty in scope.
+FOLLY_CREATE_FREE_INVOKER_SUITE(empty, std);
 
-namespace folly {
+/// data_fn
+/// data
+///
+/// Invokes unqualified data with std::data in scope.
+FOLLY_CREATE_FREE_INVOKER_SUITE(data, std);
 
-//  mimic: std::size, C++17
-template <typename C>
-constexpr auto size(C const& c) -> decltype(c.size()) {
-  return c.size();
-}
-template <typename T, std::size_t N>
-constexpr std::size_t size(T const (&)[N]) noexcept {
-  return N;
-}
+/// begin_fn
+/// begin
+///
+/// Invokes unqualified begin with std::begin in scope.
+FOLLY_CREATE_FREE_INVOKER_SUITE(begin, std);
 
-//  mimic: std::empty, C++17
-template <typename C>
-constexpr auto empty(C const& c) -> decltype(c.empty()) {
-  return c.empty();
-}
-template <typename T, std::size_t N>
-constexpr bool empty(T const (&)[N]) noexcept {
-  //  while zero-length arrays are not allowed in the language, some compilers
-  //  may permit them in some cases
-  return N == 0;
-}
-template <typename E>
-constexpr bool empty(std::initializer_list<E> il) noexcept {
-  return il.size() == 0;
-}
+/// end_fn
+/// end
+///
+/// Invokes unqualified end with std::end in scope.
+FOLLY_CREATE_FREE_INVOKER_SUITE(end, std);
 
-//  mimic: std::data, C++17
-template <typename C>
-constexpr auto data(C& c) -> decltype(c.data()) {
-  return c.data();
-}
-template <typename C>
-constexpr auto data(C const& c) -> decltype(c.data()) {
-  return c.data();
-}
-template <typename T, std::size_t N>
-constexpr T* data(T (&a)[N]) noexcept {
-  return a;
-}
-template <typename E>
-constexpr E const* data(std::initializer_list<E> il) noexcept {
-  return il.begin();
-}
+} // namespace access
 
-}
-
-#endif
+} // namespace folly

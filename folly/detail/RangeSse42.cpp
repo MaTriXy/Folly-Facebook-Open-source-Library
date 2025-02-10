@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,7 +16,7 @@
 
 #include <folly/detail/RangeSse42.h>
 
-#include <glog/logging.h>
+#include <cassert>
 
 #include <folly/Portability.h>
 
@@ -29,20 +29,19 @@
 namespace folly {
 namespace detail {
 size_t qfind_first_byte_of_sse42(
-    const StringPieceLite haystack,
-    const StringPieceLite needles) {
-  return qfind_first_byte_of_nosse(haystack, needles);
+    const StringPieceLite haystack, const StringPieceLite needles) {
+  return qfind_first_byte_of_nosimd(haystack, needles);
 }
 } // namespace detail
 } // namespace folly
 #else
-#include <cstdint>
-#include <limits>
-#include <string>
-
 #include <emmintrin.h>
 #include <nmmintrin.h>
 #include <smmintrin.h>
+
+#include <cstdint>
+#include <limits>
+#include <string>
 
 #include <folly/Likely.h>
 #include <folly/detail/Sse.h>
@@ -54,8 +53,7 @@ namespace detail {
 // not be smaller.
 static constexpr size_t kMinPageSize = 4096;
 static_assert(
-    kMinPageSize >= 16,
-    "kMinPageSize must be at least SSE register size");
+    kMinPageSize >= 16, "kMinPageSize must be at least SSE register size");
 
 template <typename T>
 static inline uintptr_t page_for(T* addr) {
@@ -71,18 +69,17 @@ static inline size_t nextAlignedIndex(const char* arr) {
 
 // helper method for case where needles.size() <= 16
 size_t qfind_first_byte_of_needles16(
-    const StringPieceLite haystack,
-    const StringPieceLite needles) {
-  DCHECK_GT(haystack.size(), 0u);
-  DCHECK_GT(needles.size(), 0u);
-  DCHECK_LE(needles.size(), 16u);
+    const StringPieceLite haystack, const StringPieceLite needles) {
+  assert(haystack.size() > 0u);
+  assert(needles.size() > 0u);
+  assert(needles.size() <= 16u);
   if ((needles.size() <= 2 && haystack.size() >= 256) ||
       // must bail if we can't even SSE-load a single segment of haystack
       (haystack.size() < 16 &&
        page_for(haystack.end() - 1) != page_for(haystack.data() + 15)) ||
       // can't load needles into SSE register if it could cross page boundary
       page_for(needles.end() - 1) != page_for(needles.data() + 15)) {
-    return detail::qfind_first_byte_of_nosse(haystack, needles);
+    return detail::qfind_first_byte_of_nosimd(haystack, needles);
   }
 
   auto arr2 = _mm_loadu_si128_unchecked(
@@ -119,8 +116,8 @@ size_t scanHaystackBlock(
     const StringPieceLite haystack,
     const StringPieceLite needles,
     uint64_t blockStartIdx) {
-  DCHECK_GT(needles.size(), 16u); // should handled by *needles16() method
-  DCHECK(
+  assert(needles.size() > 16u); // should handled by *needles16() method
+  assert(
       blockStartIdx + 16 <= haystack.size() ||
       (page_for(haystack.data() + blockStartIdx) ==
        page_for(haystack.data() + blockStartIdx + 15)));
@@ -160,13 +157,11 @@ size_t scanHaystackBlock(
 }
 
 size_t qfind_first_byte_of_sse42(
-    const StringPieceLite haystack,
-    const StringPieceLite needles);
+    const StringPieceLite haystack, const StringPieceLite needles);
 
 size_t qfind_first_byte_of_sse42(
-    const StringPieceLite haystack,
-    const StringPieceLite needles) {
-  if (UNLIKELY(needles.empty() || haystack.empty())) {
+    const StringPieceLite haystack, const StringPieceLite needles) {
+  if (FOLLY_UNLIKELY(needles.empty() || haystack.empty())) {
     return std::string::npos;
   } else if (needles.size() <= 16) {
     // we can save some unnecessary load instructions by optimizing for
@@ -198,6 +193,6 @@ size_t qfind_first_byte_of_sse42(
 
   return std::string::npos;
 }
-}
-}
+} // namespace detail
+} // namespace folly
 #endif

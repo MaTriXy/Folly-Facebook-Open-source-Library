@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,11 +26,11 @@
 #include <folly/compression/Utils.h>
 #include <folly/io/Cursor.h>
 
-using folly::io::compression::detail::dataStartsWithLE;
-using folly::io::compression::detail::prefixToStringLE;
+using folly::compression::detail::dataStartsWithLE;
+using folly::compression::detail::prefixToStringLE;
 
 namespace folly {
-namespace io {
+namespace compression {
 namespace zlib {
 
 namespace {
@@ -41,7 +41,7 @@ bool isValidStrategy(int strategy) {
       Z_FILTERED,
       Z_HUFFMAN_ONLY,
       Z_RLE,
-      Z_FIXED
+      Z_FIXED,
   }};
   return std::any_of(strategies.begin(), strategies.end(), [&](int i) {
     return i == strategy;
@@ -83,8 +83,8 @@ class ZlibStreamCodec final : public StreamCodec {
   ~ZlibStreamCodec() override;
 
   std::vector<std::string> validPrefixes() const override;
-  bool canUncompress(const IOBuf* data, Optional<uint64_t> uncompressedLength)
-      const override;
+  bool canUncompress(
+      const IOBuf* data, Optional<uint64_t> uncompressedLength) const override;
 
  private:
   uint64_t doMaxCompressedLength(uint64_t uncompressedLength) const override;
@@ -109,7 +109,7 @@ class ZlibStreamCodec final : public StreamCodec {
   int level_;
   bool needReset_{true};
 };
-static constexpr uint16_t kGZIPMagicLE = 0x8B1F;
+constexpr uint16_t kGZIPMagicLE = 0x8B1F;
 
 std::vector<std::string> ZlibStreamCodec::validPrefixes() const {
   if (type() == CodecType::ZLIB) {
@@ -157,11 +157,11 @@ std::vector<std::string> ZlibStreamCodec::validPrefixes() const {
   }
 }
 
-bool ZlibStreamCodec::canUncompress(const IOBuf* data, Optional<uint64_t>)
-    const {
+bool ZlibStreamCodec::canUncompress(
+    const IOBuf* data, Optional<uint64_t>) const {
   if (type() == CodecType::ZLIB) {
     uint16_t value;
-    Cursor cursor{data};
+    io::Cursor cursor{data};
     if (!cursor.tryReadBE(value)) {
       return false;
     }
@@ -183,22 +183,20 @@ uint64_t ZlibStreamCodec::doMaxCompressedLength(
 }
 
 std::unique_ptr<Codec> ZlibStreamCodec::createCodec(
-    Options options,
-    int level) {
+    Options options, int level) {
   return std::make_unique<ZlibStreamCodec>(options, level);
 }
 
 std::unique_ptr<StreamCodec> ZlibStreamCodec::createStream(
-    Options options,
-    int level) {
+    Options options, int level) {
   return std::make_unique<ZlibStreamCodec>(options, level);
 }
 
-static bool inBounds(int value, int low, int high) {
+bool inBounds(int value, int low, int high) {
   return (value >= low) && (value <= high);
 }
 
-static int zlibConvertLevel(int level) {
+int zlibConvertLevel(int level) {
   switch (level) {
     case COMPRESSION_LEVEL_FASTEST:
       return 1;
@@ -244,11 +242,11 @@ ZlibStreamCodec::ZlibStreamCodec(Options options, int level)
 ZlibStreamCodec::~ZlibStreamCodec() {
   if (deflateStream_) {
     deflateEnd(deflateStream_.get_pointer());
-    deflateStream_.clear();
+    deflateStream_.reset();
   }
   if (inflateStream_) {
     inflateEnd(inflateStream_.get_pointer());
-    inflateStream_.clear();
+    inflateStream_.reset();
   }
 }
 
@@ -260,7 +258,7 @@ void ZlibStreamCodec::resetDeflateStream() {
   if (deflateStream_) {
     int const rc = deflateReset(deflateStream_.get_pointer());
     if (rc != Z_OK) {
-      deflateStream_.clear();
+      deflateStream_.reset();
       throw std::runtime_error(
           to<std::string>("ZlibStreamCodec: deflateReset error: ", rc));
     }
@@ -271,8 +269,9 @@ void ZlibStreamCodec::resetDeflateStream() {
   // The automatic header detection format is only for inflation.
   // Use zlib for deflation if the format is auto.
   int const windowBits = getWindowBits(
-      options_.format == Options::Format::AUTO ? Options::Format::ZLIB
-                                               : options_.format,
+      options_.format == Options::Format::AUTO
+          ? Options::Format::ZLIB
+          : options_.format,
       options_.windowSize);
 
   int const rc = deflateInit2(
@@ -283,7 +282,7 @@ void ZlibStreamCodec::resetDeflateStream() {
       options_.memLevel,
       options_.strategy);
   if (rc != Z_OK) {
-    deflateStream_.clear();
+    deflateStream_.reset();
     throw std::runtime_error(
         to<std::string>("ZlibStreamCodec: deflateInit error: ", rc));
   }
@@ -293,7 +292,7 @@ void ZlibStreamCodec::resetInflateStream() {
   if (inflateStream_) {
     int const rc = inflateReset(inflateStream_.get_pointer());
     if (rc != Z_OK) {
-      inflateStream_.clear();
+      inflateStream_.reset();
       throw std::runtime_error(
           to<std::string>("ZlibStreamCodec: inflateReset error: ", rc));
     }
@@ -304,13 +303,13 @@ void ZlibStreamCodec::resetInflateStream() {
       inflateStream_.get_pointer(),
       getWindowBits(options_.format, options_.windowSize));
   if (rc != Z_OK) {
-    inflateStream_.clear();
+    inflateStream_.reset();
     throw std::runtime_error(
         to<std::string>("ZlibStreamCodec: inflateInit error: ", rc));
   }
 }
 
-static int zlibTranslateFlush(StreamCodec::FlushOp flush) {
+int zlibTranslateFlush(StreamCodec::FlushOp flush) {
   switch (flush) {
     case StreamCodec::FlushOp::NONE:
       return Z_NO_FLUSH;
@@ -323,7 +322,7 @@ static int zlibTranslateFlush(StreamCodec::FlushOp flush) {
   }
 }
 
-static int zlibThrowOnError(int rc) {
+int zlibThrowOnError(int rc) {
   switch (rc) {
     case Z_OK:
     case Z_BUF_ERROR:
@@ -335,14 +334,12 @@ static int zlibThrowOnError(int rc) {
 }
 
 bool ZlibStreamCodec::doCompressStream(
-    ByteRange& input,
-    MutableByteRange& output,
-    StreamCodec::FlushOp flush) {
+    ByteRange& input, MutableByteRange& output, StreamCodec::FlushOp flush) {
   if (needReset_) {
     resetDeflateStream();
     needReset_ = false;
   }
-  DCHECK(deflateStream_.hasValue());
+  DCHECK(deflateStream_.has_value());
   // zlib will return Z_STREAM_ERROR if output.data() is null.
   if (output.data() == nullptr) {
     return false;
@@ -370,14 +367,12 @@ bool ZlibStreamCodec::doCompressStream(
 }
 
 bool ZlibStreamCodec::doUncompressStream(
-    ByteRange& input,
-    MutableByteRange& output,
-    StreamCodec::FlushOp flush) {
+    ByteRange& input, MutableByteRange& output, StreamCodec::FlushOp flush) {
   if (needReset_) {
     resetInflateStream();
     needReset_ = false;
   }
-  DCHECK(inflateStream_.hasValue());
+  DCHECK(inflateStream_.has_value());
   // zlib will return Z_STREAM_ERROR if output.data() is null.
   if (output.data() == nullptr) {
     return false;
@@ -414,7 +409,7 @@ std::unique_ptr<StreamCodec> getStreamCodec(Options options, int level) {
 }
 
 } // namespace zlib
-} // namespace io
+} // namespace compression
 } // namespace folly
 
 #endif // FOLLY_HAVE_LIBZ

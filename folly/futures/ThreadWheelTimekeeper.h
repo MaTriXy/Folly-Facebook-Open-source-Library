@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,32 +16,41 @@
 
 #pragma once
 
+#include <thread>
+
 #include <folly/futures/Future.h>
 #include <folly/io/async/EventBase.h>
 #include <folly/io/async/HHWheelTimer.h>
-#include <thread>
 
 namespace folly {
+
+class EventBaseThreadTimekeeper : public Timekeeper {
+ public:
+  EventBaseThreadTimekeeper() = delete;
+  explicit EventBaseThreadTimekeeper(folly::EventBase& eventBase)
+      : eventBaseRef_(eventBase) {}
+  ~EventBaseThreadTimekeeper() override = default;
+
+  /// Implement the Timekeeper interface
+  SemiFuture<Unit> after(HighResDuration) override;
+
+ protected:
+  folly::EventBase& eventBaseRef_;
+};
 
 /// The default Timekeeper implementation which uses a HHWheelTimer on an
 /// EventBase in a dedicated thread. Users needn't deal with this directly, it
 /// is used by default by Future methods that work with timeouts.
-class ThreadWheelTimekeeper : public Timekeeper {
+class ThreadWheelTimekeeper : public EventBaseThreadTimekeeper {
  public:
   /// But it doesn't *have* to be a singleton.
   ThreadWheelTimekeeper();
   ~ThreadWheelTimekeeper() override;
 
-  /// Implement the Timekeeper interface
-  /// This future *does* complete on the timer thread. You should almost
-  /// certainly follow it with a via() call or the accuracy of other timers
-  /// will suffer.
-  Future<Unit> after(Duration) override;
-
  protected:
-  folly::EventBase eventBase_;
+  folly::EventBase eventBase_{folly::EventBase::Options().setTimerTickInterval(
+      std::chrono::milliseconds(1))};
   std::thread thread_;
-  HHWheelTimer::UniquePtr wheelTimer_;
 };
 
 } // namespace folly

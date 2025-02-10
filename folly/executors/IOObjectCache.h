@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,8 @@
  */
 
 #pragma once
+
+#include <map>
 
 #include <folly/ThreadLocal.h>
 #include <folly/executors/GlobalExecutor.h>
@@ -56,11 +58,9 @@ class IOObjectCache {
       it = p.first;
     }
     return it->second;
-  };
-
-  void setFactory(TFactory factory) {
-    factory_ = std::move(factory);
   }
+
+  void setFactory(TFactory factory) { factory_ = std::move(factory); }
 
  private:
   folly::ThreadLocal<std::map<folly::EventBase*, std::shared_ptr<T>>> cache_;

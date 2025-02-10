@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -82,7 +82,7 @@ class rvalue_reference_wrapper {
   /**
    * Implicit conversion to raw reference. Destructive.
    */
-  /* implicit */ operator T &&() && noexcept {
+  /* implicit */ operator T&&() && noexcept {
     return static_cast<rvalue_reference_wrapper&&>(*this).get();
   }
 
@@ -101,8 +101,8 @@ class rvalue_reference_wrapper {
    * the wrapped reference points to a callable object. Destructive.
    */
   template <class... Args>
-  decltype(auto) operator()(Args&&... args) &&
-      noexcept(noexcept(std::declval<T>()(std::forward<Args>(args)...))) {
+  decltype(auto) operator()(Args&&... args) && noexcept(
+      noexcept(std::declval<T>()(std::forward<Args>(args)...))) {
     return static_cast<rvalue_reference_wrapper&&>(*this).get()(
         std::forward<Args>(args)...);
   }
@@ -110,9 +110,7 @@ class rvalue_reference_wrapper {
   /**
    * Check whether wrapped reference is valid.
    */
-  bool valid() const noexcept {
-    return ptr_ != nullptr;
-  }
+  bool valid() const noexcept { return ptr_ != nullptr; }
 
  private:
   // Disallow copy construction and copy assignment, to make it harder to

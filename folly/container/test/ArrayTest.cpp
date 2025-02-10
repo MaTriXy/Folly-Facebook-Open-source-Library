@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,14 +13,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/container/Array.h>
-#include <folly/portability/GTest.h>
+
 #include <string>
+
+#include <folly/portability/GTest.h>
 
 using namespace std;
 using folly::make_array;
 
-TEST(make_array, base_case) {
+TEST(makeArray, baseCase) {
   auto arr = make_array<int>();
   static_assert(
       is_same<typename decltype(arr)::value_type, int>::value,
@@ -28,7 +31,7 @@ TEST(make_array, base_case) {
   EXPECT_EQ(arr.size(), 0);
 }
 
-TEST(make_array, deduce_size_primitive) {
+TEST(makeArray, deduceSizePrimitive) {
   auto arr = make_array<int>(1, 2, 3, 4, 5);
   static_assert(
       is_same<typename decltype(arr)::value_type, int>::value,
@@ -36,7 +39,7 @@ TEST(make_array, deduce_size_primitive) {
   EXPECT_EQ(arr.size(), 5);
 }
 
-TEST(make_array, deduce_size_class) {
+TEST(makeArray, deduceSizeClass) {
   auto arr = make_array<string>(string{"foo"}, string{"bar"});
   static_assert(
       is_same<typename decltype(arr)::value_type, std::string>::value,
@@ -45,7 +48,7 @@ TEST(make_array, deduce_size_class) {
   EXPECT_EQ(arr[1], "bar");
 }
 
-TEST(make_array, deduce_everything) {
+TEST(makeArray, deduceEverything) {
   auto arr = make_array(string{"foo"}, string{"bar"});
   static_assert(
       is_same<typename decltype(arr)::value_type, std::string>::value,
@@ -54,7 +57,7 @@ TEST(make_array, deduce_everything) {
   EXPECT_EQ(arr[1], "bar");
 }
 
-TEST(make_array, fixed_common_type) {
+TEST(makeArray, fixedCommonType) {
   auto arr = make_array<double>(1.0, 2.5f, 3, 4, 5);
   static_assert(
       is_same<typename decltype(arr)::value_type, double>::value,
@@ -62,7 +65,7 @@ TEST(make_array, fixed_common_type) {
   EXPECT_EQ(arr.size(), 5);
 }
 
-TEST(make_array, deduced_common_type) {
+TEST(makeArray, deducedCommonType) {
   auto arr = make_array(1.0, 2.5f, 3, 4, 5);
   static_assert(
       is_same<typename decltype(arr)::value_type, double>::value,
@@ -70,16 +73,12 @@ TEST(make_array, deduced_common_type) {
   EXPECT_EQ(arr.size(), 5);
 }
 
-TEST(make_array_with, example) {
+TEST(makeArrayWith, example) {
   struct make_item {
-    constexpr int operator()(size_t index) const {
-      return index + 4;
-    }
+    constexpr int operator()(size_t index) const { return index + 4; }
   };
-  using folly::make_array_with;
-  using folly::array_detail::make_array_with; // should not collide
 
-  constexpr auto actual = make_array_with<3>(make_item{});
+  constexpr auto actual = folly::make_array_with<3>(make_item{});
   constexpr auto expected = make_array<int>(4, 5, 6);
   EXPECT_EQ(expected, actual);
 }

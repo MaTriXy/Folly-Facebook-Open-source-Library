@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,7 +23,9 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 #include <folly/Conv.h>
 #include <folly/Likely.h>
@@ -32,39 +34,63 @@
 #include <folly/hash/SpookyHashV2.h>
 #include <folly/io/Cursor.h>
 #include <folly/lang/Align.h>
+#include <folly/lang/CheckedMath.h>
+#include <folly/lang/Exception.h>
+#include <folly/lang/Hint.h>
 #include <folly/memory/Malloc.h>
+#include <folly/memory/SanitizeAddress.h>
+
+/*
+ * Callbacks that will be invoked when IOBuf allocates or frees memory.
+ * Note that io_buf_alloc_cb() will also be invoked when IOBuf takes ownership
+ * of a malloc-allocated buffer, even if it was allocated earlier by another
+ * part of the code.
+ *
+ * By default these are unimplemented, but programs can define these functions
+ * to perform their own custom logic on memory allocation.  This is intended
+ * primarily to help programs track memory usage and possibly take action
+ * when thresholds are hit.  Callers should generally avoid performing any
+ * expensive work in these callbacks, since they may be called from arbitrary
+ * locations in the code that use IOBuf, possibly while holding locks.
+ */
+
+#if FOLLY_HAVE_WEAK_SYMBOLS
+FOLLY_ATTR_WEAK void io_buf_alloc_cb(void* /*ptr*/, size_t /*size*/) noexcept;
+FOLLY_ATTR_WEAK void io_buf_free_cb(void* /*ptr*/, size_t /*size*/) noexcept;
+#else
+static void (*io_buf_alloc_cb)(void* /*ptr*/, size_t /*size*/) noexcept =
+    nullptr;
+static void (*io_buf_free_cb)(void* /*ptr*/, size_t /*size*/) noexcept =
+    nullptr;
+#endif
 
 using std::unique_ptr;
 
 namespace {
 
-enum : uint16_t {
-  kHeapMagic = 0xa5a5,
-  // This memory segment contains an IOBuf that is still in use
-  kIOBufInUse = 0x01,
-  // This memory segment contains buffer data that is still in use
-  kDataInUse = 0x02,
-};
+constexpr uint16_t kHeapMagic = 0xa5a5;
 
-enum : std::size_t {
-  // When create() is called for buffers less than kDefaultCombinedBufSize,
-  // we allocate a single combined memory segment for the IOBuf and the data
-  // together.  See the comments for createCombined()/createSeparate() for more
-  // details.
-  //
-  // (The size of 1k is largely just a guess here.  We could could probably do
-  // benchmarks of real applications to see if adjusting this number makes a
-  // difference.  Callers that know their exact use case can also explicitly
-  // call createCombined() or createSeparate().)
-  kDefaultCombinedBufSize = 1024
-};
+// When create() is called for buffers less than kDefaultCombinedBufSize,
+// we allocate a single combined memory segment for the IOBuf and the data
+// together.  See the comments for createCombined()/createSeparate() for more
+// details.
+//
+// (The size of 1k is largely just a guess here.  We could could probably do
+// benchmarks of real applications to see if adjusting this number makes a
+// difference.  Callers that know their exact use case can also explicitly
+// call createCombined() or createSeparate().)
+constexpr size_t kDefaultCombinedBufSize = 1024;
+constexpr size_t kMaxIOBufSize = std::numeric_limits<size_t>::max() >> 1;
 
 // Helper function for IOBuf::takeOwnership()
+// The user's free function is not allowed to throw.
+// (We are already in the middle of throwing an exception, so
+// we cannot let this exception go unhandled.)
 void takeOwnershipError(
     bool freeOnError,
     void* buf,
     folly::IOBuf::FreeFunction freeFn,
-    void* userData) {
+    void* userData) noexcept {
   if (!freeOnError) {
     return;
   }
@@ -72,22 +98,20 @@ void takeOwnershipError(
     free(buf);
     return;
   }
-  try {
-    freeFn(buf, userData);
-  } catch (...) {
-    // The user's free function is not allowed to throw.
-    // (We are already in the middle of throwing an exception, so
-    // we cannot let this exception go unhandled.)
-    abort();
-  }
+  freeFn(buf, userData);
 }
 
 } // namespace
 
 namespace folly {
 
+// use free for size >= 4GB
+// since we can store only 32 bits in the size var
 struct IOBuf::HeapPrefix {
-  explicit HeapPrefix(uint16_t flg) : magic(kHeapMagic), flags(flg) {}
+  HeapPrefix(uint8_t rc, size_t sz)
+      : magic(kHeapMagic),
+        refcount(rc),
+        size((sz == ((size_t)(uint32_t)sz)) ? static_cast<uint32_t>(sz) : 0) {}
   ~HeapPrefix() {
     // Reset magic to 0 on destruction.  This is solely for debugging purposes
     // to help catch bugs where someone tries to use HeapStorage after it has
@@ -96,7 +120,8 @@ struct IOBuf::HeapPrefix {
   }
 
   uint16_t magic;
-  std::atomic<uint16_t> flags;
+  std::atomic<uint8_t> refcount; // 1 for IOBuf and 1 for SharedInfo (+ data).
+  uint32_t size;
 };
 
 struct IOBuf::HeapStorage {
@@ -105,40 +130,95 @@ struct IOBuf::HeapStorage {
   // This way operator new will work even if allocating a subclass of IOBuf
   // that requires more space.
   folly::IOBuf buf;
+
+ private:
+  // This function exists only to have a scope to do the static_asserts().
+  static void checkInvariants() {
+    // Make sure jemalloc allocates from the 64-byte class.
+    static_assert(sizeof(HeapPrefix) == 8);
+    static_assert(sizeof(IOBuf) <= 56);
+    static_assert(sizeof(HeapStorage) <= 64);
+  }
 };
 
-struct IOBuf::HeapFullStorage {
-  // Make sure jemalloc allocates from the 64-byte class.  Putting this here
-  // because HeapStorage is private so it can't be at namespace level.
-  static_assert(sizeof(HeapStorage) <= 64, "IOBuf may not grow over 56 bytes!");
-
+struct alignas(folly::max_align_v) IOBuf::HeapFullStorage {
   HeapStorage hs;
   SharedInfo shared;
-  folly::max_align_t align;
 };
 
-IOBuf::SharedInfo::SharedInfo() : freeFn(nullptr), userData(nullptr) {
-  // Use relaxed memory ordering here.  Since we are creating a new SharedInfo,
-  // no other threads should be referring to it yet.
-  refcount.store(1, std::memory_order_relaxed);
+// Only IOBuf is in use.
+constexpr uint8_t kHeapStorageRefcount = 1;
+// Both IOBuf and SharedInfo (possibly with attached data) are in use.
+constexpr uint8_t kHeapFullStorageRefcount = 2;
+
+IOBuf::SharedInfo::SharedInfo(FreeFunction fn, void* arg, StorageType st)
+    : freeFn(fn), userData(arg), storageType(st) {}
+
+void IOBuf::SharedInfo::invokeAndDeleteEachObserver(
+    SharedInfoObserverEntryBase* observerListHead, ObserverCb cb) noexcept {
+  if (observerListHead && cb) {
+    // break the chain
+    observerListHead->prev->next = nullptr;
+    auto entry = observerListHead;
+    while (entry) {
+      auto tmp = entry->next;
+      cb(*entry);
+      delete entry;
+      entry = tmp;
+    }
+  }
 }
 
-IOBuf::SharedInfo::SharedInfo(FreeFunction fn, void* arg)
-    : freeFn(fn), userData(arg) {
-  // Use relaxed memory ordering here.  Since we are creating a new SharedInfo,
-  // no other threads should be referring to it yet.
-  refcount.store(1, std::memory_order_relaxed);
+// storageType is stored in info, but info may be already deleted in the
+// kExtBuffer case, so we need to pass it separately.
+void IOBuf::SharedInfo::releaseStorage(
+    IOBuf* parent, StorageType storageType, SharedInfo* info) noexcept {
+  if (storageType != StorageType::kExtBuffer) {
+    DCHECK_EQ((int)storageType, (int)info->storageType);
+  }
+
+  switch (storageType) {
+    case StorageType::kInvalid:
+      compiler_may_unsafely_assume_unreachable();
+    case StorageType::kAllocated:
+      delete info;
+      break;
+    case StorageType::kHeapFullStorage: {
+      auto storageAddr =
+          reinterpret_cast<uint8_t*>(info) - offsetof(HeapFullStorage, shared);
+      auto storage = reinterpret_cast<HeapFullStorage*>(storageAddr);
+      info->~SharedInfo();
+      if (&storage->hs.buf == parent) {
+        // We were called through the same IOBuf that owns the storage, so there
+        // cannot be a concurrent refcount decrement, and we can avoid an
+        // expensive atomic RMW operation.
+        DCHECK_EQ(
+            storage->hs.prefix.refcount.load(std::memory_order_relaxed),
+            kHeapFullStorageRefcount);
+        storage->hs.prefix.refcount.store(1, std::memory_order_relaxed);
+      } else {
+        IOBuf::decrementStorageRefcount(&storage->hs);
+      }
+      break;
+    }
+    case StorageType::kExtBuffer:
+      break; // Storage was already freed.
+  }
 }
 
 void* IOBuf::operator new(size_t size) {
+  if (size > kMaxIOBufSize) {
+    throw_exception<std::bad_alloc>();
+  }
   size_t fullSize = offsetof(HeapStorage, buf) + size;
-  auto* storage = static_cast<HeapStorage*>(malloc(fullSize));
-  // operator new is not allowed to return nullptr
-  if (UNLIKELY(storage == nullptr)) {
-    throw std::bad_alloc();
+  auto storage = static_cast<HeapStorage*>(checkedMalloc(fullSize));
+
+  new (&storage->prefix) HeapPrefix(kHeapStorageRefcount, fullSize);
+
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(storage, fullSize);
   }
 
-  new (&storage->prefix) HeapPrefix(kIOBufInUse);
   return &(storage->buf);
 }
 
@@ -147,58 +227,45 @@ void* IOBuf::operator new(size_t /* size */, void* ptr) {
 }
 
 void IOBuf::operator delete(void* ptr) {
-  auto* storageAddr = static_cast<uint8_t*>(ptr) - offsetof(HeapStorage, buf);
-  auto* storage = reinterpret_cast<HeapStorage*>(storageAddr);
-  releaseStorage(storage, kIOBufInUse);
+  auto storageAddr = static_cast<uint8_t*>(ptr) - offsetof(HeapStorage, buf);
+  auto storage = reinterpret_cast<HeapStorage*>(storageAddr);
+  decrementStorageRefcount(storage);
 }
 
-void IOBuf::releaseStorage(HeapStorage* storage, uint16_t freeFlags) {
+void IOBuf::operator delete(void* /* ptr */, void* /* placement */) {
+  // Provide matching operator for `IOBuf::new` to avoid MSVC compilation
+  // warning (C4291) about memory leak when exception is thrown in the
+  // constructor.
+}
+
+void IOBuf::decrementStorageRefcount(HeapStorage* storage) noexcept {
   CHECK_EQ(storage->prefix.magic, static_cast<uint16_t>(kHeapMagic));
 
-  // Use relaxed memory order here.  If we are unlucky and happen to get
-  // out-of-date data the compare_exchange_weak() call below will catch
-  // it and load new data with memory_order_acq_rel.
-  auto flags = storage->prefix.flags.load(std::memory_order_acquire);
-  DCHECK_EQ((flags & freeFlags), freeFlags);
+  auto rc = storage->prefix.refcount.load(std::memory_order_acquire);
+  DCHECK_LE(rc, kHeapFullStorageRefcount);
+  if (rc > 1 &&
+      storage->prefix.refcount.fetch_sub(1, std::memory_order_acq_rel) > 1) {
+    return; // Storage still in use.
+  }
 
-  while (true) {
-    uint16_t newFlags = uint16_t(flags & ~freeFlags);
-    if (newFlags == 0) {
-      // The storage space is now unused.  Free it.
-      storage->prefix.HeapPrefix::~HeapPrefix();
-      free(storage);
-      return;
+  // The storage space is now unused, we can free it.
+  size_t size = storage->prefix.size;
+  storage->prefix.HeapPrefix::~HeapPrefix();
+  if (FOLLY_LIKELY(size)) {
+    if (io_buf_free_cb) {
+      io_buf_free_cb(storage, size);
     }
-
-    // This storage segment still contains portions that are in use.
-    // Just clear the flags specified in freeFlags for now.
-    auto ret = storage->prefix.flags.compare_exchange_weak(
-        flags, newFlags, std::memory_order_acq_rel);
-    if (ret) {
-      // We successfully updated the flags.
-      return;
-    }
-
-    // We failed to update the flags.  Some other thread probably updated them
-    // and cleared some of the other bits.  Continue around the loop to see if
-    // we are the last user now, or if we need to try updating the flags again.
+    sizedFree(storage, size);
+  } else {
+    free(storage);
   }
 }
 
-void IOBuf::freeInternalBuf(void* /* buf */, void* userData) {
-  auto* storage = static_cast<HeapStorage*>(userData);
-  releaseStorage(storage, kDataInUse);
-}
-
 IOBuf::IOBuf(CreateOp, std::size_t capacity)
-    : next_(this),
-      prev_(this),
-      data_(nullptr),
-      length_(0),
-      flagsAndSharedInfo_(0) {
+    : length_(0), data_(nullptr), next_(this), prev_(this) {
   SharedInfo* info;
   allocExtBuffer(capacity, &buf_, &info, &capacity_);
-  setSharedInfo(info);
+  sharedInfo_ = info;
   data_ = buf_;
 }
 
@@ -208,7 +275,18 @@ IOBuf::IOBuf(
     std::size_t size,
     std::size_t headroom,
     std::size_t minTailroom)
-    : IOBuf(CREATE, headroom + size + minTailroom) {
+    : length_(0), data_(nullptr), next_(this), prev_(this) {
+  std::size_t capacity = 0;
+  if (!checked_add(&capacity, size, headroom, minTailroom) ||
+      capacity > kMaxIOBufSize) {
+    throw_exception<std::bad_alloc>();
+  }
+
+  SharedInfo* info;
+  allocExtBuffer(capacity, &buf_, &info, &capacity_);
+  sharedInfo_ = info;
+  data_ = buf_;
+
   advance(headroom);
   if (size > 0) {
     assert(buf != nullptr);
@@ -225,6 +303,10 @@ IOBuf::IOBuf(
     : IOBuf(op, br.data(), br.size(), headroom, minTailroom) {}
 
 unique_ptr<IOBuf> IOBuf::create(std::size_t capacity) {
+  if (capacity > kMaxIOBufSize) {
+    throw_exception<std::bad_alloc>();
+  }
+
   // For smaller-sized buffers, allocate the IOBuf, SharedInfo, and the buffer
   // all with a single allocation.
   //
@@ -237,25 +319,51 @@ unique_ptr<IOBuf> IOBuf::create(std::size_t capacity) {
   if (capacity <= kDefaultCombinedBufSize) {
     return createCombined(capacity);
   }
+
+  // if we have nallocx, we want to allocate the capacity and the overhead in
+  // a single allocation only if we do not cross into the next allocation class
+  // for some buffer sizes, this can use about 25% extra memory
+  if (canNallocx()) {
+    auto mallocSize = goodMallocSize(capacity);
+    // round capacity to a multiple of 8
+    size_t minSize = ((capacity + 7) & ~7) + sizeof(SharedInfo);
+    // if we do not have space for the overhead, allocate the mem separateley
+    if (mallocSize < minSize) {
+      auto* buf = checkedMalloc(mallocSize);
+      return takeOwnership(SIZED_FREE, buf, mallocSize, 0, 0);
+    }
+  }
+
   return createSeparate(capacity);
 }
 
 unique_ptr<IOBuf> IOBuf::createCombined(std::size_t capacity) {
+  if (capacity > kMaxIOBufSize) {
+    throw_exception<std::bad_alloc>();
+  }
+
   // To save a memory allocation, allocate space for the IOBuf object, the
   // SharedInfo struct, and the data itself all with a single call to malloc().
-  size_t requiredStorage = offsetof(HeapFullStorage, align) + capacity;
+  size_t requiredStorage = sizeof(HeapFullStorage) + capacity;
   size_t mallocSize = goodMallocSize(requiredStorage);
-  auto* storage = static_cast<HeapFullStorage*>(malloc(mallocSize));
+  auto storage = static_cast<HeapFullStorage*>(checkedMalloc(mallocSize));
 
-  new (&storage->hs.prefix) HeapPrefix(kIOBufInUse | kDataInUse);
-  new (&storage->shared) SharedInfo(freeInternalBuf, storage);
+  new (&storage->hs.prefix) HeapPrefix(kHeapFullStorageRefcount, mallocSize);
+  // No free function, data lifetime is tied to SharedInfo, whole storage will
+  // be deallocated when both IOBuf and SharedInfo are gone.
+  new (&storage->shared) SharedInfo(
+      [](void*, void*) {}, nullptr, SharedInfo::StorageType::kHeapFullStorage);
 
-  uint8_t* bufAddr = reinterpret_cast<uint8_t*>(&storage->align);
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(storage, mallocSize);
+  }
+
+  auto bufAddr = reinterpret_cast<uint8_t*>(storage) + sizeof(HeapFullStorage);
   uint8_t* storageEnd = reinterpret_cast<uint8_t*>(storage) + mallocSize;
-  size_t actualCapacity = size_t(storageEnd - bufAddr);
+  auto actualCapacity = size_t(storageEnd - bufAddr);
   unique_ptr<IOBuf> ret(new (&storage->hs.buf) IOBuf(
       InternalConstructor(),
-      packFlagsAndSharedInfo(0, &storage->shared),
+      &storage->shared,
       bufAddr,
       actualCapacity,
       bufAddr,
@@ -268,8 +376,7 @@ unique_ptr<IOBuf> IOBuf::createSeparate(std::size_t capacity) {
 }
 
 unique_ptr<IOBuf> IOBuf::createChain(
-    size_t totalCapacity,
-    std::size_t maxBufCapacity) {
+    size_t totalCapacity, std::size_t maxBufCapacity) {
   unique_ptr<IOBuf> out =
       create(std::min(totalCapacity, size_t(maxBufCapacity)));
   size_t allocatedCapacity = out->capacity();
@@ -278,62 +385,143 @@ unique_ptr<IOBuf> IOBuf::createChain(
     unique_ptr<IOBuf> newBuf = create(
         std::min(totalCapacity - allocatedCapacity, size_t(maxBufCapacity)));
     allocatedCapacity += newBuf->capacity();
-    out->prependChain(std::move(newBuf));
+    out->appendToChain(std::move(newBuf));
   }
 
   return out;
+}
+
+size_t IOBuf::goodSize(size_t minCapacity, CombinedOption combined) {
+  if (combined == CombinedOption::DEFAULT) {
+    combined = minCapacity <= kDefaultCombinedBufSize
+        ? CombinedOption::COMBINED
+        : CombinedOption::SEPARATE;
+  }
+  size_t overhead;
+  if (combined == CombinedOption::COMBINED) {
+    overhead = sizeof(HeapFullStorage);
+  } else {
+    // Pad minCapacity to a multiple of 8
+    minCapacity = (minCapacity + 7) & ~7;
+    overhead = sizeof(SharedInfo);
+  }
+  size_t goodSize = folly::goodMallocSize(minCapacity + overhead);
+  return goodSize - overhead;
 }
 
 IOBuf::IOBuf(
     TakeOwnershipOp,
     void* buf,
     std::size_t capacity,
+    std::size_t offset,
     std::size_t length,
     FreeFunction freeFn,
     void* userData,
     bool freeOnError)
-    : next_(this),
-      prev_(this),
-      data_(static_cast<uint8_t*>(buf)),
-      buf_(static_cast<uint8_t*>(buf)),
-      length_(length),
+    : length_(length),
+      data_(static_cast<uint8_t*>(buf) + offset),
       capacity_(capacity),
-      flagsAndSharedInfo_(
-          packFlagsAndSharedInfo(kFlagFreeSharedInfo, nullptr)) {
-  try {
-    setSharedInfo(new SharedInfo(freeFn, userData));
-  } catch (...) {
+      buf_(static_cast<uint8_t*>(buf)),
+      next_(this),
+      prev_(this) {
+  // do not allow only user data without a freeFn
+  // since we use that for folly::sizedFree
+  DCHECK(!userData || (userData && freeFn));
+
+  auto rollback = makeGuard([&] { //
     takeOwnershipError(freeOnError, buf, freeFn, userData);
-    throw;
+  });
+  sharedInfo_ =
+      new SharedInfo(freeFn, userData, SharedInfo::StorageType::kAllocated);
+  rollback.dismiss();
+}
+
+IOBuf::IOBuf(
+    TakeOwnershipOp,
+    SizedFree,
+    void* buf,
+    std::size_t capacity,
+    std::size_t offset,
+    std::size_t length,
+    bool freeOnError)
+    : length_(length),
+      data_(static_cast<uint8_t*>(buf) + offset),
+      capacity_(capacity),
+      buf_(static_cast<uint8_t*>(buf)),
+      next_(this),
+      prev_(this) {
+  auto rollback = makeGuard([&] { //
+    takeOwnershipError(freeOnError, buf, nullptr, nullptr);
+  });
+  sharedInfo_ = new SharedInfo(
+      nullptr,
+      reinterpret_cast<void*>(capacity),
+      SharedInfo::StorageType::kAllocated);
+  rollback.dismiss();
+
+  if (io_buf_alloc_cb && capacity) {
+    io_buf_alloc_cb(buf, capacity);
   }
 }
 
 unique_ptr<IOBuf> IOBuf::takeOwnership(
     void* buf,
     std::size_t capacity,
+    std::size_t offset,
     std::size_t length,
     FreeFunction freeFn,
     void* userData,
-    bool freeOnError) {
-  try {
-    // TODO: We could allocate the IOBuf object and SharedInfo all in a single
-    // memory allocation.  We could use the existing HeapStorage class, and
-    // define a new kSharedInfoInUse flag.  We could change our code to call
-    // releaseStorage(kFlagFreeSharedInfo) when this kFlagFreeSharedInfo,
-    // rather than directly calling delete.
-    //
-    // Note that we always pass freeOnError as false to the constructor.
-    // If the constructor throws we'll handle it below.  (We have to handle
-    // allocation failures from std::make_unique too.)
-    return std::make_unique<IOBuf>(
-        TAKE_OWNERSHIP, buf, capacity, length, freeFn, userData, false);
-  } catch (...) {
+    bool freeOnError,
+    TakeOwnershipOption option) {
+  // do not allow only user data without a freeFn
+  // since we use that for folly::sizedFree
+  DCHECK(
+      !userData || (userData && freeFn) ||
+      (userData && !freeFn && (option == TakeOwnershipOption::STORE_SIZE)));
+
+  HeapFullStorage* storage = nullptr;
+  auto rollback = makeGuard([&] {
+    if (storage) {
+      free(storage);
+    }
     takeOwnershipError(freeOnError, buf, freeFn, userData);
-    throw;
+  });
+
+  if (capacity > kMaxIOBufSize) {
+    throw_exception<std::bad_alloc>();
   }
+
+  size_t mallocSize = sizeof(HeapFullStorage);
+  storage = static_cast<HeapFullStorage*>(checkedMalloc(mallocSize));
+
+  new (&storage->hs.prefix) HeapPrefix(kHeapFullStorageRefcount, mallocSize);
+  new (&storage->shared)
+      SharedInfo(freeFn, userData, SharedInfo::StorageType::kHeapFullStorage);
+
+  auto result = unique_ptr<IOBuf>(new (&storage->hs.buf) IOBuf(
+      InternalConstructor(),
+      &storage->shared,
+      static_cast<uint8_t*>(buf),
+      capacity,
+      static_cast<uint8_t*>(buf) + offset,
+      length));
+
+  rollback.dismiss();
+
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(storage, mallocSize);
+    if (userData && !freeFn && (option == TakeOwnershipOption::STORE_SIZE)) {
+      // Even though we did not allocate the buffer, call io_buf_alloc_cb()
+      // since we will call io_buf_free_cb() on destruction, and we want these
+      // calls to be 1:1.
+      io_buf_alloc_cb(buf, capacity);
+    }
+  }
+
+  return result;
 }
 
-IOBuf::IOBuf(WrapBufferOp, const void* buf, std::size_t capacity)
+IOBuf::IOBuf(WrapBufferOp, const void* buf, std::size_t capacity) noexcept
     : IOBuf(
           InternalConstructor(),
           0,
@@ -345,30 +533,31 @@ IOBuf::IOBuf(WrapBufferOp, const void* buf, std::size_t capacity)
           static_cast<uint8_t*>(const_cast<void*>(buf)),
           capacity) {}
 
-IOBuf::IOBuf(WrapBufferOp op, ByteRange br) : IOBuf(op, br.data(), br.size()) {}
+IOBuf::IOBuf(WrapBufferOp op, ByteRange br) noexcept
+    : IOBuf(op, br.data(), br.size()) {}
 
 unique_ptr<IOBuf> IOBuf::wrapBuffer(const void* buf, std::size_t capacity) {
   return std::make_unique<IOBuf>(WRAP_BUFFER, buf, capacity);
 }
 
-IOBuf IOBuf::wrapBufferAsValue(const void* buf, std::size_t capacity) {
+IOBuf IOBuf::wrapBufferAsValue(const void* buf, std::size_t capacity) noexcept {
   return IOBuf(WrapBufferOp::WRAP_BUFFER, buf, capacity);
 }
 
-IOBuf::IOBuf() noexcept {}
+IOBuf::IOBuf() noexcept = default;
 
 IOBuf::IOBuf(IOBuf&& other) noexcept
-    : data_(other.data_),
-      buf_(other.buf_),
-      length_(other.length_),
+    : length_(other.length_),
+      data_(other.data_),
       capacity_(other.capacity_),
-      flagsAndSharedInfo_(other.flagsAndSharedInfo_) {
+      buf_(other.buf_),
+      sharedInfo_(other.sharedInfo_) {
   // Reset other so it is a clean state to be destroyed.
   other.data_ = nullptr;
   other.buf_ = nullptr;
   other.length_ = 0;
   other.capacity_ = 0;
-  other.flagsAndSharedInfo_ = 0;
+  other.sharedInfo_ = nullptr;
 
   // If other was part of the chain, assume ownership of the rest of its chain.
   // (It's only valid to perform move assignment on the head of a chain.)
@@ -393,20 +582,25 @@ IOBuf::IOBuf(const IOBuf& other) {
 
 IOBuf::IOBuf(
     InternalConstructor,
-    uintptr_t flagsAndSharedInfo,
+    SharedInfo* sharedInfo,
     uint8_t* buf,
     std::size_t capacity,
     uint8_t* data,
-    std::size_t length)
-    : next_(this),
-      prev_(this),
+    std::size_t length) noexcept
+    : length_(length),
       data_(data),
-      buf_(buf),
-      length_(length),
       capacity_(capacity),
-      flagsAndSharedInfo_(flagsAndSharedInfo) {
+      buf_(buf),
+      next_(this),
+      prev_(this),
+      sharedInfo_(sharedInfo) {
   assert(data >= buf);
-  assert(data + length <= buf + capacity);
+  assert(intptr_t(data) + length <= intptr_t(buf) + capacity);
+
+  if (folly::asan_region_is_poisoned(buf, capacity)) {
+    // If we know it's a poisoned region, access it to trigger ASAN reporting.
+    memset(buf, 0, capacity);
+  }
 }
 
 IOBuf::~IOBuf() {
@@ -442,13 +636,13 @@ IOBuf& IOBuf::operator=(IOBuf&& other) noexcept {
   buf_ = other.buf_;
   length_ = other.length_;
   capacity_ = other.capacity_;
-  flagsAndSharedInfo_ = other.flagsAndSharedInfo_;
+  sharedInfo_ = other.sharedInfo_;
   // Reset other so it is a clean state to be destroyed.
   other.data_ = nullptr;
   other.buf_ = nullptr;
   other.length_ = 0;
   other.capacity_ = 0;
-  other.flagsAndSharedInfo_ = 0;
+  other.sharedInfo_ = nullptr;
 
   // If other was part of the chain, assume ownership of the rest of its chain.
   // (It's only valid to perform move assignment on the head of a chain.)
@@ -476,7 +670,7 @@ IOBuf& IOBuf::operator=(const IOBuf& other) {
   return *this;
 }
 
-bool IOBuf::empty() const {
+bool IOBuf::empty() const noexcept {
   const IOBuf* current = this;
   do {
     if (current->length() != 0) {
@@ -487,7 +681,7 @@ bool IOBuf::empty() const {
   return true;
 }
 
-size_t IOBuf::countChainElements() const {
+size_t IOBuf::countChainElements() const noexcept {
   size_t numElements = 1;
   for (IOBuf* current = next_; current != this; current = current->next_) {
     ++numElements;
@@ -495,7 +689,7 @@ size_t IOBuf::countChainElements() const {
   return numElements;
 }
 
-std::size_t IOBuf::computeChainDataLength() const {
+std::size_t IOBuf::computeChainDataLength() const noexcept {
   std::size_t fullLength = length_;
   for (IOBuf* current = next_; current != this; current = current->next_) {
     fullLength += current->length_;
@@ -503,7 +697,15 @@ std::size_t IOBuf::computeChainDataLength() const {
   return fullLength;
 }
 
-void IOBuf::prependChain(unique_ptr<IOBuf>&& iobuf) {
+std::size_t IOBuf::computeChainCapacity() const noexcept {
+  std::size_t fullCapacity = capacity_;
+  for (IOBuf* current = next_; current != this; current = current->next_) {
+    fullCapacity += current->capacity_;
+  }
+  return fullCapacity;
+}
+
+void IOBuf::appendToChain(unique_ptr<IOBuf>&& iobuf) {
   // Take ownership of the specified IOBuf
   IOBuf* other = iobuf.release();
 
@@ -522,49 +724,74 @@ void IOBuf::prependChain(unique_ptr<IOBuf>&& iobuf) {
 }
 
 unique_ptr<IOBuf> IOBuf::clone() const {
-  return std::make_unique<IOBuf>(cloneAsValue());
+  auto tmp = cloneOne();
+
+  for (IOBuf* current = next_; current != this; current = current->next_) {
+    tmp->appendToChain(current->cloneOne());
+  }
+
+  return tmp;
 }
 
 unique_ptr<IOBuf> IOBuf::cloneOne() const {
-  return std::make_unique<IOBuf>(cloneOneAsValue());
+  if (sharedInfo_) {
+    sharedInfo_->refcount.fetch_add(1, std::memory_order_acq_rel);
+  }
+  return std::unique_ptr<IOBuf>(new IOBuf(
+      InternalConstructor(), sharedInfo_, buf_, capacity_, data_, length_));
 }
 
 unique_ptr<IOBuf> IOBuf::cloneCoalesced() const {
   return std::make_unique<IOBuf>(cloneCoalescedAsValue());
 }
 
+unique_ptr<IOBuf> IOBuf::cloneCoalescedWithHeadroomTailroom(
+    std::size_t newHeadroom, std::size_t newTailroom) const {
+  return std::make_unique<IOBuf>(
+      cloneCoalescedAsValueWithHeadroomTailroom(newHeadroom, newTailroom));
+}
+
 IOBuf IOBuf::cloneAsValue() const {
   auto tmp = cloneOneAsValue();
 
   for (IOBuf* current = next_; current != this; current = current->next_) {
-    tmp.prependChain(current->cloneOne());
+    tmp.appendToChain(current->cloneOne());
   }
 
   return tmp;
 }
 
 IOBuf IOBuf::cloneOneAsValue() const {
-  if (SharedInfo* info = sharedInfo()) {
-    setFlags(kFlagMaybeShared);
-    info->refcount.fetch_add(1, std::memory_order_acq_rel);
+  if (sharedInfo_) {
+    sharedInfo_->refcount.fetch_add(1, std::memory_order_acq_rel);
   }
   return IOBuf(
-      InternalConstructor(),
-      flagsAndSharedInfo_,
-      buf_,
-      capacity_,
-      data_,
-      length_);
+      InternalConstructor(), sharedInfo_, buf_, capacity_, data_, length_);
 }
 
 IOBuf IOBuf::cloneCoalescedAsValue() const {
-  if (!isChained()) {
-    return cloneOneAsValue();
-  }
-  // Coalesce into newBuf
-  const std::size_t newLength = computeChainDataLength();
   const std::size_t newHeadroom = headroom();
   const std::size_t newTailroom = prev()->tailroom();
+  return cloneCoalescedAsValueWithHeadroomTailroom(newHeadroom, newTailroom);
+}
+
+IOBuf IOBuf::cloneCoalescedAsValueWithHeadroomTailroom(
+    std::size_t newHeadroom, std::size_t newTailroom) const {
+  if (isChained() || newHeadroom != headroom()) {
+    // Fall through to slow code path.
+  } else if (newTailroom == tailroom()) {
+    return cloneOneAsValue();
+  } else if (newTailroom < tailroom()) {
+    const std::size_t newCapacity =
+        goodExtBufferSize(length_ + newHeadroom + newTailroom) -
+        sizeof(SharedInfo);
+    if (tailroom() <= newCapacity - newHeadroom - length_) {
+      return cloneOneAsValue();
+    }
+  }
+
+  // Coalesce into newBuf
+  const std::size_t newLength = computeChainDataLength();
   const std::size_t newCapacity = newLength + newHeadroom + newTailroom;
   IOBuf newBuf{CREATE, newCapacity};
   newBuf.advance(newHeadroom);
@@ -587,6 +814,54 @@ IOBuf IOBuf::cloneCoalescedAsValue() const {
   return newBuf;
 }
 
+std::unique_ptr<IOBuf> IOBuf::maybeSplitTail() {
+  if (isSharedOne()) {
+    return nullptr;
+  }
+
+  const size_t tailSize = tailroom();
+
+  // If this is already a split tail, clone the (clone of the) original buffer
+  // instead of this wrapper, to avoid deep recursion in the free function.
+  static constexpr auto freeFn = [](void*, void* p) {
+    reinterpret_cast<IOBuf*>(p)->~IOBuf();
+  };
+  auto origBuf =
+      getFreeFn() == freeFn ? reinterpret_cast<IOBuf*>(getUserData()) : this;
+  DCHECK_EQ(
+      reinterpret_cast<const void*>(origBuf->bufferEnd()),
+      reinterpret_cast<const void*>(bufferEnd()));
+
+  struct SplitTailStorage : HeapFullStorage {
+    IOBuf parent;
+  };
+
+  size_t mallocSize = sizeof(SplitTailStorage);
+  auto* storage = static_cast<SplitTailStorage*>(checkedMalloc(mallocSize));
+
+  void* userData = new (&storage->parent) IOBuf(origBuf->cloneOneAsValue());
+  new (&storage->hs.prefix) HeapPrefix(kHeapFullStorageRefcount, mallocSize);
+  new (&storage->shared)
+      SharedInfo(freeFn, userData, SharedInfo::StorageType::kHeapFullStorage);
+
+  // Release ownership of the tail.
+  trimWritableTail(tailSize);
+
+  auto result = std::unique_ptr<IOBuf>(new (&storage->hs.buf) IOBuf(
+      InternalConstructor(),
+      &storage->shared,
+      writableTail(),
+      tailSize,
+      writableTail(),
+      0));
+
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(storage, mallocSize);
+  }
+
+  return result;
+}
+
 void IOBuf::unshareOneSlow() {
   // Allocate a new buffer for the data
   uint8_t* buf;
@@ -605,8 +880,7 @@ void IOBuf::unshareOneSlow() {
 
   // Release our reference on the old buffer
   decrementRefcount();
-  // Make sure kFlagMaybeShared and kFlagFreeSharedInfo are all cleared.
-  setFlagsAndSharedInfo(0, sharedInfo);
+  sharedInfo_ = sharedInfo;
 
   // Update the buffer pointers to point to the new buffer
   data_ = buf + headlen;
@@ -692,7 +966,7 @@ void IOBuf::coalesceSlow(size_t maxLength) {
       break;
     }
     if (end == this) {
-      throw std::overflow_error(
+      throw_exception<std::overflow_error>(
           "attempted to coalesce more data than "
           "available");
     }
@@ -704,10 +978,7 @@ void IOBuf::coalesceSlow(size_t maxLength) {
 }
 
 void IOBuf::coalesceAndReallocate(
-    size_t newHeadroom,
-    size_t newLength,
-    IOBuf* end,
-    size_t newTailroom) {
+    size_t newHeadroom, size_t newLength, IOBuf* end, size_t newTailroom) {
   std::size_t newCapacity = newLength + newHeadroom + newTailroom;
 
   // Allocate space for the coalesced buffer.
@@ -734,13 +1005,12 @@ void IOBuf::coalesceAndReallocate(
     current = current->next_;
   } while (current != end);
   assert(remaining == 0);
+  (void)remaining;
 
   // Point at the new buffer
   decrementRefcount();
 
-  // Make sure kFlagMaybeShared and kFlagFreeSharedInfo are all cleared.
-  setFlagsAndSharedInfo(0, newInfo);
-
+  sharedInfo_ = newInfo;
   capacity_ = actualCapacity;
   buf_ = newBuf;
   data_ = newData;
@@ -754,44 +1024,42 @@ void IOBuf::coalesceAndReallocate(
   }
 }
 
-void IOBuf::decrementRefcount() {
+void IOBuf::decrementRefcount() noexcept {
   // Externally owned buffers don't have a SharedInfo object and aren't managed
   // by the reference count
-  SharedInfo* info = sharedInfo();
-  if (!info) {
+  if (!sharedInfo_) {
     return;
   }
 
-  // Decrement the refcount
-  uint32_t newcnt = info->refcount.fetch_sub(1, std::memory_order_acq_rel);
-  // Note that fetch_sub() returns the value before we decremented.
-  // If it is 1, we were the only remaining user; if it is greater there are
-  // still other users.
-  if (newcnt > 1) {
-    return;
+  // Avoid doing atomic decrement if the refcount is 1.
+  // This is safe, because it means that we're the last reference and destroying
+  // the object. Anything trying to copy it is already undefined behavior.
+  if (sharedInfo_->refcount.load(std::memory_order_acquire) > 1) {
+    // Decrement the refcount
+    uint32_t newcnt =
+        sharedInfo_->refcount.fetch_sub(1, std::memory_order_acq_rel);
+    // Note that fetch_sub() returns the value before we decremented.
+    // If it is 1, we were the only remaining user; if it is greater there are
+    // still other users.
+    if (newcnt > 1) {
+      return;
+    }
   }
 
-  // We were the last user.  Free the buffer
-  freeExtBuffer();
-
-  // Free the SharedInfo if it was allocated separately.
-  //
-  // This is only used by takeOwnership().
-  //
-  // To avoid this special case handling in decrementRefcount(), we could have
-  // takeOwnership() set a custom freeFn() that calls the user's free function
-  // then frees the SharedInfo object.  (This would require that
-  // takeOwnership() store the user's free function with its allocated
-  // SharedInfo object.)  However, handling this specially with a flag seems
-  // like it shouldn't be problematic.
-  if (flags() & kFlagFreeSharedInfo) {
-    delete sharedInfo();
-  }
+  // Save the storage type since freeExtBuffer can free the SharedInfo.
+  auto infoStorageType = sharedInfo_->storageType;
+  freeExtBuffer(); // We were the last user. Free the buffer
+  SharedInfo::releaseStorage(this, infoStorageType, sharedInfo_);
 }
 
 void IOBuf::reserveSlow(std::size_t minHeadroom, std::size_t minTailroom) {
-  size_t newCapacity = (size_t)length_ + minHeadroom + minTailroom;
-  DCHECK_LT(newCapacity, UINT32_MAX);
+  size_t newCapacity = length_;
+  if (!checked_add(&newCapacity, newCapacity, minHeadroom) ||
+      !checked_add(&newCapacity, newCapacity, minTailroom) ||
+      newCapacity > kMaxIOBufSize) {
+    // overflow
+    throw_exception<std::bad_alloc>();
+  }
 
   // reserveSlow() is dangerous if anyone else is sharing the buffer, as we may
   // reallocate and free the original buffer.  It should only ever be called if
@@ -826,7 +1094,9 @@ void IOBuf::reserveSlow(std::size_t minHeadroom, std::size_t minTailroom) {
 
   // If we have a buffer allocated with malloc and we just need more tailroom,
   // try to use realloc()/xallocx() to grow the buffer in place.
-  SharedInfo* info = sharedInfo();
+  SharedInfo* info = sharedInfo_;
+  auto infoStorageType =
+      info ? info->storageType : SharedInfo::StorageType::kInvalid;
   if (info && (info->freeFn == nullptr) && length_ != 0 &&
       oldHeadroom >= minHeadroom) {
     size_t headSlack = oldHeadroom - minHeadroom;
@@ -842,8 +1112,16 @@ void IOBuf::reserveSlow(std::size_t minHeadroom, std::size_t minTailroom) {
         void* p = buf_;
         if (allocatedCapacity >= jemallocMinInPlaceExpandable) {
           if (xallocx(p, newAllocatedCapacity, 0, 0) == newAllocatedCapacity) {
+            if (io_buf_free_cb) {
+              io_buf_free_cb(p, reinterpret_cast<size_t>(info->userData));
+            }
             newBuffer = static_cast<uint8_t*>(p);
             newHeadroom = oldHeadroom;
+            // update the userData
+            info->userData = reinterpret_cast<void*>(newAllocatedCapacity);
+            if (io_buf_alloc_cb) {
+              io_buf_alloc_cb(newBuffer, newAllocatedCapacity);
+            }
           }
           // if xallocx failed, do nothing, fall back to malloc/memcpy/free
         }
@@ -852,8 +1130,8 @@ void IOBuf::reserveSlow(std::size_t minHeadroom, std::size_t minTailroom) {
       size_t copySlack = capacity() - length_;
       if (copySlack * 2 <= length_) {
         void* p = realloc(buf_, newAllocatedCapacity);
-        if (UNLIKELY(p == nullptr)) {
-          throw std::bad_alloc();
+        if (FOLLY_UNLIKELY(p == nullptr)) {
+          throw_exception<std::bad_alloc>();
         }
         newBuffer = static_cast<uint8_t*>(p);
         newHeadroom = oldHeadroom;
@@ -865,16 +1143,12 @@ void IOBuf::reserveSlow(std::size_t minHeadroom, std::size_t minTailroom) {
   // an internal buffer).  malloc/copy/free.
   if (newBuffer == nullptr) {
     newAllocatedCapacity = goodExtBufferSize(newCapacity);
-    void* p = malloc(newAllocatedCapacity);
-    if (UNLIKELY(p == nullptr)) {
-      throw std::bad_alloc();
-    }
-    newBuffer = static_cast<uint8_t*>(p);
+    newBuffer = static_cast<uint8_t*>(checkedMalloc(newAllocatedCapacity));
     if (length_ > 0) {
       assert(data_ != nullptr);
       memcpy(newBuffer + minHeadroom, data_, length_);
     }
-    if (sharedInfo()) {
+    if (sharedInfo_) {
       freeExtBuffer();
     }
     newHeadroom = minHeadroom;
@@ -883,32 +1157,52 @@ void IOBuf::reserveSlow(std::size_t minHeadroom, std::size_t minTailroom) {
   std::size_t cap;
   initExtBuffer(newBuffer, newAllocatedCapacity, &info, &cap);
 
-  if (flags() & kFlagFreeSharedInfo) {
-    delete sharedInfo();
+  if (infoStorageType != SharedInfo::StorageType::kInvalid) {
+    SharedInfo::releaseStorage(this, infoStorageType, sharedInfo_);
   }
+  sharedInfo_ = info;
 
-  setFlagsAndSharedInfo(0, info);
   capacity_ = cap;
   buf_ = newBuffer;
   data_ = newBuffer + newHeadroom;
   // length_ is unchanged
 }
 
-void IOBuf::freeExtBuffer() {
-  SharedInfo* info = sharedInfo();
-  DCHECK(info);
+// The user's free function should never throw. Otherwise we might throw from
+// the IOBuf destructor. Other code paths like coalesce() also assume that
+// decrementRefcount() cannot throw.
+void IOBuf::freeExtBuffer() noexcept {
+  DCHECK(sharedInfo_);
 
-  if (info->freeFn) {
-    try {
-      info->freeFn(buf_, info->userData);
-    } catch (...) {
-      // The user's free function should never throw.  Otherwise we might
-      // throw from the IOBuf destructor.  Other code paths like coalesce()
-      // also assume that decrementRefcount() cannot throw.
-      abort();
-    }
+  // Store all the needed information in case the SharedInfo's storage is in the
+  // buffer and so we need to destroy it.
+  auto observerListHead = std::exchange(sharedInfo_->observerListHead, nullptr);
+  auto freeFn = sharedInfo_->freeFn;
+  auto userData = sharedInfo_->userData;
+
+  if (sharedInfo_->storageType == SharedInfo::StorageType::kExtBuffer) {
+    sharedInfo_->~SharedInfo();
+  }
+
+  if (freeFn) {
+    freeFn(buf_, userData);
   } else {
-    free(buf_);
+    size_t size = reinterpret_cast<size_t>(userData);
+    if (size) {
+      if (io_buf_free_cb) {
+        io_buf_free_cb(buf_, size);
+      }
+      folly::sizedFree(buf_, size);
+    } else {
+      free(buf_);
+    }
+  }
+  SharedInfo::invokeAndDeleteEachObserver(observerListHead, [](auto& entry) {
+    entry.afterFreeExtBuffer();
+  });
+
+  if (kIsMobile) {
+    buf_ = nullptr;
   }
 }
 
@@ -917,16 +1211,29 @@ void IOBuf::allocExtBuffer(
     uint8_t** bufReturn,
     SharedInfo** infoReturn,
     std::size_t* capacityReturn) {
-  size_t mallocSize = goodExtBufferSize(minCapacity);
-  uint8_t* buf = static_cast<uint8_t*>(malloc(mallocSize));
-  if (UNLIKELY(buf == nullptr)) {
-    throw std::bad_alloc();
+  if (minCapacity > kMaxIOBufSize) {
+    throw_exception<std::bad_alloc>();
   }
+
+  size_t mallocSize = goodExtBufferSize(minCapacity);
+  auto buf = static_cast<uint8_t*>(checkedMalloc(mallocSize));
   initExtBuffer(buf, mallocSize, infoReturn, capacityReturn);
+
+  // the userData and the freeFn are nullptr here
+  // just store the mallocSize in userData
+  (*infoReturn)->userData = reinterpret_cast<void*>(mallocSize);
+  if (io_buf_alloc_cb) {
+    io_buf_alloc_cb(buf, mallocSize);
+  }
+
   *bufReturn = buf;
 }
 
 size_t IOBuf::goodExtBufferSize(std::size_t minCapacity) {
+  if (minCapacity > kMaxIOBufSize) {
+    throw_exception<std::bad_alloc>();
+  }
+
   // Determine how much space we should allocate.  We'll store the SharedInfo
   // for the external buffer just after the buffer itself.  (We store it just
   // after the buffer rather than just before so that the code can still just
@@ -950,17 +1257,22 @@ void IOBuf::initExtBuffer(
   // Find the SharedInfo storage at the end of the buffer
   // and construct the SharedInfo.
   uint8_t* infoStart = (buf + mallocSize) - sizeof(SharedInfo);
-  SharedInfo* sharedInfo = new (infoStart) SharedInfo;
+  auto sharedInfo = new (infoStart)
+      SharedInfo(nullptr, nullptr, SharedInfo::StorageType::kExtBuffer);
 
   *capacityReturn = std::size_t(infoStart - buf);
   *infoReturn = sharedInfo;
 }
 
 fbstring IOBuf::moveToFbString() {
+  // we need to save SharedInfo's storage and observerListHead since sharedInfo_
+  // may not be valid after fbstring str
+  SharedInfo::StorageType infoStorageType = SharedInfo::StorageType::kInvalid;
+  SharedInfoObserverEntryBase* observerListHead = nullptr;
   // malloc-allocated buffers are just fine, everything else needs
   // to be turned into one.
-  if (!sharedInfo() || // user owned, not ours to give up
-      sharedInfo()->freeFn || // not malloc()-ed
+  if (!sharedInfo_ || // user owned, not ours to give up
+      sharedInfo_->freeFn || // not malloc()-ed
       headroom() != 0 || // malloc()-ed block doesn't start at beginning
       tailroom() == 0 || // no room for NUL terminator
       isShared() || // shared
@@ -968,6 +1280,18 @@ fbstring IOBuf::moveToFbString() {
     // We might as well get rid of all head and tailroom if we're going
     // to reallocate; we need 1 byte for NUL terminator.
     coalesceAndReallocate(0, computeChainDataLength(), this, 1);
+  } else {
+    if (sharedInfo_) {
+      // if we do not call coalesceAndReallocate
+      // we might need to call SharedInfo::releaseStorage()
+      // and/or SharedInfo::invokeAndDeleteEachObserver()
+      infoStorageType = sharedInfo_->storageType;
+      // save the observerListHead
+      // the coalesceAndReallocate path will call
+      // decrementRefcount and freeExtBuffer if needed
+      // so the observer lis notification is needed here
+      observerListHead = std::exchange(sharedInfo_->observerListHead, nullptr);
+    }
   }
 
   // Ensure NUL terminated
@@ -978,12 +1302,21 @@ fbstring IOBuf::moveToFbString() {
       capacity(),
       AcquireMallocatedString());
 
-  if (flags() & kFlagFreeSharedInfo) {
-    delete sharedInfo();
+  if (io_buf_free_cb && sharedInfo_ && sharedInfo_->userData) {
+    io_buf_free_cb(
+        writableData(), reinterpret_cast<size_t>(sharedInfo_->userData));
+  }
+
+  SharedInfo::invokeAndDeleteEachObserver(observerListHead, [](auto& entry) {
+    entry.afterReleaseExtBuffer();
+  });
+
+  if (infoStorageType != SharedInfo::StorageType::kInvalid) {
+    SharedInfo::releaseStorage(this, infoStorageType, sharedInfo_);
   }
 
   // Reset to a state where we can be deleted cleanly
-  flagsAndSharedInfo_ = 0;
+  sharedInfo_ = nullptr;
   buf_ = nullptr;
   clear();
   return str;
@@ -995,6 +1328,16 @@ IOBuf::Iterator IOBuf::cbegin() const {
 
 IOBuf::Iterator IOBuf::cend() const {
   return Iterator(nullptr, nullptr);
+}
+
+std::unique_ptr<IOBuf> IOBuf::fromString(std::unique_ptr<std::string> ptr) {
+  auto ret = takeOwnership(
+      ptr->data(),
+      ptr->size(),
+      [](void*, void* userData) { delete static_cast<std::string*>(userData); },
+      static_cast<void*>(ptr.get()));
+  std::ignore = ptr.release();
+  return ret;
 }
 
 folly::fbvector<struct iovec> IOBuf::getIov() const {
@@ -1015,25 +1358,79 @@ void IOBuf::appendToIov(folly::fbvector<struct iovec>* iov) const {
   } while (p != this);
 }
 
-size_t IOBuf::fillIov(struct iovec* iov, size_t len) const {
+unique_ptr<IOBuf> IOBuf::wrapIov(const iovec* vec, size_t count) {
+  unique_ptr<IOBuf> result = nullptr;
+  for (size_t i = 0; i < count; ++i) {
+    size_t len = vec[i].iov_len;
+    void* data = vec[i].iov_base;
+    if (len > 0) {
+      auto buf = wrapBuffer(data, len);
+      if (!result) {
+        result = std::move(buf);
+      } else {
+        result->appendToChain(std::move(buf));
+      }
+    }
+  }
+  if (FOLLY_UNLIKELY(result == nullptr)) {
+    return create(0);
+  }
+  return result;
+}
+
+std::unique_ptr<IOBuf> IOBuf::takeOwnershipIov(
+    const iovec* vec,
+    size_t count,
+    FreeFunction freeFn,
+    void* userData,
+    bool freeOnError) {
+  unique_ptr<IOBuf> result = nullptr;
+  for (size_t i = 0; i < count; ++i) {
+    size_t len = vec[i].iov_len;
+    void* data = vec[i].iov_base;
+    if (len > 0) {
+      auto buf = takeOwnership(data, len, freeFn, userData, freeOnError);
+      if (!result) {
+        result = std::move(buf);
+      } else {
+        result->appendToChain(std::move(buf));
+      }
+    }
+  }
+  if (FOLLY_UNLIKELY(result == nullptr)) {
+    return create(0);
+  }
+  return result;
+}
+
+IOBuf::FillIovResult IOBuf::fillIov(struct iovec* iov, size_t len) const {
   IOBuf const* p = this;
   size_t i = 0;
+  size_t totalBytes = 0;
   while (i < len) {
     // some code can get confused by empty iovs, so skip them
     if (p->length() > 0) {
       iov[i].iov_base = const_cast<uint8_t*>(p->data());
       iov[i].iov_len = p->length();
+      totalBytes += p->length();
       i++;
     }
     p = p->next();
     if (p == this) {
-      return i;
+      return {i, totalBytes};
     }
   }
-  return 0;
+  return {0, 0};
 }
 
-size_t IOBufHash::operator()(const IOBuf& buf) const {
+uint32_t IOBuf::approximateShareCountOne() const noexcept {
+  if (FOLLY_UNLIKELY(!sharedInfo_)) {
+    return 1U;
+  }
+  return sharedInfo_->refcount.load(std::memory_order_acquire);
+}
+
+size_t IOBufHash::operator()(const IOBuf& buf) const noexcept {
   folly::hash::SpookyHashV2 hasher;
   hasher.Init(0, 0);
   io::Cursor cursor(&buf);
@@ -1051,18 +1448,14 @@ size_t IOBufHash::operator()(const IOBuf& buf) const {
   return static_cast<std::size_t>(h1);
 }
 
-ordering IOBufCompare::operator()(const IOBuf& a, const IOBuf& b) const {
+ordering IOBufCompare::impl(const IOBuf& a, const IOBuf& b) const noexcept {
   io::Cursor ca(&a);
   io::Cursor cb(&b);
   for (;;) {
     auto ba = ca.peekBytes();
     auto bb = cb.peekBytes();
-    if (ba.empty() && bb.empty()) {
-      return ordering::eq;
-    } else if (ba.empty()) {
-      return ordering::lt;
-    } else if (bb.empty()) {
-      return ordering::gt;
+    if (ba.empty() || bb.empty()) {
+      return to_ordering(int(bb.empty()) - int(ba.empty()));
     }
     const size_t n = std::min(ba.size(), bb.size());
     DCHECK_GT(n, 0u);
@@ -1070,6 +1463,7 @@ ordering IOBufCompare::operator()(const IOBuf& a, const IOBuf& b) const {
     if (r != ordering::eq) {
       return r;
     }
+    // Cursor::skip() may throw if n is too large, but n is not too large here
     ca.skip(n);
     cb.skip(n);
   }

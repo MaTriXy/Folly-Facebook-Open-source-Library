@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,11 +15,13 @@
  */
 
 #include <folly/Uri.h>
-#include <folly/portability/GTest.h>
+
+#include <map>
 
 #include <boost/algorithm/string.hpp>
 #include <glog/logging.h>
-#include <map>
+
+#include <folly/portability/GTest.h>
 
 using namespace folly;
 
@@ -36,7 +38,7 @@ TEST(Uri, Simple) {
     EXPECT_EQ("/hello/world", u.path());
     EXPECT_EQ("query", u.query());
     EXPECT_EQ("fragment", u.fragment());
-    EXPECT_EQ(s, u.fbstr());  // canonical
+    EXPECT_EQ(s, u.fbstr()); // canonical
   }
 
   {
@@ -51,7 +53,7 @@ TEST(Uri, Simple) {
     EXPECT_EQ("/hello/world", u.path());
     EXPECT_EQ("query", u.query());
     EXPECT_EQ("fragment", u.fragment());
-    EXPECT_EQ(s, u.fbstr());  // canonical
+    EXPECT_EQ(s, u.fbstr()); // canonical
   }
 
   {
@@ -66,7 +68,7 @@ TEST(Uri, Simple) {
     EXPECT_EQ("/hello/world", u.path());
     EXPECT_EQ("query", u.query());
     EXPECT_EQ("fragment", u.fragment());
-    EXPECT_EQ(s, u.fbstr());  // canonical
+    EXPECT_EQ(s, u.fbstr()); // canonical
   }
 
   {
@@ -82,7 +84,7 @@ TEST(Uri, Simple) {
     EXPECT_EQ("/hello/world", u.path());
     EXPECT_EQ("query", u.query());
     EXPECT_EQ("fragment", u.fragment());
-    EXPECT_EQ(s, u.fbstr());  // canonical
+    EXPECT_EQ(s, u.fbstr()); // canonical
   }
 
   {
@@ -98,7 +100,7 @@ TEST(Uri, Simple) {
     EXPECT_EQ("/hello/world", u.path());
     EXPECT_EQ("query", u.query());
     EXPECT_EQ("", u.fragment());
-    EXPECT_EQ(s, u.fbstr());  // canonical
+    EXPECT_EQ(s, u.fbstr()); // canonical
   }
 
   {
@@ -114,7 +116,7 @@ TEST(Uri, Simple) {
     EXPECT_EQ("/hello/world", u.path());
     EXPECT_EQ("query", u.query());
     EXPECT_EQ("", u.fragment());
-    EXPECT_EQ(s, u.fbstr());  // canonical
+    EXPECT_EQ(s, u.fbstr()); // canonical
   }
 
   {
@@ -385,6 +387,14 @@ TEST(Uri, Simple) {
     }
   }
 
+  {
+    fbstring s("2http://www.facebook.com");
+
+    auto u = Uri::tryFromString(s);
+    EXPECT_TRUE(u.hasError());
+    EXPECT_EQ(u.error(), UriFormatError::INVALID_URI);
+  }
+
   // No authority (no "//") is valid
   {
     fbstring s("this:is/a/valid/uri");
@@ -407,4 +417,9 @@ TEST(Uri, Simple) {
     EXPECT_EQ("is@another:valid:uri", u.path());
     EXPECT_EQ(s, u.fbstr());
   }
+}
+
+TEST(Uri, BadPortThrowsInvalidArgument) {
+  constexpr folly::StringPiece s = "http://localhost:9999999999999999999/";
+  EXPECT_THROW(Uri{s}, std::invalid_argument);
 }

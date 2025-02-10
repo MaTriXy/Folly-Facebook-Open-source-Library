@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <folly/synchronization/Hazptr.h>
@@ -49,7 +50,7 @@ class HazptrLockFreeLIFO {
     hazptr_holder<Atom>& hptr = h[0];
     Node* node;
     while (true) {
-      node = hptr.get_protected(head_);
+      node = hptr.protect(head_);
       if (node == nullptr) {
         return false;
       }
@@ -58,16 +59,14 @@ class HazptrLockFreeLIFO {
         break;
       }
     }
-    hptr.reset();
+    hptr.reset_protection();
     val = node->value();
     node->retire();
     return true;
   }
 
  private:
-  Node* head() {
-    return head_.load(std::memory_order_acquire);
-  }
+  Node* head() { return head_.load(std::memory_order_acquire); }
 
   bool cas_head(Node*& expected, Node* newval) {
     return head_.compare_exchange_weak(
@@ -80,13 +79,9 @@ class HazptrLockFreeLIFO {
 
     Node(T v, Node* n) : value_(v), next_(n) {}
 
-    Node* next() {
-      return next_;
-    }
+    Node* next() { return next_; }
 
-    T value() {
-      return value_;
-    }
+    T value() { return value_; }
   };
 };
 

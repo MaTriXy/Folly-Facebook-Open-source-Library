@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -134,12 +134,12 @@ TEST(TDigest, MergeLargeAsDigests) {
     values.push_back(i);
   }
   // Ensure that the values do not monotonically increase across digests.
-  std::random_shuffle(values.begin(), values.end());
+  std::shuffle(
+      values.begin(), values.end(), std::mt19937(std::random_device()()));
   for (int i = 0; i < 10; ++i) {
-    std::vector<double> sorted(
+    std::vector<double> unsorted_values(
         values.begin() + (i * 100), values.begin() + (i + 1) * 100);
-    std::sort(sorted.begin(), sorted.end());
-    digests.push_back(digest.merge(sorted));
+    digests.push_back(digest.merge(unsorted_values));
   }
 
   digest = TDigest::merge(digests);
@@ -165,8 +165,6 @@ TEST(TDigest, NegativeValues) {
     values.push_back(i);
     values.push_back(-i);
   }
-
-  std::sort(values.begin(), values.end());
 
   digest = digest.merge(values);
 
@@ -194,9 +192,6 @@ TEST(TDigest, NegativeValuesMergeDigests) {
     values.push_back(i);
     negativeValues.push_back(-i);
   }
-
-  std::sort(values.begin(), values.end());
-  std::sort(negativeValues.begin(), negativeValues.end());
 
   auto digest1 = digest.merge(values);
   auto digest2 = digest.merge(negativeValues);
@@ -259,6 +254,89 @@ TEST(TDigest, ConstructFromCentroids) {
   EXPECT_NE(digest1.getCentroids().size(), digest3.getCentroids().size());
 }
 
+TEST(TDigest, LargeOutlierTest) {
+  folly::TDigest digest(100);
+
+  std::vector<double> values;
+  for (double i = 0; i < 19; ++i) {
+    values.push_back(i);
+  }
+  values.push_back(1000000);
+
+  std::sort(values.begin(), values.end());
+  digest = digest.merge(values);
+  EXPECT_LT(
+      (int64_t)digest.estimateQuantile(0.5),
+      (int64_t)digest.estimateQuantile(0.90));
+}
+
+TEST(TDigest, FloatingPointSortedTest) {
+  // When combining centroids, floating point accuracy can lead to us building
+  // and unsorted digest if we are not careful. This tests that we are properly
+  // sorting the digest.
+  double val = 1.4;
+  TDigest digest1(100);
+  std::vector<double> values1;
+  for (int i = 1; i <= 100; ++i) {
+    values1.push_back(val);
+  }
+  digest1 = digest1.merge(values1);
+
+  TDigest digest2(100);
+  std::vector<double> values2;
+  for (int i = 1; i <= 100; ++i) {
+    values2.push_back(val);
+  }
+  digest2 = digest2.merge(values2);
+
+  std::array<TDigest, 2> a{{digest1, digest2}};
+  auto mergeDigest1 = TDigest::merge(a);
+
+  TDigest digest3(100);
+  std::vector<double> values3;
+  for (int i = 1; i <= 100; ++i) {
+    values3.push_back(val);
+  }
+  digest3 = digest2.merge(values3);
+  std::array<TDigest, 2> b{{digest3, mergeDigest1}};
+  auto mergeDigest2 = TDigest::merge(b);
+
+  auto centroids = mergeDigest2.getCentroids();
+  EXPECT_EQ(std::is_sorted(centroids.begin(), centroids.end()), true);
+}
+
+TEST(TDigest, InlineMerge) {
+  // Whe ingest the same values on two different instance of a TDigest
+  // merging one inline and the other outline, the result should be the same.
+  TDigest digest(100);
+  TDigest digestInlined(100);
+  std::vector<double> values;
+  for (int i = 1; i <= 100; ++i) {
+    values.push_back(i);
+  }
+
+  TDigest::MergeWorkingBuffer workingBuffer;
+
+  digest = digest.merge(sorted_equivalent, values);
+  digestInlined.merge(sorted_equivalent, values, workingBuffer);
+
+  EXPECT_EQ(digest.sum(), digestInlined.sum());
+  EXPECT_EQ(digest.count(), digestInlined.count());
+  EXPECT_EQ(digest.min(), digestInlined.min());
+  EXPECT_EQ(digest.max(), digestInlined.max());
+
+  ASSERT_EQ(digest.getCentroids().size(), digestInlined.getCentroids().size());
+
+  for (size_t i = 0; i < digest.getCentroids().size(); ++i) {
+    EXPECT_EQ(
+        digest.getCentroids()[i].mean(),
+        digestInlined.getCentroids()[i].mean());
+    EXPECT_EQ(
+        digest.getCentroids()[i].weight(),
+        digestInlined.getCentroids()[i].weight());
+  }
+}
+
 class DistributionTest
     : public ::testing::TestWithParam<
           std::tuple<std::pair<bool, size_t>, double, bool>> {};
@@ -314,9 +392,6 @@ TEST_P(DistributionTest, ReasonableError) {
 
     std::vector<TDigest> digests;
     for (size_t i = 0; i < kNumSamples / 1000; ++i) {
-      auto it_l = values.begin() + (i * 1000);
-      auto it_r = it_l + 1000;
-      std::sort(it_l, it_r);
       folly::Range<const double*> r(values, i * 1000, 1000);
       if (digestMerge) {
         digests.push_back(digest.merge(r));
@@ -356,7 +431,7 @@ TEST_P(DistributionTest, ReasonableError) {
   EXPECT_GE(reasonableError, stddev);
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     ReasonableErrors,
     DistributionTest,
     ::testing::Combine(

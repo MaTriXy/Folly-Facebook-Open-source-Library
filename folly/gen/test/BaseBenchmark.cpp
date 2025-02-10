@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,12 +23,10 @@
 
 using namespace folly::gen;
 using folly::fbstring;
-using std::pair;
-using std::set;
 using std::vector;
-using std::tuple;
 
 static std::atomic<int> testSize(1000);
+// clang-format off
 static vector<int> testVector =
     seq(1, testSize.load())
   | mapped([](int) { return rand(); })
@@ -44,6 +42,7 @@ static vector<fbstring> strings =
     from(testVector)
   | eachTo<fbstring>()
   | as<vector>();
+// clang-format on
 
 auto square = [](int x) { return x * x; };
 
@@ -91,20 +90,24 @@ BENCHMARK_DRAW_LINE();
 
 BENCHMARK(Member, iters) {
   int s = 0;
-  while(iters--) {
+  while (iters--) {
+    // clang-format off
     s += from(strings)
        | member(&fbstring::size)
        | sum;
+    // clang-format on
   }
   folly::doNotOptimizeAway(s);
 }
 
 BENCHMARK_RELATIVE(MapMember, iters) {
   int s = 0;
-  while(iters--) {
+  while (iters--) {
+    // clang-format off
     s += from(strings)
        | map([](const fbstring& x) { return x.size(); })
        | sum;
+    // clang-format on
   }
   folly::doNotOptimizeAway(s);
 }
@@ -126,11 +129,13 @@ BENCHMARK(Count_Vector_NoGen, iters) {
 BENCHMARK_RELATIVE(Count_Vector_Gen, iters) {
   int s = 0;
   while (iters--) {
+    // clang-format off
     s += from(testVector)
        | filter([](int i) {
                   return i * 2 < rand();
                 })
        | count;
+    // clang-format on
   }
   folly::doNotOptimizeAway(s);
 }
@@ -356,8 +361,8 @@ BENCHMARK(Sample, iters) {
 // Sample                                                     176.48ms     5.67
 // ============================================================================
 
-int main(int argc, char *argv[]) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+int main(int argc, char* argv[]) {
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,11 +17,9 @@
 /**
  * Discriminated pointer: Type-safe pointer to one of several types.
  *
- * Similar to boost::variant, but has no space overhead over a raw pointer, as
+ * Similar to std::variant, but has no space overhead over a raw pointer, as
  * it relies on the fact that (on x86_64) there are 16 unused bits in a
  * pointer.
- *
- * @author Tudor Bosman (tudorb@fb.com)
  */
 
 #pragma once
@@ -35,8 +33,8 @@
 #include <folly/Portability.h>
 #include <folly/detail/DiscriminatedPtrDetail.h>
 
-#if !FOLLY_X64 && !FOLLY_AARCH64 && !FOLLY_PPC64
-# error "DiscriminatedPtr is x64, arm64 and ppc64 specific code."
+#if !FOLLY_X64 && !FOLLY_AARCH64 && !FOLLY_PPC64 && !FOLLY_RISCV64
+#error "DiscriminatedPtr is x64, arm64, ppc64 and riscv64 specific code."
 #endif
 
 namespace folly {
@@ -56,15 +54,15 @@ namespace folly {
 template <typename... Types>
 class DiscriminatedPtr {
   // <, not <=, as our indexes are 1-based (0 means "empty")
-  static_assert(sizeof...(Types) < std::numeric_limits<uint16_t>::max(),
-                "too many types");
+  static_assert(
+      sizeof...(Types) < std::numeric_limits<uint16_t>::max(),
+      "too many types");
 
  public:
   /**
    * Create an empty DiscriminatedPtr.
    */
-  DiscriminatedPtr() : data_(0) {
-  }
+  DiscriminatedPtr() : data_(0) {}
 
   /**
    * Create a DiscriminatedPtr that points to an object of type T.
@@ -92,13 +90,13 @@ class DiscriminatedPtr {
    */
   template <typename T>
   T* get_nothrow() noexcept {
-    void* p = LIKELY(hasType<T>()) ? ptr() : nullptr;
+    void* p = FOLLY_LIKELY(hasType<T>()) ? ptr() : nullptr;
     return static_cast<T*>(p);
   }
 
   template <typename T>
   const T* get_nothrow() const noexcept {
-    const void* p = LIKELY(hasType<T>()) ? ptr() : nullptr;
+    const void* p = FOLLY_LIKELY(hasType<T>()) ? ptr() : nullptr;
     return static_cast<const T*>(p);
   }
 
@@ -110,7 +108,7 @@ class DiscriminatedPtr {
    */
   template <typename T>
   T* get() {
-    if (UNLIKELY(!hasType<T>())) {
+    if (FOLLY_UNLIKELY(!hasType<T>())) {
       throw std::invalid_argument("Invalid type");
     }
     return static_cast<T*>(ptr());
@@ -118,7 +116,7 @@ class DiscriminatedPtr {
 
   template <typename T>
   const T* get() const {
-    if (UNLIKELY(!hasType<T>())) {
+    if (FOLLY_UNLIKELY(!hasType<T>())) {
       throw std::invalid_argument("Invalid type");
     }
     return static_cast<const T*>(ptr());
@@ -127,9 +125,7 @@ class DiscriminatedPtr {
   /**
    * Return true iff this DiscriminatedPtr is empty.
    */
-  bool empty() const {
-    return index() == 0;
-  }
+  bool empty() const { return index() == 0; }
 
   /**
    * Return true iff the object pointed by this DiscriminatedPtr has type T,
@@ -144,9 +140,7 @@ class DiscriminatedPtr {
   /**
    * Clear this DiscriminatedPtr, making it empty.
    */
-  void clear() {
-    data_ = 0;
-  }
+  void clear() { data_ = 0; }
 
   /**
    * Assignment operator from a pointer of type T.
@@ -177,18 +171,18 @@ class DiscriminatedPtr {
       throw std::invalid_argument("Empty DiscriminatedPtr");
     }
     return dptr_detail::ApplyVisitor<V, Types...>()(
-      n, std::forward<V>(visitor), ptr());
+        n, std::forward<V>(visitor), ptr());
   }
 
   template <typename V>
-  typename dptr_detail::ConstVisitorResult<V, Types...>::type apply(V&& visitor)
-  const {
+  typename dptr_detail::ConstVisitorResult<V, Types...>::type apply(
+      V&& visitor) const {
     size_t n = index();
     if (n == 0) {
       throw std::invalid_argument("Empty DiscriminatedPtr");
     }
     return dptr_detail::ApplyConstVisitor<V, Types...>()(
-      n, std::forward<V>(visitor), ptr());
+        n, std::forward<V>(visitor), ptr());
   }
 
  private:
@@ -223,22 +217,19 @@ class DiscriminatedPtr {
 
 template <typename Visitor, typename... Args>
 decltype(auto) apply_visitor(
-    Visitor&& visitor,
-    const DiscriminatedPtr<Args...>& variant) {
+    Visitor&& visitor, const DiscriminatedPtr<Args...>& variant) {
   return variant.apply(std::forward<Visitor>(visitor));
 }
 
 template <typename Visitor, typename... Args>
 decltype(auto) apply_visitor(
-    Visitor&& visitor,
-    DiscriminatedPtr<Args...>& variant) {
+    Visitor&& visitor, DiscriminatedPtr<Args...>& variant) {
   return variant.apply(std::forward<Visitor>(visitor));
 }
 
 template <typename Visitor, typename... Args>
 decltype(auto) apply_visitor(
-    Visitor&& visitor,
-    DiscriminatedPtr<Args...>&& variant) {
+    Visitor&& visitor, DiscriminatedPtr<Args...>&& variant) {
   return variant.apply(std::forward<Visitor>(visitor));
 }
 

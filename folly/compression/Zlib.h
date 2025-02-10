@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,7 +27,7 @@
  * Interface for Zlib-specific codec initialization.
  */
 namespace folly {
-namespace io {
+namespace compression {
 namespace zlib {
 
 struct Options {
@@ -116,14 +116,12 @@ Options defaultZlibOptions();
  * Levels supported: 0 = no compression, 1 = fast, ..., 9 = best; default = 6
  */
 std::unique_ptr<Codec> getCodec(
-    Options options = Options(),
-    int level = COMPRESSION_LEVEL_DEFAULT);
+    Options options = Options(), int level = COMPRESSION_LEVEL_DEFAULT);
 std::unique_ptr<StreamCodec> getStreamCodec(
-    Options options = Options(),
-    int level = COMPRESSION_LEVEL_DEFAULT);
+    Options options = Options(), int level = COMPRESSION_LEVEL_DEFAULT);
 
 } // namespace zlib
-} // namespace io
+} // namespace compression
 } // namespace folly
 
 #endif // FOLLY_HAVE_LIBZ

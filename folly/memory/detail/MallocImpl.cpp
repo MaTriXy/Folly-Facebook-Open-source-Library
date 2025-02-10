@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,7 +31,9 @@ const char* nallocxWeak = nullptr;
 const char* mallctlWeak = nullptr;
 const char* mallctlnametomibWeak = nullptr;
 const char* mallctlbymibWeak = nullptr;
+const char* MallocExtension_Internal_GetNumericPropertyWeak = nullptr;
 #elif !FOLLY_HAVE_WEAK_SYMBOLS
+#if (!defined(USE_JEMALLOC) && !defined(FOLLY_USE_JEMALLOC)) || FOLLY_SANITIZE
 void* (*mallocx)(size_t, int) = nullptr;
 void* (*rallocx)(void*, size_t, int) = nullptr;
 size_t (*xallocx)(void*, size_t, size_t, int) = nullptr;
@@ -44,5 +46,7 @@ int (*mallctlnametomib)(const char*, size_t*, size_t*) = nullptr;
 int (*mallctlbymib)(const size_t*, size_t, void*, size_t*, void*, size_t) =
     nullptr;
 #endif
-
+bool (*MallocExtension_Internal_GetNumericProperty)(
+    const char*, size_t, size_t*) = nullptr;
+#endif
 }

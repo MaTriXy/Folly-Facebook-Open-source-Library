@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,21 +14,64 @@
  * limitations under the License.
  */
 
-#include <folly/io/IOBuf.h>
-
 #include <folly/Benchmark.h>
 #include <folly/Format.h>
 #include <folly/Range.h>
 #include <folly/io/Cursor.h>
+#include <folly/io/IOBuf.h>
+#include <folly/lang/Keep.h>
 
 DECLARE_bool(benchmark);
 
-using folly::ByteRange;
-using folly::format;
 using folly::IOBuf;
-using folly::StringPiece;
 using std::unique_ptr;
 using namespace folly::io;
+
+namespace {
+
+template <class T>
+FOLLY_ALWAYS_INLINE void check_QueueAppender_write_loop(
+    QueueAppender* out, const T* data, size_t len) {
+  for (size_t i = 0; i < len; ++i) {
+    out->write(data[i]);
+  }
+}
+
+} // namespace
+
+extern "C" FOLLY_KEEP FOLLY_NOINLINE void check_QueueAppender_write_loop_uint8(
+    QueueAppender* out, const uint8_t* data, size_t len) {
+  check_QueueAppender_write_loop(out, data, len);
+}
+
+extern "C" FOLLY_KEEP FOLLY_NOINLINE void check_QueueAppender_write_loop_uint16(
+    QueueAppender* out, const uint16_t* data, size_t len) {
+  check_QueueAppender_write_loop(out, data, len);
+}
+
+extern "C" FOLLY_KEEP FOLLY_NOINLINE void check_QueueAppender_write_loop_uint32(
+    QueueAppender* out, const uint32_t* data, size_t len) {
+  check_QueueAppender_write_loop(out, data, len);
+}
+
+extern "C" FOLLY_KEEP FOLLY_NOINLINE void check_QueueAppender_write_loop_uint64(
+    QueueAppender* out, const uint64_t* data, size_t len) {
+  check_QueueAppender_write_loop(out, data, len);
+}
+
+extern "C" FOLLY_KEEP FOLLY_NOINLINE void check_QueueAppender_write_mixed(
+    QueueAppender* out,
+    uint8_t a,
+    uint16_t b,
+    uint32_t c,
+    uint64_t d,
+    uint8_t e) {
+  out->write(a);
+  out->write(b);
+  out->write(c);
+  out->write(d);
+  out->write(e);
+}
 
 int benchmark_size = 1000;
 unique_ptr<IOBuf> iobuf_benchmark;
@@ -164,7 +207,7 @@ BENCHMARK_RELATIVE(prefix, iters) {
  */
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   iobuf_benchmark = IOBuf::create(benchmark_size);
   iobuf_benchmark->append(benchmark_size);
 

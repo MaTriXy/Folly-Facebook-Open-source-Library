@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,7 +19,6 @@
 #include <folly/portability/GTest.h>
 #include <folly/portability/OpenSSL.h>
 
-using namespace testing;
 using namespace folly;
 
 TEST(SSLErrorsTest, TestMessage) {
@@ -41,6 +40,10 @@ TEST(SSLErrorsTest, TestMessage) {
   std::string expectedMsg =
       "AsyncSocketException: error:0b000069:X.509 certificate routines:"
       "OPENSSL_internal:CERT_ALREADY_IN_HASH_TABLE, type = SSL error";
+#elif FOLLY_OPENSSL_IS_3X
+  std::string expectedMsg =
+      "AsyncSocketException: error:05800065:x509 certificate routines::"
+      "cert already in hash table, type = SSL error";
 #else
   std::string expectedMsg =
       "AsyncSocketException: error:0B07C065:"

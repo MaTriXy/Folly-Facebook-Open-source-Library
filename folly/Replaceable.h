@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,6 @@
 #include <folly/Portability.h>
 #include <folly/Traits.h>
 #include <folly/Utility.h>
-#include <folly/lang/Launder.h>
 
 /**
  * An instance of `Replaceable<T>` wraps an instance of `T`.
@@ -121,6 +120,7 @@
  */
 
 namespace folly {
+
 template <class T>
 class Replaceable;
 
@@ -157,7 +157,7 @@ struct dtor_mixin<T, true, false> {
   dtor_mixin& operator=(dtor_mixin&&) = default;
   dtor_mixin& operator=(dtor_mixin const&) = default;
   ~dtor_mixin() noexcept(std::is_nothrow_destructible<T>::value) {
-    T* destruct_ptr = launder(reinterpret_cast<T*>(
+    T* destruct_ptr = std::launder(reinterpret_cast<T*>(
         reinterpret_cast<Replaceable<T>*>(this)->storage_));
     destruct_ptr->~T();
   }
@@ -280,9 +280,9 @@ struct move_assignment_mixin<T, true> {
   move_assignment_mixin(move_assignment_mixin const&) = default;
   inline move_assignment_mixin&
   operator=(move_assignment_mixin&& other) noexcept(
-      std::is_nothrow_destructible<T>::value&&
-          std::is_nothrow_move_constructible<T>::value) {
-    T* destruct_ptr = launder(reinterpret_cast<T*>(
+      std::is_nothrow_destructible<T>::value &&
+      std::is_nothrow_move_constructible<T>::value) {
+    T* destruct_ptr = std::launder(reinterpret_cast<T*>(
         reinterpret_cast<Replaceable<T>*>(this)->storage_));
     destruct_ptr->~T();
     ::new (reinterpret_cast<Replaceable<T>*>(this)->storage_)
@@ -344,9 +344,9 @@ struct copy_assignment_mixin<T, true> {
   copy_assignment_mixin& operator=(copy_assignment_mixin&&) = default;
   inline copy_assignment_mixin&
   operator=(copy_assignment_mixin const& other) noexcept(
-      std::is_nothrow_destructible<T>::value&&
-          std::is_nothrow_copy_constructible<T>::value) {
-    T* destruct_ptr = launder(reinterpret_cast<T*>(
+      std::is_nothrow_destructible<T>::value &&
+      std::is_nothrow_copy_constructible<T>::value) {
+    T* destruct_ptr = std::launder(reinterpret_cast<T*>(
         reinterpret_cast<Replaceable<T>*>(this)->storage_));
     destruct_ptr->~T();
     ::new (reinterpret_cast<Replaceable<T>*>(this)->storage_)
@@ -357,7 +357,7 @@ struct copy_assignment_mixin<T, true> {
 
 template <typename T>
 struct is_constructible_from_replaceable
-    : bool_constant<
+    : std::bool_constant<
           std::is_constructible<T, Replaceable<T>&>::value ||
           std::is_constructible<T, Replaceable<T>&&>::value ||
           std::is_constructible<T, const Replaceable<T>&>::value ||
@@ -365,20 +365,15 @@ struct is_constructible_from_replaceable
 
 template <typename T>
 struct is_convertible_from_replaceable
-    : bool_constant<
+    : std::bool_constant<
           std::is_convertible<Replaceable<T>&, T>::value ||
           std::is_convertible<Replaceable<T>&&, T>::value ||
           std::is_convertible<const Replaceable<T>&, T>::value ||
           std::is_convertible<const Replaceable<T>&&, T>::value> {};
 } // namespace replaceable_detail
 
-// Type trait template to statically test whether a type is a specialization of
-// Replaceable
 template <class T>
-struct is_replaceable : std::false_type {};
-
-template <class T>
-struct is_replaceable<Replaceable<T>> : std::true_type {};
+using is_replaceable = is_instantiation_of<Replaceable, T>;
 
 // Function to make a Replaceable with a type deduced from its input
 template <class T>
@@ -388,14 +383,13 @@ constexpr Replaceable<std::decay_t<T>> make_replaceable(T&& t) {
 
 template <class T, class... Args>
 constexpr Replaceable<T> make_replaceable(Args&&... args) {
-  return Replaceable<T>(in_place, std::forward<Args>(args)...);
+  return Replaceable<T>(std::in_place, std::forward<Args>(args)...);
 }
 
 template <class T, class U, class... Args>
 constexpr Replaceable<T> make_replaceable(
-    std::initializer_list<U> il,
-    Args&&... args) {
-  return Replaceable<T>(in_place, il, std::forward<Args>(args)...);
+    std::initializer_list<U> il, Args&&... args) {
+  return Replaceable<T>(std::in_place, il, std::forward<Args>(args)...);
 }
 
 template <class T>
@@ -439,7 +433,7 @@ class alignas(T) Replaceable
   template <
       class... Args,
       std::enable_if_t<std::is_constructible<T, Args&&...>::value, int> = 0>
-  FOLLY_CPP14_CONSTEXPR explicit Replaceable(in_place_t, Args&&... args)
+  constexpr explicit Replaceable(std::in_place_t, Args&&... args)
       // clang-format off
       noexcept(std::is_nothrow_constructible<T, Args&&...>::value)
       // clang-format on
@@ -453,10 +447,8 @@ class alignas(T) Replaceable
       std::enable_if_t<
           std::is_constructible<T, std::initializer_list<U>, Args&&...>::value,
           int> = 0>
-  FOLLY_CPP14_CONSTEXPR explicit Replaceable(
-      in_place_t,
-      std::initializer_list<U> il,
-      Args&&... args)
+  constexpr explicit Replaceable(
+      std::in_place_t, std::initializer_list<U> il, Args&&... args)
       // clang-format off
       noexcept(std::is_nothrow_constructible<
           T,
@@ -471,11 +463,11 @@ class alignas(T) Replaceable
       class U = T,
       std::enable_if_t<
           std::is_constructible<T, U&&>::value &&
-              !std::is_same<std::decay_t<U>, in_place_t>::value &&
+              !std::is_same<std::decay_t<U>, std::in_place_t>::value &&
               !std::is_same<Replaceable<T>, std::decay_t<U>>::value &&
               std::is_convertible<U&&, T>::value,
           int> = 0>
-  FOLLY_CPP14_CONSTEXPR /* implicit */ Replaceable(U&& other)
+  constexpr /* implicit */ Replaceable(U&& other)
       // clang-format off
       noexcept(std::is_nothrow_constructible<T, U&&>::value)
       // clang-format on
@@ -487,11 +479,11 @@ class alignas(T) Replaceable
       class U = T,
       std::enable_if_t<
           std::is_constructible<T, U&&>::value &&
-              !std::is_same<std::decay_t<U>, in_place_t>::value &&
+              !std::is_same<std::decay_t<U>, std::in_place_t>::value &&
               !std::is_same<Replaceable<T>, std::decay_t<U>>::value &&
               !std::is_convertible<U&&, T>::value,
           int> = 0>
-  FOLLY_CPP14_CONSTEXPR explicit Replaceable(U&& other)
+  constexpr explicit Replaceable(U&& other)
       // clang-format off
       noexcept(std::is_nothrow_constructible<T, U&&>::value)
       // clang-format on
@@ -581,25 +573,23 @@ class alignas(T) Replaceable
    */
   template <class... Args>
   T& emplace(Args&&... args) noexcept {
-    T* destruct_ptr = launder(reinterpret_cast<T*>(storage_));
+    T* destruct_ptr = std::launder(reinterpret_cast<T*>(storage_));
     destruct_ptr->~T();
     return *::new (storage_) T(std::forward<Args>(args)...);
   }
 
   template <class U, class... Args>
   T& emplace(std::initializer_list<U> il, Args&&... args) noexcept {
-    T* destruct_ptr = launder(reinterpret_cast<T*>(storage_));
+    T* destruct_ptr = std::launder(reinterpret_cast<T*>(storage_));
     destruct_ptr->~T();
     return *::new (storage_) T(il, std::forward<Args>(args)...);
   }
 
   /**
    * `swap` just calls `swap(T&, T&)`.
-   *
-   * Should be `noexcept(std::is_nothrow_swappable<T>::value)` but we don't
-   * depend on C++17 features.
    */
-  void swap(Replaceable& other) {
+  void swap(Replaceable& other) noexcept(
+      std::is_nothrow_swappable_v<Replaceable>) {
     using std::swap;
     swap(*(*this), *other);
   }
@@ -608,27 +598,27 @@ class alignas(T) Replaceable
    * Methods to access the contained object. Intended to be very unsurprising.
    */
   constexpr const T* operator->() const {
-    return launder(reinterpret_cast<T const*>(storage_));
+    return std::launder(reinterpret_cast<T const*>(storage_));
   }
 
-  FOLLY_CPP14_CONSTEXPR T* operator->() {
-    return launder(reinterpret_cast<T*>(storage_));
+  constexpr T* operator->() {
+    return std::launder(reinterpret_cast<T*>(storage_));
   }
 
-  constexpr const T& operator*() const & {
-    return *launder(reinterpret_cast<T const*>(storage_));
+  constexpr const T& operator*() const& {
+    return *std::launder(reinterpret_cast<T const*>(storage_));
   }
 
-  FOLLY_CPP14_CONSTEXPR T& operator*() & {
-    return *launder(reinterpret_cast<T*>(storage_));
+  constexpr T& operator*() & {
+    return *std::launder(reinterpret_cast<T*>(storage_));
   }
 
-  FOLLY_CPP14_CONSTEXPR T&& operator*() && {
-    return std::move(*launder(reinterpret_cast<T*>(storage_)));
+  constexpr T&& operator*() && {
+    return std::move(*std::launder(reinterpret_cast<T*>(storage_)));
   }
 
-  constexpr const T&& operator*() const && {
-    return std::move(*launder(reinterpret_cast<T const*>(storage_)));
+  constexpr const T&& operator*() const&& {
+    return std::move(*std::launder(reinterpret_cast<T const*>(storage_)));
   }
 
  private:
@@ -637,12 +627,10 @@ class alignas(T) Replaceable
   friend struct replaceable_detail::copy_ctor_mixin<T>;
   friend struct replaceable_detail::move_assignment_mixin<T>;
   friend struct replaceable_detail::copy_assignment_mixin<T>;
-  std::aligned_storage_t<sizeof(T), alignof(T)> storage_[1];
+  aligned_storage_for_t<T> storage_[1];
 };
 
-#if __cplusplus > 201402L
-// C++17 allows us to define a deduction guide:
 template <class T>
-Replaceable(T)->Replaceable<T>;
-#endif
+Replaceable(T) -> Replaceable<T>;
+
 } // namespace folly

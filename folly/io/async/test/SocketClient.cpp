@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,14 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <folly/io/async/test/BlockingSocket.h>
 
 #include <iostream>
 
 #include <folly/ExceptionWrapper.h>
+#include <folly/io/async/test/BlockingSocket.h>
 #include <folly/portability/GFlags.h>
 
 using namespace folly;
+using namespace folly::test;
 
 DEFINE_string(host, "localhost", "Host");
 DEFINE_int32(port, 0, "port");
@@ -32,7 +33,7 @@ DEFINE_int32(sendtimeout_ms, 0, "send timeout");
 DEFINE_int32(num_writes, 1, "number of writes");
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   if (FLAGS_port == 0) {
     LOG(ERROR) << "Must specify port";

@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+//
+// Docs: https://fburl.com/fbcref_file
+//
 
 #pragma once
 
@@ -27,23 +31,28 @@
 #include <folly/Expected.h>
 #include <folly/Portability.h>
 #include <folly/Range.h>
+#include <folly/portability/Fcntl.h>
 #include <folly/portability/Unistd.h>
 
 namespace folly {
 
 /**
  * A File represents an open file.
+ * @class folly::File
+ * @refcode folly/docs/examples/folly/File.cpp
  */
 class File {
  public:
   /**
    * Creates an empty File object, for late initialization.
    */
-  File() noexcept;
+  constexpr File() noexcept : fd_(-1), ownsFd_(false) {}
 
   /**
    * Create a File object from an existing file descriptor.
-   * Takes ownership of the file descriptor if ownsFd is true.
+   *
+   * @param fd Existing file descriptor
+   * @param ownsFd Takes ownership of the file descriptor if ownsFd is true.
    */
   explicit File(int fd, bool ownsFd = false) noexcept;
 
@@ -65,8 +74,8 @@ class File {
   static Expected<File, exception_wrapper> makeFile(Args&&... args) noexcept {
     try {
       return File(std::forward<Args>(args)...);
-    } catch (const std::system_error& se) {
-      return makeUnexpected(exception_wrapper(std::current_exception(), se));
+    } catch (const std::system_error&) {
+      return makeUnexpected(exception_wrapper(current_exception()));
     }
   }
 
@@ -85,14 +94,23 @@ class File {
   /**
    * Returns 'true' iff the file was successfully opened.
    */
-  explicit operator bool() const {
-    return fd_ != -1;
-  }
+  explicit operator bool() const { return fd_ != -1; }
 
   /**
    * Duplicate file descriptor and return File that owns it.
+   *
+   * Duplicated file descriptor does not have close-on-exec flag set,
+   * so it is leaked to child processes. Consider using "dupCloseOnExec".
    */
   File dup() const;
+
+  /**
+   * Duplicate file descriptor and return File that owns it.
+   *
+   * This functions creates a descriptor with close-on-exec flag set
+   * (where supported, otherwise it is equivalent to "dup").
+   */
+  File dupCloseOnExec() const;
 
   /**
    * If we own the file descriptor, close the file and throw on error.
@@ -115,20 +133,22 @@ class File {
   /**
    * Swap this File with another.
    */
-  void swap(File& other);
+  void swap(File& other) noexcept;
 
   // movable
   File(File&&) noexcept;
   File& operator=(File&&);
 
-  // FLOCK (INTERPROCESS) LOCKS
-  //
-  // NOTE THAT THESE LOCKS ARE flock() LOCKS.  That is, they may only be used
-  // for inter-process synchronization -- an attempt to acquire a second lock
-  // on the same file descriptor from the same process may succeed.  Attempting
-  // to acquire a second lock on a different file descriptor for the same file
-  // should fail, but some systems might implement flock() using fcntl() locks,
-  // in which case it will succeed.
+  /**
+   * FLOCK (INTERPROCESS) LOCKS
+   *
+   * NOTE THAT THESE LOCKS ARE flock() LOCKS.  That is, they may only be used
+   * for inter-process synchronization -- an attempt to acquire a second lock
+   * on the same file descriptor from the same process may succeed.  Attempting
+   * to acquire a second lock on a different file descriptor for the same file
+   * should fail, but some systems might implement flock() using fcntl() locks,
+   * in which case it will succeed.
+   */
   void lock();
   bool try_lock();
   void unlock();
@@ -149,6 +169,9 @@ class File {
   bool ownsFd_;
 };
 
-void swap(File& a, File& b);
+/**
+ * Swaps the file descriptors and ownership
+ */
+void swap(File& a, File& b) noexcept;
 
 } // namespace folly

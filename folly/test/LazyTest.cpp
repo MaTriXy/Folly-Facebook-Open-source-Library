@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/Lazy.h>
 
 #include <functional>
@@ -45,7 +46,7 @@ TEST(Lazy, Simple) {
   EXPECT_EQ(computeCount, 1);
 }
 
-auto globalCount = folly::lazy([]{ return 0; });
+auto globalCount = folly::lazy([] { return 0; });
 auto const foo = folly::lazy([]() -> std::string {
   ++globalCount();
   EXPECT_EQ(globalCount(), 1);
@@ -59,10 +60,10 @@ TEST(Lazy, Global) {
 }
 
 TEST(Lazy, Map) {
-  auto lazyMap = folly::lazy([]() -> std::map<std::string,std::string> {
+  auto lazyMap = folly::lazy([]() -> std::map<std::string, std::string> {
     return {
-      { "foo", "bar" },
-      { "baz", "quux" }
+        {"foo", "bar"},
+        {"baz", "quux"},
     };
   });
 
@@ -78,7 +79,7 @@ struct CopyCount {
 
   static int count;
 
-  bool operator()() const { return true ; }
+  bool operator()() const { return true; }
 };
 
 int CopyCount::count = 0;
@@ -95,13 +96,13 @@ TEST(Lazy, NonLambda) {
   EXPECT_EQ(lval(), true);
   EXPECT_EQ(CopyCount::count, 1);
 
-  std::function<bool()> f = [&]{ return 12; };
+  std::function<bool()> f = [&] { return 12; };
   auto const lazyF = folly::lazy(f);
   EXPECT_EQ(lazyF(), true);
 }
 
 TEST(Lazy, Consty) {
-  std::function<int ()> const f = [&] { return 12; };
+  std::function<int()> const f = [&] { return 12; };
   auto lz = folly::lazy(f);
   EXPECT_EQ(lz(), 12);
 }

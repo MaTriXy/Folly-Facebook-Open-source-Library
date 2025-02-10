@@ -1,11 +1,11 @@
 /*
- * Copyright 2004-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/Init.h>
 
 #include <folly/logging/LogConfigParser.h>
@@ -47,7 +48,7 @@ TEST(Init, checkConfig) {
   auto initialConfig = folly::LoggerDB::get().getConfig();
   EXPECT_EQ(0, getBaseLoggingConfigCalled);
   EXPECT_EQ(
-      parseLogConfig(".:=WARN:default; "
+      parseLogConfig(".:=INFO:default; "
                      "default=stream:stream=stderr,async=false"),
       LoggerDB::get().getConfig());
 
@@ -82,7 +83,7 @@ TEST(Init, checkConfig) {
 // not been called yet when we start running the tests.
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, /* remove_flags = */ true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, /* remove_flags = */ true);
 
   return RUN_ALL_TESTS();
 }

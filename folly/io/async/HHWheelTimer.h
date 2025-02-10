@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,19 +16,94 @@
 
 #pragma once
 
-#include <folly/Optional.h>
-#include <folly/io/async/AsyncTimeout.h>
-#include <folly/io/async/DelayedDestruction.h>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <memory>
 
 #include <boost/intrusive/list.hpp>
 #include <glog/logging.h>
 
-#include <chrono>
-#include <cstddef>
-#include <list>
-#include <memory>
+#include <folly/ExceptionString.h>
+#include <folly/Optional.h>
+#include <folly/io/async/AsyncTimeout.h>
+#include <folly/io/async/DelayedDestruction.h>
+#include <folly/io/async/HHWheelTimer-fwd.h>
+#include <folly/portability/Config.h>
 
 namespace folly {
+
+namespace detail {
+template <class Duration>
+struct HHWheelTimerDurationConst;
+
+template <class Duration>
+class HHWheelTimerDurationInterval {
+ public:
+  explicit HHWheelTimerDurationInterval(Duration interval)
+      : divInterval_(interval.count()),
+        divIntervalForSteadyClock_(
+            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                interval)
+                .count()),
+        interval_(interval) {}
+
+  int64_t toWheelTicksFromSteadyClock(
+      std::chrono::steady_clock::duration t) const {
+    return divIntervalForSteadyClock_.divide(t.count());
+  }
+
+  int64_t toWheelTicks(Duration t) const {
+    return divInterval_.divide(t.count());
+  }
+
+  Duration fromWheelTicks(int64_t t) const { return t * interval_; }
+
+  Duration interval() const { return interval_; }
+
+  class Divider {
+   public:
+#if FOLLY_HAVE_INT128_T
+    // Use multiplication by the reciprocal in fixed 64-bit precision, which is
+    // faster than an integer division. The algorithm is always accurate when
+    // both numerator and denominator fit in 32 bits, see
+    // https://gmplib.org/~tege/divcnst-pldi94.pdf, Theorem 4.2 with N = 32 and
+    // l = 32. For larger numerator or denominator it is still frequently
+    // accurate, but it can overestimate the quotient by 1, which is acceptable
+    // here.
+    explicit Divider(uint64_t v) : value(~uint64_t(0) / v + 1) {}
+
+    uint64_t divide(uint64_t num) const {
+      if (value == 0) {
+        return num;
+      }
+      return static_cast<uint64_t>((__uint128_t(num) * value) >> 64);
+    }
+#else
+    explicit Divider(uint64_t v) : value(v) {}
+
+    uint64_t divide(uint64_t num) const { return num / value; }
+#endif
+   private:
+    uint64_t const value;
+  };
+
+ private:
+  Divider const divInterval_;
+  Divider const divIntervalForSteadyClock_;
+  Duration const interval_;
+};
+
+template <>
+struct HHWheelTimerDurationConst<std::chrono::milliseconds> {
+  static constexpr int DEFAULT_TICK_INTERVAL = 10;
+};
+
+template <>
+struct HHWheelTimerDurationConst<std::chrono::microseconds> {
+  static constexpr int DEFAULT_TICK_INTERVAL = 200;
+};
+} // namespace detail
 
 /**
  * Hashed Hierarchical Wheel Timer
@@ -51,15 +126,17 @@ namespace folly {
  * *not* tick constantly, and instead calculates the exact next wakeup
  * time.
  */
-class HHWheelTimer : private folly::AsyncTimeout,
-                     public folly::DelayedDestruction {
+template <class Duration>
+class HHWheelTimerBase
+    : private folly::AsyncTimeout,
+      public folly::DelayedDestruction {
  public:
-  using UniquePtr = std::unique_ptr<HHWheelTimer, Destructor>;
-  using SharedPtr = std::shared_ptr<HHWheelTimer>;
+  using UniquePtr = std::unique_ptr<HHWheelTimerBase, Destructor>;
+  using SharedPtr = std::shared_ptr<HHWheelTimerBase>;
 
   template <typename... Args>
   static UniquePtr newTimer(Args&&... args) {
-    return UniquePtr(new HHWheelTimer(std::forward<Args>(args)...));
+    return UniquePtr(new HHWheelTimerBase(std::forward<Args>(args)...));
   }
 
   /**
@@ -69,7 +146,7 @@ class HHWheelTimer : private folly::AsyncTimeout,
       : public boost::intrusive::list_base_hook<
             boost::intrusive::link_mode<boost::intrusive::auto_unlink>> {
    public:
-    Callback() = default;
+    Callback();
     virtual ~Callback();
 
     /**
@@ -80,9 +157,7 @@ class HHWheelTimer : private folly::AsyncTimeout,
     /// This callback was canceled. The default implementation is to just
     /// proxy to `timeoutExpired` but if you care about the difference between
     /// the timeout finishing or being canceled you can override this.
-    virtual void callbackCanceled() noexcept {
-      timeoutExpired();
-    }
+    virtual void callbackCanceled() noexcept { timeoutExpired(); }
 
     /**
      * Cancel the timeout, if it is running.
@@ -100,43 +175,32 @@ class HHWheelTimer : private folly::AsyncTimeout,
     /**
      * Return true if this timeout is currently scheduled, and false otherwise.
      */
-    bool isScheduled() const {
-      return wheel_ != nullptr;
-    }
+    bool isScheduled() const { return wheel_ != nullptr; }
 
     /**
      * Get the time remaining until this timeout expires. Return 0 if this
-     * timeout is not scheduled or expired. Otherwise, return expiration time
-     * minus getCurTime().
+     * timeout is not scheduled or expired. Otherwise, return expiration
+     * time minus current time.
      */
-    std::chrono::milliseconds getTimeRemaining() {
-      return getTimeRemaining(getCurTime());
-    }
-
-   protected:
-    /**
-     * Don't override this unless you're doing a test. This is mainly here so
-     * that we can override it to simulate lag in steady_clock.
-     */
-    virtual std::chrono::steady_clock::time_point getCurTime() {
-      return std::chrono::steady_clock::now();
+    Duration getTimeRemaining() const {
+      return getTimeRemaining(std::chrono::steady_clock::now());
     }
 
    private:
     // Get the time remaining until this timeout expires
-    std::chrono::milliseconds getTimeRemaining(
-        std::chrono::steady_clock::time_point now) const {
+    Duration getTimeRemaining(std::chrono::steady_clock::time_point now) const {
       if (now >= expiration_) {
-        return std::chrono::milliseconds(0);
+        return Duration(0);
       }
-      return std::chrono::duration_cast<std::chrono::milliseconds>(
-          expiration_ - now);
+      return std::chrono::duration_cast<Duration>(expiration_ - now);
     }
 
-    void setScheduled(HHWheelTimer* wheel, std::chrono::milliseconds);
+    void setScheduled(
+        HHWheelTimerBase* wheel,
+        std::chrono::steady_clock::time_point deadline);
     void cancelTimeoutImpl();
 
-    HHWheelTimer* wheel_{nullptr};
+    HHWheelTimerBase* wheel_{nullptr};
     std::chrono::steady_clock::time_point expiration_{};
     int bucket_{-1};
 
@@ -144,15 +208,15 @@ class HHWheelTimer : private folly::AsyncTimeout,
         list<Callback, boost::intrusive::constant_time_size<false>>
             List;
 
-    std::shared_ptr<RequestContext> context_;
+    std::shared_ptr<RequestContext> requestContext_;
 
-    // Give HHWheelTimer direct access to our members so it can take care
+    // Give HHWheelTimerBase direct access to our members so it can take care
     // of scheduling/cancelling.
-    friend class HHWheelTimer;
+    friend class HHWheelTimerBase;
   };
 
   /**
-   * Create a new HHWheelTimer with the specified interval and the
+   * Create a new HHWheelTimerBase with the specified interval and the
    * default timeout value set.
    *
    * Objects created using this version of constructor can be used
@@ -161,13 +225,11 @@ class HHWheelTimer : private folly::AsyncTimeout,
    * interval timeouts using scheduleTimeout(callback) method.
    */
   static int DEFAULT_TICK_INTERVAL;
-  explicit HHWheelTimer(
-      folly::TimeoutManager* timeoutManager,
-      std::chrono::milliseconds intervalMS =
-          std::chrono::milliseconds(DEFAULT_TICK_INTERVAL),
+  explicit HHWheelTimerBase(
+      folly::TimeoutManager* timeoutMananger,
+      Duration intervalDuration = Duration(DEFAULT_TICK_INTERVAL),
       AsyncTimeout::InternalEnum internal = AsyncTimeout::InternalEnum::NORMAL,
-      std::chrono::milliseconds defaultTimeoutMS =
-          std::chrono::milliseconds(-1));
+      Duration defaultTimeoutDuration = Duration(-1));
 
   /**
    * Cancel all outstanding timeouts
@@ -177,29 +239,23 @@ class HHWheelTimer : private folly::AsyncTimeout,
   size_t cancelAll();
 
   /**
-   * Get the tick interval for this HHWheelTimer.
+   * Get the tick interval for this HHWheelTimerBase.
    *
    * Returns the tick interval in milliseconds.
    */
-  std::chrono::milliseconds getTickInterval() const {
-    return interval_;
-  }
+  Duration getTickInterval() const { return interval_.interval(); }
 
   /**
-   * Get the default timeout interval for this HHWheelTimer.
+   * Get the default timeout interval for this HHWheelTimerBase.
    *
    * Returns the timeout interval in milliseconds.
    */
-  std::chrono::milliseconds getDefaultTimeout() const {
-    return defaultTimeout_;
-  }
+  Duration getDefaultTimeout() const { return defaultTimeout_; }
 
   /**
-   * Set the default timeout interval for this HHWheelTimer.
+   * Set the default timeout interval for this HHWheelTimerBase.
    */
-  void setDefaultTimeout(std::chrono::milliseconds timeout) {
-    defaultTimeout_ = timeout;
-  }
+  void setDefaultTimeout(Duration timeout) { defaultTimeout_ = timeout; }
 
   /**
    * Schedule the specified Callback to be invoked after the
@@ -208,10 +264,7 @@ class HHWheelTimer : private folly::AsyncTimeout,
    * If the callback is already scheduled, this cancels the existing timeout
    * before scheduling the new timeout.
    */
-  void scheduleTimeout(Callback* callback, std::chrono::milliseconds timeout);
-  void scheduleTimeoutImpl(
-      Callback* callback,
-      std::chrono::milliseconds timeout);
+  void scheduleTimeout(Callback* callback, Duration timeout);
 
   /**
    * Schedule the specified Callback to be invoked after the
@@ -226,17 +279,15 @@ class HHWheelTimer : private folly::AsyncTimeout,
   void scheduleTimeout(Callback* callback);
 
   template <class F>
-  void scheduleTimeoutFn(F fn, std::chrono::milliseconds timeout) {
+  void scheduleTimeoutFn(F fn, Duration timeout) {
     struct Wrapper : Callback {
       Wrapper(F f) : fn_(std::move(f)) {}
       void timeoutExpired() noexcept override {
         try {
           fn_();
-        } catch (std::exception const& e) {
-          LOG(ERROR) << "HHWheelTimer timeout callback threw an exception: "
-                     << e.what();
         } catch (...) {
-          LOG(ERROR) << "HHWheelTimer timeout callback threw a non-exception.";
+          LOG(ERROR) << "HHWheelTimerBase timeout callback threw unhandled "
+                     << exceptionStr(current_exception());
         }
         delete this;
       }
@@ -249,13 +300,9 @@ class HHWheelTimer : private folly::AsyncTimeout,
   /**
    * Return the number of currently pending timeouts
    */
-  std::size_t count() const {
-    return count_;
-  }
+  std::size_t count() const { return count_; }
 
-  bool isDetachable() const {
-    return !folly::AsyncTimeout::isScheduled();
-  }
+  bool isDetachable() const { return !folly::AsyncTimeout::isScheduled(); }
 
   using folly::AsyncTimeout::attachEventBase;
   using folly::AsyncTimeout::detachEventBase;
@@ -268,18 +315,18 @@ class HHWheelTimer : private folly::AsyncTimeout,
    * Use destroy() instead.  See the comments in DelayedDestruction for more
    * details.
    */
-  ~HHWheelTimer() override;
+  ~HHWheelTimerBase() override;
 
  private:
   // Forbidden copy constructor and assignment operator
-  HHWheelTimer(HHWheelTimer const&) = delete;
-  HHWheelTimer& operator=(HHWheelTimer const&) = delete;
+  HHWheelTimerBase(HHWheelTimerBase const&) = delete;
+  HHWheelTimerBase& operator=(HHWheelTimerBase const&) = delete;
 
   // Methods inherited from AsyncTimeout
   void timeoutExpired() noexcept override;
 
-  std::chrono::milliseconds interval_;
-  std::chrono::milliseconds defaultTimeout_;
+  detail::HHWheelTimerDurationInterval<Duration> interval_;
+  Duration defaultTimeout_;
 
   static constexpr int WHEEL_BUCKETS = 4;
   static constexpr int WHEEL_BITS = 8;
@@ -287,30 +334,82 @@ class HHWheelTimer : private folly::AsyncTimeout,
   static constexpr unsigned int WHEEL_MASK = (WHEEL_SIZE - 1);
   static constexpr uint32_t LARGEST_SLOT = 0xffffffffUL;
 
-  typedef Callback::List CallbackList;
+  typedef typename Callback::List CallbackList;
   CallbackList buckets_[WHEEL_BUCKETS][WHEEL_SIZE];
-  std::vector<std::size_t> bitmap_;
+  std::array<std::size_t, (WHEEL_SIZE / sizeof(std::size_t)) / 8> bitmap_;
 
-  int64_t timeToWheelTicks(std::chrono::milliseconds t) {
-    return t.count() / interval_.count();
-  }
+  int64_t timeToWheelTicks(Duration t) { return interval_.toWheelTicks(t); }
 
-  bool cascadeTimers(int bucket, int tick);
-  int64_t lastTick_;
+  bool cascadeTimers(
+      int bucket, int tick, std::chrono::steady_clock::time_point curTime);
+  void scheduleTimeoutInternal(Duration timeout);
+
   int64_t expireTick_;
   std::size_t count_;
   std::chrono::steady_clock::time_point startTime_;
 
   int64_t calcNextTick();
+  int64_t calcNextTick(std::chrono::steady_clock::time_point curTime);
 
-  void scheduleNextTimeout();
+  static bool inSameEpoch(int64_t tickA, int64_t tickB) {
+    return (tickA >> WHEEL_BITS) == (tickB >> WHEEL_BITS);
+  }
+
+  /**
+   * Schedule a given timeout by putting it into the appropriate bucket of the
+   * wheel.
+   *
+   * @param callback           Callback to fire after `timeout`
+   * @param dueTick            Tick at which the timer is due.
+   * @param nextTickToProcess  next tick that was not processed by the timer
+   *                           yet. Can be less than nextTick if we're lagging.
+   * @param nextTick           next tick based on the actual time
+   */
+  void scheduleTimeoutImpl(
+      Callback* callback,
+      int64_t dueTick,
+      int64_t nextTickToProcess,
+      int64_t nextTick);
+
+  /**
+   * Compute next required wheel tick to fire and schedule the timeout for that
+   * tick.
+   *
+   * @param nextTick  next tick based on the actual time
+   */
+  void scheduleNextTimeout(int64_t nextTick);
+
+  /**
+   * Schedule next wheel timeout in a fixed number of wheel ticks.
+   *
+   * @param nextTick  next tick based on the actual time
+   * @param ticks     number of ticks in which the timer should fire
+   */
+  void scheduleNextTimeout(int64_t nextTick, int64_t ticks);
+
+  size_t cancelTimeoutsFromList(CallbackList& timeouts);
 
   bool* processingCallbacksGuard_;
-  CallbackList timeouts; // Timeouts queued to run
+  // Timeouts that we're about to run. They're already extracted from their
+  // corresponding buckets, so we need this list for the `cancelAll` to be able
+  // to cancel them.
+  CallbackList timeoutsToRunNow_;
 
   std::chrono::steady_clock::time_point getCurTime() {
     return std::chrono::steady_clock::now();
   }
 };
+
+// std::chrono::milliseconds
+using HHWheelTimer = HHWheelTimerBase<std::chrono::milliseconds>;
+extern template class HHWheelTimerBase<std::chrono::milliseconds>;
+
+// std::chrono::microseconds
+template <>
+void HHWheelTimerBase<std::chrono::microseconds>::scheduleTimeoutInternal(
+    std::chrono::microseconds timeout);
+
+using HHWheelTimerHighRes = HHWheelTimerBase<std::chrono::microseconds>;
+extern template class HHWheelTimerBase<std::chrono::microseconds>;
 
 } // namespace folly

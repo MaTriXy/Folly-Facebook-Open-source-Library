@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,7 +19,8 @@
 #include <cstddef>
 #include <type_traits>
 
-namespace folly { namespace detail {
+namespace folly {
+namespace detail {
 
 // Shortcut, so we don't have to use enable_if everywhere
 struct FormatTraitsBase {
@@ -29,7 +30,8 @@ struct FormatTraitsBase {
 // Traits that define enabled, value_type, and at() for anything
 // indexable with integral keys: pointers, arrays, vectors, and maps
 // with integral keys
-template <class T, class Enable = void> struct IndexableTraits;
+template <class T, class Enable = void>
+struct IndexableTraits;
 
 // Base class for sequences (vectors, deques)
 template <class C>
@@ -37,9 +39,7 @@ struct IndexableTraitsSeq : public FormatTraitsBase {
   typedef C container_type;
   typedef typename C::value_type value_type;
 
-  static const value_type& at(const C& c, int idx) {
-    return c.at(idx);
-  }
+  static const value_type& at(const C& c, int idx) { return c.at(idx); }
 
   static const value_type& at(const C& c, int idx, const value_type& dflt) {
     return (idx >= 0 && size_t(idx) < c.size()) ? c.at(idx) : dflt;

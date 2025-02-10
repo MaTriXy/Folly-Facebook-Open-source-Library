@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,20 +16,18 @@
 
 #pragma once
 
-#include <boost/noncopyable.hpp>
-#include <glog/logging.h>
+#include <cassert>
 
 #include <folly/File.h>
 #include <folly/Range.h>
+#include <folly/portability/Unistd.h>
 
 namespace folly {
 
 /**
  * Maps files in memory (read-only).
- *
- * @author Tudor Bosman (tudorb@fb.com)
  */
-class MemoryMapping : boost::noncopyable {
+class MemoryMapping {
  public:
   /**
    * Lock the pages in memory?
@@ -38,11 +36,27 @@ class MemoryMapping : boost::noncopyable {
    */
   enum class LockMode {
     TRY_LOCK,
-    MUST_LOCK
+    MUST_LOCK,
   };
+
+  struct LockFlags {
+    LockFlags() {}
+
+    bool operator==(const LockFlags& other) const;
+
+    /**
+     * Instead of locking all the pages in the mapping before the call returns,
+     * only lock those that are currently resident and mark the others to be
+     * locked at the time they're populated by their first page fault.
+     *
+     * Uses mlock2(flags=MLOCK_ONFAULT). Requires Linux >= 4.4.
+     */
+    bool lockOnFault = false;
+  };
+
   /**
-   * Map a portion of the file indicated by filename in memory, causing a CHECK
-   * failure on error.
+   * Map a portion of the file indicated by filename in memory, causing SIGABRT
+   * on error.
    *
    * By default, map the whole file.  length=-1: map from offset to EOF.
    * Unlike the mmap() system call, offset and length don't need to be
@@ -55,17 +69,35 @@ class MemoryMapping : boost::noncopyable {
     Options() {}
 
     // Convenience methods; return *this for chaining.
-    Options& setPageSize(off_t v) { pageSize = v; return *this; }
-    Options& setShared(bool v) { shared = v; return *this; }
-    Options& setPrefault(bool v) { prefault = v; return *this; }
-    Options& setReadable(bool v) { readable = v; return *this; }
-    Options& setWritable(bool v) { writable = v; return *this; }
-    Options& setGrow(bool v) { grow = v; return *this; }
+    Options& setPageSize(off_t v) {
+      pageSize = v;
+      return *this;
+    }
+    Options& setShared(bool v) {
+      shared = v;
+      return *this;
+    }
+    Options& setPrefault(bool v) {
+      prefault = v;
+      return *this;
+    }
+    Options& setReadable(bool v) {
+      readable = v;
+      return *this;
+    }
+    Options& setWritable(bool v) {
+      writable = v;
+      return *this;
+    }
+    Options& setGrow(bool v) {
+      grow = v;
+      return *this;
+    }
 
     // Page size. 0 = use appropriate page size.
     // (On Linux, we use a huge page size if the file is on a hugetlbfs
     // file system, and the default page size otherwise)
-    off_t pageSize = 0;
+    off64_t pageSize = 0;
 
     // If shared (default), the memory mapping is shared with other processes
     // mapping the same file (or children); if not shared (private), each
@@ -103,41 +135,46 @@ class MemoryMapping : boost::noncopyable {
   }
 
   enum AnonymousType {
-    kAnonymous
+    kAnonymous,
   };
 
   /**
    * Create an anonymous mapping.
    */
-  MemoryMapping(AnonymousType, off_t length, Options options=Options());
+  MemoryMapping(AnonymousType, off64_t length, Options options = Options());
 
-  explicit MemoryMapping(File file,
-                         off_t offset=0,
-                         off_t length=-1,
-                         Options options=Options());
+  explicit MemoryMapping(
+      File file,
+      off64_t offset = 0,
+      off64_t length = -1,
+      Options options = Options());
 
-  explicit MemoryMapping(const char* name,
-                         off_t offset=0,
-                         off_t length=-1,
-                         Options options=Options());
+  explicit MemoryMapping(
+      const char* name,
+      off64_t offset = 0,
+      off64_t length = -1,
+      Options options = Options());
 
-  explicit MemoryMapping(int fd,
-                         off_t offset=0,
-                         off_t length=-1,
-                         Options options=Options());
+  explicit MemoryMapping(
+      int fd,
+      off64_t offset = 0,
+      off64_t length = -1,
+      Options options = Options());
 
+  MemoryMapping(const MemoryMapping&) = delete;
   MemoryMapping(MemoryMapping&&) noexcept;
 
   ~MemoryMapping();
 
-  MemoryMapping& operator=(MemoryMapping);
+  MemoryMapping& operator=(const MemoryMapping&) = delete;
+  MemoryMapping& operator=(MemoryMapping&&);
 
   void swap(MemoryMapping& other) noexcept;
 
   /**
    * Lock the pages in memory
    */
-  bool mlock(LockMode lock);
+  bool mlock(LockMode mode, LockFlags flags = {});
 
   /**
    * Unlock the pages.
@@ -165,17 +202,14 @@ class MemoryMapping : boost::noncopyable {
   template <class T>
   Range<const T*> asRange() const {
     size_t count = data_.size() / sizeof(T);
-    return Range<const T*>(static_cast<const T*>(
-                             static_cast<const void*>(data_.data())),
-                           count);
+    return Range<const T*>(
+        static_cast<const T*>(static_cast<const void*>(data_.data())), count);
   }
 
   /**
    * A range of bytes mapped by this mapping.
    */
-  ByteRange range() const {
-    return data_;
-  }
+  ByteRange range() const { return data_; }
 
   /**
    * A bitwise cast of the mapped bytes as range of mutable values. Only
@@ -183,18 +217,16 @@ class MemoryMapping : boost::noncopyable {
    */
   template <class T>
   Range<T*> asWritableRange() const {
-    DCHECK(options_.writable);  // you'll segfault anyway...
+    assert(options_.writable); // you'll segfault anyway...
     size_t count = data_.size() / sizeof(T);
-    return Range<T*>(static_cast<T*>(
-                       static_cast<void*>(data_.data())),
-                     count);
+    return Range<T*>(static_cast<T*>(static_cast<void*>(data_.data())), count);
   }
 
   /**
    * A range of mutable bytes mapped by this mapping.
    */
   MutableByteRange writableRange() const {
-    DCHECK(options_.writable);  // you'll segfault anyway...
+    assert(options_.writable); // you'll segfault anyway...
     return data_;
   }
 
@@ -202,13 +234,9 @@ class MemoryMapping : boost::noncopyable {
    * Return the memory area where the file was mapped.
    * Deprecated; use range() instead.
    */
-  StringPiece data() const {
-    return asRange<const char>();
-  }
+  StringPiece data() const { return asRange<const char>(); }
 
-  bool mlocked() const {
-    return locked_;
-  }
+  bool mlocked() const { return locked_; }
 
   int fd() const { return file_.fd(); }
 
@@ -219,11 +247,11 @@ class MemoryMapping : boost::noncopyable {
     kGrow = 1 << 0,
     kAnon = 1 << 1,
   };
-  void init(off_t offset, off_t length);
+  void init(off64_t offset, off64_t length);
 
   File file_;
   void* mapStart_ = nullptr;
-  off_t mapLength_ = 0;
+  off64_t mapLength_ = 0;
   Options options_;
   bool locked_ = false;
   MutableByteRange data_;
@@ -241,11 +269,19 @@ void swap(MemoryMapping&, MemoryMapping&) noexcept;
  * Useful when copying from/to memory mappings after hintLinearScan();
  * copying backwards renders any prefetching useless (even harmful).
  */
-void alignedForwardMemcpy(void* dest, const void* src, size_t size);
+void alignedForwardMemcpy(void* dst, const void* src, size_t size);
 
 /**
  * Copy a file using mmap(). Overwrites dest.
  */
 void mmapFileCopy(const char* src, const char* dest, mode_t mode = 0666);
+
+/**
+ * mlock2 is Linux-only and exists since Linux 4.4
+ * On Linux pre-4.4 and other platforms fail with ENOSYS.
+ * glibc added the mlock2 wrapper in 2.27
+ * https://lists.gnu.org/archive/html/info-gnu/2018-02/msg00000.html
+ */
+int mlock2wrapper(const void* addr, size_t len, MemoryMapping::LockFlags flags);
 
 } // namespace folly

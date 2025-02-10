@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <chrono>
@@ -47,9 +48,7 @@ class TimePoint {
         timeEnd_.time_since_epoch().count() == 0 && timeWaiting_.count() == 0);
   }
 
-  std::chrono::steady_clock::time_point getTime() const {
-    return timeStart_;
-  }
+  std::chrono::steady_clock::time_point getTime() const { return timeStart_; }
 
   std::chrono::steady_clock::time_point getTimeStart() const {
     return timeStart_;
@@ -59,13 +58,9 @@ class TimePoint {
     return timeStart_;
   }
 
-  std::chrono::nanoseconds getTimeWaiting() const {
-    return timeWaiting_;
-  }
+  std::chrono::nanoseconds getTimeWaiting() const { return timeWaiting_; }
 
-  pid_t getTid() const {
-    return tid_;
-  }
+  pid_t getTid() const { return tid_; }
 
  private:
   std::chrono::steady_clock::time_point timeStart_;

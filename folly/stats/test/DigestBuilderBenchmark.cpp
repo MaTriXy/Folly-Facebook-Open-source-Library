@@ -1,11 +1,11 @@
 /*
- * Copyright 2018-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <folly/stats/detail/DigestBuilder-defs.h>
+#include <folly/stats/DigestBuilder.h>
 
 #include <chrono>
 #include <condition_variable>
@@ -24,25 +24,37 @@
 
 #include <folly/Benchmark.h>
 #include <folly/Range.h>
+#include <folly/lang/Keep.h>
 #include <folly/portability/GFlags.h>
 
 DEFINE_int32(digest_merge_time_ns, 5500, "Time to merge into the digest");
 
 using namespace folly;
-using namespace folly::detail;
 
 class FreeDigest {
  public:
-  explicit FreeDigest(size_t) {}
+  explicit FreeDigest(size_t = 0) {}
 
-  FreeDigest merge(Range<const double*>) const {
+  FreeDigest merge(Range<const double*> values) const {
     auto start = std::chrono::steady_clock::now();
     auto finish = start + std::chrono::nanoseconds{FLAGS_digest_merge_time_ns};
     while (std::chrono::steady_clock::now() < finish) {
     }
-    return FreeDigest(100);
+    FreeDigest ret;
+    ret.empty_ = empty_ && values.empty();
+    return ret;
   }
+
+  bool empty() const { return empty_; }
+
+ private:
+  bool empty_ = true;
 };
+
+extern "C" FOLLY_KEEP void check_folly_digest_builder_append(
+    DigestBuilder<FreeDigest>& builder, double value) {
+  builder.append(value);
+}
 
 unsigned int append(unsigned int iters, size_t bufSize, size_t nThreads) {
   iters = 1000000;
@@ -93,24 +105,24 @@ BENCHMARK_RELATIVE_NAMED_PARAM_MULTI(append, 10000x32, 10000, 32)
  * ============================================================================
  * folly/stats/test/DigestBuilderBenchmark.cpp     relative  time/iter  iters/s
  * ============================================================================
- * append(1000x1)                                              25.90ns   38.61M
- * append(1000x2)                                    99.27%    26.09ns   38.33M
- * append(1000x4)                                    99.82%    25.95ns   38.54M
- * append(1000x8)                                    98.54%    26.28ns   38.05M
- * append(1000x16)                                   84.07%    30.81ns   32.46M
- * append(1000x32)                                   82.58%    31.36ns   31.88M
+ * append(1000x1)                                              16.32ns   61.26M
+ * append(1000x2)                                    96.42%    16.93ns   59.07M
+ * append(1000x4)                                    93.57%    17.44ns   57.33M
+ * append(1000x8)                                    93.43%    17.47ns   57.24M
+ * append(1000x16)                                   92.96%    17.56ns   56.95M
+ * append(1000x32)                                   29.23%    55.84ns   17.91M
  * ----------------------------------------------------------------------------
- * append(10000x1)                                             25.34ns   39.46M
- * append(10000x2)                                   99.75%    25.41ns   39.36M
- * append(10000x4)                                   99.24%    25.54ns   39.16M
- * append(10000x8)                                  106.97%    23.69ns   42.21M
- * append(10000x16)                                  87.82%    28.86ns   34.65M
- * append(10000x32)                                  72.99%    34.72ns   28.80M
+ * append(10000x1)                                             11.58ns   86.33M
+ * append(10000x2)                                   95.82%    12.09ns   82.72M
+ * append(10000x4)                                   89.00%    13.01ns   76.84M
+ * append(10000x8)                                   88.63%    13.07ns   76.51M
+ * append(10000x16)                                  88.22%    13.13ns   76.16M
+ * append(10000x32)                                  24.89%    46.54ns   21.49M
  * ============================================================================
  */
 
 int main(int argc, char* argv[]) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

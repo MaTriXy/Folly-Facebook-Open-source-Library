@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-/* -*- Mode: C++; tab-width: 2; c-basic-offset: 2; indent-tabs-mode: nil -*- */
 
 #include <folly/Singleton.h>
 
@@ -21,7 +20,7 @@
 #include <thread>
 
 #include <folly/Benchmark.h>
-#include <folly/Memory.h>
+#include <folly/SingletonThreadLocal.h>
 #include <folly/portability/GFlags.h>
 
 FOLLY_GNU_DISABLE_WARNING("-Wdeprecated-declarations")
@@ -48,7 +47,7 @@ struct BenchmarkSingleton {
 
 void run4Threads(std::function<void()> f) {
   std::vector<std::thread> threads;
-  for (size_t i = 0; i < 4; ++ i) {
+  for (size_t i = 0; i < 4; ++i) {
     threads.emplace_back(f);
   }
   for (auto& thread : threads) {
@@ -57,7 +56,7 @@ void run4Threads(std::function<void()> f) {
 }
 
 void normalSingleton(size_t n) {
-  for (size_t i = 0; i < n; ++ i) {
+  for (size_t i = 0; i < n; ++i) {
     doNotOptimizeAway(getNormalSingleton());
   }
 }
@@ -67,9 +66,7 @@ BENCHMARK(NormalSingleton, n) {
 }
 
 BENCHMARK(NormalSingleton4Threads, n) {
-  run4Threads([=]() {
-      normalSingleton(n);
-    });
+  run4Threads([=]() { normalSingleton(n); });
 }
 
 void meyersSingleton(size_t n) {
@@ -78,29 +75,26 @@ void meyersSingleton(size_t n) {
   }
 }
 
-
 BENCHMARK(MeyersSingleton, n) {
   meyersSingleton(n);
 }
 
 BENCHMARK(MeyersSingleton4Threads, n) {
-  run4Threads([=]() {
-      meyersSingleton(n);
-    });
+  run4Threads([=]() { meyersSingleton(n); });
 }
 
 struct BenchmarkTag {};
 template <typename T, typename Tag = detail::DefaultTag>
-using SingletonBenchmark = Singleton <T, Tag, BenchmarkTag>;
+using SingletonBenchmark = Singleton<T, Tag, BenchmarkTag>;
 
-struct GetTag{};
-struct TryGetTag{};
-struct TryGetFastTag{};
+struct GetTag {};
+struct TryGetTag {};
+struct TryGetFastTag {};
 
 SingletonBenchmark<BenchmarkSingleton, GetTag> benchmark_singleton_get;
 SingletonBenchmark<BenchmarkSingleton, TryGetTag> benchmark_singleton_try_get;
 SingletonBenchmark<BenchmarkSingleton, TryGetFastTag>
-benchmark_singleton_try_get_fast;
+    benchmark_singleton_try_get_fast;
 
 void follySingletonRaw(size_t n) {
   for (size_t i = 0; i < n; ++i) {
@@ -113,9 +107,7 @@ BENCHMARK(FollySingletonRaw, n) {
 }
 
 BENCHMARK(FollySingletonRaw4Threads, n) {
-  run4Threads([=]() {
-      follySingletonRaw(n);
-    });
+  run4Threads([=]() { follySingletonRaw(n); });
 }
 
 void follySingletonTryGet(size_t n) {
@@ -129,9 +121,7 @@ BENCHMARK(FollySingletonTryGet, n) {
 }
 
 BENCHMARK(FollySingletonTryGet4Threads, n) {
-  run4Threads([=]() {
-      follySingletonTryGet(n);
-    });
+  run4Threads([=]() { follySingletonTryGet(n); });
 }
 
 void follySingletonTryGetFast(size_t n) {
@@ -145,17 +135,45 @@ BENCHMARK(FollySingletonTryGetFast, n) {
 }
 
 BENCHMARK(FollySingletonTryGetFast4Threads, n) {
-  run4Threads([=]() {
-      follySingletonTryGetFast(n);
-    });
+  run4Threads([=]() { follySingletonTryGetFast(n); });
+}
+
+void follySingletonThreadLocal(size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    folly::SingletonThreadLocal<BenchmarkSingleton, GetTag>::get().val++;
+  }
+}
+
+BENCHMARK(FollySingletonThreadLocal, n) {
+  follySingletonThreadLocal(n);
+}
+
+BENCHMARK(FollySingletonThreadLocal4Threads, n) {
+  run4Threads([=]() { follySingletonThreadLocal(n); });
+}
+
+LeakySingleton<BenchmarkSingleton> benchmark_leaky_singleton;
+
+void follyLeakySingleton(size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    LeakySingleton<BenchmarkSingleton>::get().val++;
+  }
+}
+
+BENCHMARK(FollyLeakySingleton, n) {
+  follyLeakySingleton(n);
+}
+
+BENCHMARK(FollyLeakySingleton4Threads, n) {
+  run4Threads([=]() { follyLeakySingleton(n); });
 }
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  gflags::SetCommandLineOptionWithMode(
-    "bm_min_usec", "100000", gflags::SET_FLAG_IF_DEFAULT
-  );
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::SetCommandLineOptionWithMode(
+      "bm_min_usec", "100000", folly::gflags::SET_FLAG_IF_DEFAULT);
 
+  folly::SingletonVault::singleton<BenchmarkTag>()->registrationComplete();
   folly::runBenchmarks();
 
   return 0;

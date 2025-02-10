@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <cstdint>
@@ -99,6 +100,10 @@ enum class LogLevel : uint32_t {
   MAX_LEVEL = 0x7fffffff,
 };
 
+constexpr LogLevel kDefaultLogLevel = LogLevel::INFO;
+constexpr LogLevel kMinFatalLogLevel =
+    folly::kIsDebug ? LogLevel::DFATAL : LogLevel::FATAL;
+
 /*
  * Support adding and subtracting integers from LogLevels, to create slightly
  * adjusted log level values.
@@ -141,7 +146,8 @@ std::ostream& operator<<(std::ostream& os, LogLevel level);
  * Returns true if and only if a LogLevel is fatal.
  */
 inline constexpr bool isLogLevelFatal(LogLevel level) {
-  return folly::kIsDebug ? (level >= LogLevel::DFATAL)
-                         : (level >= LogLevel::FATAL);
+  return folly::kIsDebug
+      ? (level >= LogLevel::DFATAL)
+      : (level >= LogLevel::FATAL);
 }
 } // namespace folly

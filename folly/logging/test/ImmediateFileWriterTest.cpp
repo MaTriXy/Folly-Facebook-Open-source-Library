@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,18 +13,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#ifndef _WIN32
-#include <unistd.h>
-#endif
+
+#include <folly/logging/ImmediateFileWriter.h>
+
+#include <signal.h>
+
+#include <folly/portability/Unistd.h>
 
 #include <folly/Conv.h>
 #include <folly/Exception.h>
 #include <folly/FileUtil.h>
-#include <folly/experimental/TestUtil.h>
-#include <folly/logging/ImmediateFileWriter.h>
 #include <folly/logging/LoggerDB.h>
 #include <folly/portability/GMock.h>
 #include <folly/portability/GTest.h>
+#include <folly/testing/TestUtil.h>
 
 using namespace folly;
 using folly::test::TemporaryFile;
@@ -81,16 +83,14 @@ namespace {
 static std::vector<std::string>* internalWarnings;
 
 void handleLoggingError(
-    StringPiece /* file */,
-    int /* lineNumber */,
-    std::string&& msg) {
+    StringPiece /* file */, int /* lineNumber */, std::string&& msg) {
   internalWarnings->emplace_back(std::move(msg));
 }
 } // namespace
 
 TEST(ImmediateFileWriter, ioError) {
   std::array<int, 2> fds;
-  auto rc = pipe(fds.data());
+  auto rc = fileops::pipe(fds.data());
   folly::checkUnixError(rc, "failed to create pipe");
   signal(SIGPIPE, SIG_IGN);
 
@@ -101,7 +101,7 @@ TEST(ImmediateFileWriter, ioError) {
 
   // Create an ImmediateFileWriter that refers to a pipe whose read end is
   // closed, then log a bunch of messages to it.
-  ::close(fds[0]);
+  fileops::close(fds[0]);
 
   size_t numMessages = 100;
   {

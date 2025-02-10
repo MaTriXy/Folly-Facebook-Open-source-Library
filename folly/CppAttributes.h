@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,11 +16,11 @@
 
 /**
  * GCC compatible wrappers around clang attributes.
- *
- * @author Dominik Gabi
  */
 
 #pragma once
+
+#include <folly/Portability.h>
 
 #ifndef __has_attribute
 #define FOLLY_HAS_ATTRIBUTE(x) 0
@@ -41,49 +41,6 @@
 #endif
 
 /**
- * Fallthrough to indicate that `break` was left out on purpose in a switch
- * statement, e.g.
- *
- * switch (n) {
- *   case 22:
- *   case 33:  // no warning: no statements between case labels
- *     f();
- *   case 44:  // warning: unannotated fall-through
- *     g();
- *     FOLLY_FALLTHROUGH; // no warning: annotated fall-through
- * }
- */
-#if FOLLY_HAS_CPP_ATTRIBUTE(fallthrough)
-#define FOLLY_FALLTHROUGH [[fallthrough]]
-#elif FOLLY_HAS_CPP_ATTRIBUTE(clang::fallthrough)
-#define FOLLY_FALLTHROUGH [[clang::fallthrough]]
-#elif FOLLY_HAS_CPP_ATTRIBUTE(gnu::fallthrough)
-#define FOLLY_FALLTHROUGH [[gnu::fallthrough]]
-#else
-#define FOLLY_FALLTHROUGH
-#endif
-
-/**
- *  Maybe_unused indicates that a function, variable or parameter might or
- *  might not be used, e.g.
- *
- *  int foo(FOLLY_MAYBE_UNUSED int x) {
- *    #ifdef USE_X
- *      return x;
- *    #else
- *      return 0;
- *    #endif
- *  }
- */
-#if FOLLY_HAS_CPP_ATTRIBUTE(maybe_unused)
-#define FOLLY_MAYBE_UNUSED [[maybe_unused]]
-#elif FOLLY_HAS_ATTRIBUTE(__unused__) || __GNUC__
-#define FOLLY_MAYBE_UNUSED __attribute__((__unused__))
-#else
-#define FOLLY_MAYBE_UNUSED
-#endif
-
-/**
  * Nullable indicates that a return value or a parameter may be a `nullptr`,
  * e.g.
  *
@@ -99,10 +56,19 @@
  *   }
  *   return nullptr;
  * }
+ *
+ * Ignores Clang's -Wnullability-extension since it correctly handles the case
+ * where the extension is not present.
  */
 #if FOLLY_HAS_EXTENSION(nullability)
-#define FOLLY_NULLABLE _Nullable
-#define FOLLY_NONNULL _Nonnull
+#define FOLLY_NULLABLE                                   \
+  FOLLY_PUSH_WARNING                                     \
+  FOLLY_CLANG_DISABLE_WARNING("-Wnullability-extension") \
+  _Nullable FOLLY_POP_WARNING
+#define FOLLY_NONNULL                                    \
+  FOLLY_PUSH_WARNING                                     \
+  FOLLY_CLANG_DISABLE_WARNING("-Wnullability-extension") \
+  _Nonnull FOLLY_POP_WARNING
 #else
 #define FOLLY_NULLABLE
 #define FOLLY_NONNULL
@@ -114,8 +80,112 @@
  * optimizer both when processing the function body and when analyzing
  * call-sites.
  */
-#if __GNUC__
-#define FOLLY_COLD __attribute__((__cold__))
+#if FOLLY_HAS_CPP_ATTRIBUTE(gnu::cold)
+#define FOLLY_ATTR_GNU_COLD gnu::cold
 #else
-#define FOLLY_COLD
+#define FOLLY_ATTR_GNU_COLD
+#endif
+
+/// FOLLY_ATTR_MAYBE_UNUSED_IF_NDEBUG
+///
+/// When defined(NDEBUG), expands to maybe_unused; otherwise, expands to empty.
+/// Useful for marking variables that are used, in the sense checked for by the
+/// attribute maybe_unused, only in debug builds.
+#if defined(NDEBUG)
+#define FOLLY_ATTR_MAYBE_UNUSED_IF_NDEBUG maybe_unused
+#else
+#define FOLLY_ATTR_MAYBE_UNUSED_IF_NDEBUG
+#endif
+
+/**
+ *  no_unique_address indicates that a member variable can be optimized to
+ * occupy no space, rather than the minimum 1-byte used by default.
+ *
+ *  class Empty {};
+ *
+ *  class NonEmpty1 {
+ *    [[FOLLY_ATTR_NO_UNIQUE_ADDRESS]] Empty e;
+ *    int f;
+ *  };
+ *
+ *  class NonEmpty2 {
+ *    Empty e;
+ *    int f;
+ *  };
+ *
+ *  sizeof(NonEmpty1); // may be == sizeof(int)
+ *  sizeof(NonEmpty2); // must be > sizeof(int)
+ */
+#if FOLLY_HAS_CPP_ATTRIBUTE(no_unique_address)
+#define FOLLY_ATTR_NO_UNIQUE_ADDRESS no_unique_address
+#elif FOLLY_HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
+#define FOLLY_ATTR_NO_UNIQUE_ADDRESS msvc::no_unique_address
+#else
+#define FOLLY_ATTR_NO_UNIQUE_ADDRESS
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(clang::no_destroy)
+#define FOLLY_ATTR_CLANG_NO_DESTROY clang::no_destroy
+#else
+#define FOLLY_ATTR_CLANG_NO_DESTROY
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(clang::uninitialized)
+#define FOLLY_ATTR_CLANG_UNINITIALIZED clang::uninitialized
+#else
+#define FOLLY_ATTR_CLANG_UNINITIALIZED
+#endif
+
+/**
+ * Accesses to objects with types with this attribute are not subjected to
+ * type-based alias analysis, but are instead assumed to be able to alias any
+ * other type of objects, just like the char type.
+ */
+#if FOLLY_HAS_CPP_ATTRIBUTE(gnu::may_alias)
+#define FOLLY_ATTR_GNU_MAY_ALIAS gnu::may_alias
+#else
+#define FOLLY_ATTR_GNU_MAY_ALIAS
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(gnu::pure)
+#define FOLLY_ATTR_GNU_PURE gnu::pure
+#else
+#define FOLLY_ATTR_GNU_PURE
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(clang::preserve_most)
+#define FOLLY_ATTR_CLANG_PRESERVE_MOST clang::preserve_most
+#else
+#define FOLLY_ATTR_CLANG_PRESERVE_MOST
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(clang::preserve_all)
+#define FOLLY_ATTR_CLANG_PRESERVE_ALL clang::preserve_all
+#else
+#define FOLLY_ATTR_CLANG_PRESERVE_ALL
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(gnu::used)
+#define FOLLY_ATTR_GNU_USED gnu::used
+#else
+#define FOLLY_ATTR_GNU_USED
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(clang::lifetimebound)
+#define FOLLY_ATTR_CLANG_LIFETIMEBOUND clang::lifetimebound
+#else
+#define FOLLY_ATTR_CLANG_LIFETIMEBOUND
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(clang::coro_await_elidable)
+#define FOLLY_ATTR_CLANG_CORO_AWAIT_ELIDABLE clang::coro_await_elidable
+#else
+#define FOLLY_ATTR_CLANG_CORO_AWAIT_ELIDABLE
+#endif
+
+#if FOLLY_HAS_CPP_ATTRIBUTE(clang::coro_await_elidable_argument)
+#define FOLLY_ATTR_CLANG_CORO_AWAIT_ELIDABLE_ARGUMENT \
+  clang::coro_await_elidable_argument
+#else
+#define FOLLY_ATTR_CLANG_CORO_AWAIT_ELIDABLE_ARGUMENT
 #endif

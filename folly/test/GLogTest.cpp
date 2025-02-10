@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,17 +16,17 @@
 
 #include <folly/GLog.h>
 
-#include <folly/portability/GTest.h>
-
 #include <vector>
+
+#include <folly/portability/GTest.h>
 
 TEST(LogEveryMs, basic) {
   std::vector<std::chrono::steady_clock::time_point> hist;
 
   while (hist.size() < 10) {
     FB_LOG_EVERY_MS(INFO, 10)
-      << "test msg " << (hist.push_back(std::chrono::steady_clock::now()),
-                         hist.size());
+        << "test msg "
+        << (hist.push_back(std::chrono::steady_clock::now()), hist.size());
   }
 
   bool atLeastOneIsGood = false;
@@ -44,8 +44,7 @@ TEST(LogEveryMs, zero) {
   int count = 0;
 
   for (int i = 0; i < 10; ++i) {
-    FB_LOG_EVERY_MS(INFO, 0)
-      << "test msg " << ++count;
+    FB_LOG_EVERY_MS(INFO, 0) << "test msg " << ++count;
   }
 
   EXPECT_EQ(10, count);

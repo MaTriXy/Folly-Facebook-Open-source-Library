@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,55 +16,92 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 
 #include <folly/Portability.h>
 #include <folly/Try.h>
 #include <folly/futures/detail/Core.h>
 #include <folly/lang/Exception.h>
+#include <folly/lang/Pretty.h>
 
 namespace folly {
 
 class FOLLY_EXPORT PromiseException : public std::logic_error {
  public:
   using std::logic_error::logic_error;
+  PromiseException() : std::logic_error{""} {}
 };
 
 class FOLLY_EXPORT PromiseInvalid : public PromiseException {
  public:
-  PromiseInvalid() : PromiseException("Promise invalid") {}
+  PromiseInvalid() = default;
+  char const* what() const noexcept override { return "Promise invalid"; }
 };
 
 class FOLLY_EXPORT PromiseAlreadySatisfied : public PromiseException {
  public:
-  PromiseAlreadySatisfied() : PromiseException("Promise already satisfied") {}
+  PromiseAlreadySatisfied() = default;
+  char const* what() const noexcept override {
+    return "Promise already satisfied";
+  }
 };
 
 class FOLLY_EXPORT FutureAlreadyRetrieved : public PromiseException {
  public:
-  FutureAlreadyRetrieved() : PromiseException("Future already retrieved") {}
+  FutureAlreadyRetrieved() = default;
+  char const* what() const noexcept override {
+    return "Future already retrieved";
+  }
 };
 
 class FOLLY_EXPORT BrokenPromise : public PromiseException {
- public:
-  explicit BrokenPromise(const std::string& type)
-      : PromiseException("Broken promise for type name `" + type + '`') {}
+ private:
+  template <typename T>
+  static FOLLY_CONSTEVAL auto make_error_message() {
+    constexpr auto prefix =
+        detail::pretty_carray_from("Broken promise for type name `");
+    constexpr auto prefix_size = std::size(prefix.data);
+    constexpr auto name = detail::pretty_name_carray<T>();
+    constexpr auto name_size = std::size(name.data);
+    c_array<char, name_size - 1 + prefix_size - 1 + 2> ret{};
+    char* dest = ret.data;
+    dest = detail::pretty_carray_copy(dest, prefix.data, prefix_size - 1);
+    dest = detail::pretty_carray_copy(dest, name.data, name_size - 1);
+    detail::pretty_carray_copy(dest, "`", 2);
+    return ret;
+  }
+  template <typename T>
+  static constexpr auto error_message = make_error_message<T>();
 
-  explicit BrokenPromise(const char* type) : BrokenPromise(std::string(type)) {}
+  const char* const what_{};
+
+ public:
+  template <typename T>
+  explicit BrokenPromise(tag_t<T>) : what_{error_message<T>.data} {}
+  char const* what() const noexcept override { return what_; }
 };
 
 // forward declaration
 template <class T>
 class SemiFuture;
-template <class T> class Future;
+template <class T>
+class Future;
+template <class T>
+class Promise;
 
 namespace futures {
 namespace detail {
+class FutureBaseHelper;
 template <class T>
 class FutureBase;
 struct EmptyConstruct {};
 template <typename T, typename F>
 class CoreCallbackState;
+template <typename T>
+void setTry(Promise<T>& p, Executor::KeepAlive<>&& ka, Try<T>&& t);
+
+struct MakeRetrievedFromStolenCoreTag {};
 } // namespace detail
 } // namespace futures
 
@@ -86,13 +123,11 @@ class CoreCallbackState;
 ///
 /// That usage pattern looks roughly like this:
 ///
-/// ```
-/// auto [p, f] = makePromiseContract(executor);
-/// g = std::move(f).then([](MyValue&& x) {
-///     ...executor runs this code if/when a MyValue is ready...
-///   });
-/// ...launch the async producer that eventually calls p.setResult()...
-/// ```
+///   auto [p, f] = makePromiseContract(executor);
+///   g = std::move(f).then([](MyValue&& x) {
+///       ...executor runs this code if/when a MyValue is ready...
+///     });
+///   ...launch the async producer that eventually calls p.setResult()...
 ///
 /// This is just one of many potential usage patterns. It has the desired
 /// property of being nonblocking to the caller. Of course the `.then()`
@@ -147,24 +182,24 @@ class Promise {
   ///
   /// Postconditions:
   ///
-  /// RESULT.valid() will be false
-  /// RESULT.isFulfilled() will be true
+  /// - `RESULT.valid() == false`
+  /// - `RESULT.isFulfilled() == true`
   static Promise<T> makeEmpty() noexcept;
 
   /// Constructs a valid but unfulfilled promise.
   ///
   /// Postconditions:
   ///
-  /// - valid() will be true (it will have a shared state)
-  /// - isFulfilled() will be false (its shared state won't have a result)
+  /// - `valid() == true` (it will have a shared state)
+  /// - `isFulfilled() == false` (its shared state won't have a result)
   Promise();
 
   /// Postconditions:
   ///
-  /// - If valid() and !isFulfilled(), the associated future (if any) will be
-  ///   completed with a `BrokenPromise` exception *as if* by
+  /// - If `valid()` and `!isFulfilled()`, the associated future (if any) will
+  ///   be completed with a `BrokenPromise` exception *as if* by
   ///   `setException(...)`.
-  /// - If valid(), releases, possibly destroying, the shared state.
+  /// - If `valid()`, releases, possibly destroying, the shared state.
   ~Promise();
 
   // not copyable
@@ -184,10 +219,10 @@ class Promise {
   ///
   /// Postconditions:
   ///
-  /// - If valid() and !isFulfilled(), the associated future (if any) will be
-  ///   completed with a `BrokenPromise` exception *as if* by
+  /// - If `valid()` and `!isFulfilled()`, the associated future (if any) will
+  ///   be completed with a `BrokenPromise` exception *as if* by
   ///   `setException(...)`.
-  /// - If valid(), releases, possibly destroying, the original shared state.
+  /// - If `valid()`, releases, possibly destroying, the original shared state.
   /// - `this` will have whatever shared-state was previously held by `other`
   ///   (if any)
   /// - `other.valid()` will be false (`other` will not have any shared state)
@@ -198,13 +233,13 @@ class Promise {
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
+  /// - `valid() == true` (else throws PromiseInvalid)
   /// - neither getSemiFuture() nor getFuture() may have been called previously
   ///   on `this` Promise (else throws FutureAlreadyRetrieved)
   ///
   /// Postconditions:
   ///
-  /// - RESULT.valid() will be true
+  /// - `RESULT.valid() == true`
   /// - RESULT will share the same shared-state as `this`
   ///
   /// DEPRECATED: use `folly::makePromiseContract()` instead.
@@ -215,13 +250,13 @@ class Promise {
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
+  /// - `valid() == true` (else throws PromiseInvalid)
   /// - neither getSemiFuture() nor getFuture() may have been called previously
   ///   on `this` Promise (else throws FutureAlreadyRetrieved)
   ///
   /// Postconditions:
   ///
-  /// - RESULT.valid() will be true
+  /// - `RESULT.valid() == true`
   /// - RESULT will share the same shared-state as `this`
   ///
   /// DEPRECATED: use `folly::makePromiseContract()` instead. If you can't use
@@ -233,25 +268,23 @@ class Promise {
   ///
   /// Sample usage:
   ///
-  /// ```
-  /// Promise<MyValue> p = ...
-  /// ...
-  /// auto const ep = std::exception_ptr();
-  /// auto const ew = exception_wrapper::from_exception_ptr(ep);
-  /// p.setException(ew);
-  /// ```
+  ///   Promise<MyValue> p = ...
+  ///   ...
+  ///   auto const ep = std::exception_ptr();
+  ///   auto const ew = exception_wrapper{ep};
+  ///   p.setException(ew);
   ///
   /// Functionally equivalent to `setTry(Try<T>(std::move(ew)))`
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
-  /// - !isFulfilled() (else throws PromiseAlreadySatisfied)
+  /// - `valid() == true` (else throws PromiseInvalid)
+  /// - `isFulfilled() == false` (else throws PromiseAlreadySatisfied)
   ///
   /// Postconditions:
   ///
-  /// - isFulfilled() will be true
-  /// - valid() will be unchanged (true)
+  /// - `isFulfilled() == true`
+  /// - `valid() == true` (unchanged)
   /// - The associated future (if any) will complete with the exception.
   void setException(exception_wrapper ew);
 
@@ -260,8 +293,10 @@ class Promise {
   ///
   /// Please see `setException(exception_wrapper)` for semantics/contract.
   template <class E>
-  typename std::enable_if<std::is_base_of<std::exception, E>::value>::type
-  setException(E const& e);
+  typename std::enable_if<
+      std::is_base_of<std::exception, typename std::decay<E>::type>::value>::
+      type
+      setException(E&& e);
 
   /// Sets a handler for the producer to receive a (logical) interruption
   ///   request (exception) sent from the consumer via `future.raise()`.
@@ -280,7 +315,7 @@ class Promise {
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
+  /// - `valid() == true` (else throws PromiseInvalid)
   /// - `fn` must be copyable and must be invocable with
   ///   `exception_wrapper const&`
   /// - the code within `fn()` must be safe to run either synchronously within
@@ -318,16 +353,15 @@ class Promise {
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
-  /// - !isFulfilled() (else throws PromiseAlreadySatisfied)
+  /// - `valid() == true` (else throws PromiseInvalid)
+  /// - `isFulfilled() == false` (else throws PromiseAlreadySatisfied)
   ///
   /// Postconditions:
   ///
-  /// - isFulfilled() will be true
-  /// - valid() will be unchanged (true)
+  /// - `isFulfilled() == true`
+  /// - `valid() == true` (unchanged)
   template <class B = T>
-  typename std::enable_if<std::is_same<Unit, B>::value, void>::type
-  setValue() {
+  typename std::enable_if<std::is_same<Unit, B>::value, void>::type setValue() {
     setTry(Try<T>(T()));
   }
 
@@ -337,13 +371,13 @@ class Promise {
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
-  /// - !isFulfilled() (else throws PromiseAlreadySatisfied)
+  /// - `valid() == true` (else throws PromiseInvalid)
+  /// - `isFulfilled() == false` (else throws PromiseAlreadySatisfied)
   ///
   /// Postconditions:
   ///
-  /// - isFulfilled() will be true
-  /// - valid() will be unchanged (true)
+  /// - `isFulfilled() == true`
+  /// - `valid() == true` (unchanged)
   /// - The associated future will see the value, e.g., in its continuation.
   template <class M>
   void setValue(M&& value);
@@ -352,13 +386,13 @@ class Promise {
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
-  /// - !isFulfilled() (else throws PromiseAlreadySatisfied)
+  /// - `valid() == true` (else throws PromiseInvalid)
+  /// - `isFulfilled() == false` (else throws PromiseAlreadySatisfied)
   ///
   /// Postconditions:
   ///
-  /// - isFulfilled() will be true
-  /// - valid() will be unchanged (true)
+  /// - `isFulfilled() == true`
+  /// - `valid() == true` (unchanged)
   /// - The associated future will see the result, e.g., in its continuation.
   void setTry(Try<T>&& t);
 
@@ -367,16 +401,14 @@ class Promise {
   ///
   /// Example:
   ///
-  /// ```
-  /// p.setWith([] { do something that may throw; return a T; });
-  /// ```
+  ///   p.setWith([] { do something that may throw; return a T; });
   ///
   /// Functionally equivalent to `setTry(makeTryWith(static_cast<F&&>(func)));`
   ///
   /// Preconditions:
   ///
-  /// - valid() (else throws PromiseInvalid)
-  /// - !isFulfilled() (else throws PromiseAlreadySatisfied)
+  /// - `valid() == true` (else throws PromiseInvalid)
+  /// - `isFulfilled() == false` (else throws PromiseAlreadySatisfied)
   ///
   /// Postconditions:
   ///
@@ -385,26 +417,25 @@ class Promise {
   ///   `setValue()`
   /// - If `func()` throws, the exception will be captured as if via
   ///   `setException()`
-  /// - isFulfilled() will be true
-  /// - valid() will be unchanged (true)
+  /// - `isFulfilled() == true`
+  /// - `valid() == true` (unchanged)
   /// - The associated future will see the result, e.g., in its continuation.
   template <class F>
   void setWith(F&& func);
 
   /// true if this has a shared state;
   ///   false if this has been consumed/moved-out.
-  bool valid() const noexcept {
-    return core_ != nullptr;
-  }
+  bool valid() const noexcept { return core_ != nullptr; }
 
   /// True if either this promise was fulfilled or is invalid.
   ///
-  /// - True if !valid()
-  /// - True if valid() and this was fulfilled (a prior call to `setValue()`,
+  /// - True if `!valid()`
+  /// - True if `valid()` and this was fulfilled (a prior call to `setValue()`,
   ///   `setTry()`, `setException()`, or `setWith()`)
   bool isFulfilled() const noexcept;
 
  private:
+  friend class futures::detail::FutureBaseHelper;
   template <class>
   friend class futures::detail::FutureBase;
   template <class>
@@ -413,6 +444,8 @@ class Promise {
   friend class Future;
   template <class, class>
   friend class futures::detail::CoreCallbackState;
+  friend void futures::detail::setTry<T>(
+      Promise<T>& p, Executor::KeepAlive<>&& ka, Try<T>&& t);
 
   // Whether the Future has been retrieved (a one-time operation).
   bool retrieved_;
@@ -424,12 +457,8 @@ class Promise {
   //
   // Implementation methods should usually use this instead of `this->core_`.
   // The latter should be used only when you need the possibly-null pointer.
-  Core& getCore() {
-    return getCoreImpl(core_);
-  }
-  Core const& getCore() const {
-    return getCoreImpl(core_);
-  }
+  Core& getCore() { return getCoreImpl(core_); }
+  Core const& getCore() const { return getCoreImpl(core_); }
 
   template <typename CoreT>
   static CoreT& getCoreImpl(CoreT* core) {
@@ -439,6 +468,10 @@ class Promise {
     return *core;
   }
 
+  /// Fulfill the Promise with the specified Try (value or exception) and
+  /// propagate the completing executor.
+  void setTry(Executor::KeepAlive<>&& ka, Try<T>&& t);
+
   // shared core state object
   // usually you should use `getCore()` instead of directly accessing `core_`.
   Core* core_;
@@ -447,6 +480,9 @@ class Promise {
 
   void throwIfFulfilled() const;
   void detach();
+
+  Promise(futures::detail::MakeRetrievedFromStolenCoreTag, Core& core) noexcept
+      : retrieved_{true}, core_{&core} {}
 };
 
 } // namespace folly

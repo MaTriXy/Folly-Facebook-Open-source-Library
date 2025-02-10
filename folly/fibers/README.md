@@ -15,13 +15,13 @@
 <span class="no">fiberManager</span><span class="o">.</span><span class="nf" data-symbol-name="addTask">addTask</span><span class="o">([&amp;]()</span> <span class="o">&#123;</span>
   <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task 1: start&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span>
   <span class="no">baton</span><span class="o">.</span><span class="nf" data-symbol-name="wait">wait</span><span class="o">();</span>
-  <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task 1: after baton.wait()&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span> 
+  <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task 1: after baton.wait()&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span>
 <span class="o">&#125;);</span>
 
 <span class="no">fiberManager</span><span class="o">.</span><span class="nf" data-symbol-name="addTask">addTask</span><span class="o">([&amp;]()</span> <span class="o">&#123;</span>
   <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task 2: start&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span>
   <span class="no">baton</span><span class="o">.</span><span class="nf" data-symbol-name="post">post</span><span class="o">();</span>
-  <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task 2: after baton.post()&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span> 
+  <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task 2: after baton.post()&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span>
 <span class="o">&#125;);</span>
 
 <span class="no">evb</span><span class="o">.</span><span class="nf" data-symbol-name="loop">loop</span><span class="o">();</span>
@@ -57,7 +57,7 @@
 
 <h2 id="why-would-i-not-want-to">Why would I not want to use fibers ? <a href="#why-would-i-not-want-to" class="headerLink">#</a></h2>
 
-<p>The only real downside to using fibers is the need to keep a pre-allocated stack for every fiber being run. That either makes you application use a lot of memory (if you have many concurrent tasks and each of them uses large stacks) or creates a risk of stack overflow bugs (if you try to reduce the stack size).</p>
+<p>The only real downside to using fibers is the need to keep a pre-allocated stack for every fiber being run. That either makes your application use a lot of memory (if you have many concurrent tasks and each of them uses large stacks) or creates a risk of stack overflow bugs (if you try to reduce the stack size).</p>
 
 <p>We believe these problems can be addressed (and we provide some tooling for that), as fibers library is used in many critical applications at Facebook (mcrouter, TAO, Service Router). However, it&#039;s important to be aware of the risks and be ready to deal with stack issues if you decide to use fibers library in your application.</p>
 
@@ -76,7 +76,7 @@
 <span class="no">fiberManager</span><span class="o">.</span><span class="nf" data-symbol-name="addTask">addTask</span><span class="o">([&amp;]()</span> <span class="o">&#123;</span>
   <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task: start&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span>
   <span class="no">baton</span><span class="o">.</span><span class="nf" data-symbol-name="wait">wait</span><span class="o">();</span>
-  <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task: after baton.wait()&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span> 
+  <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="cout">cout</span> <span class="o">&lt;&lt;</span> <span class="s2">&quot;Task: after baton.wait()&quot;</span> <span class="o">&lt;&lt;</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="na" data-symbol-context="std" data-symbol-name="endl">endl</span><span class="o">;</span>
 <span class="o">&#125;);</span>
 
 <span class="no">evb</span><span class="o">.</span><span class="nf" data-symbol-name="loop">loop</span><span class="o">();</span>
@@ -116,7 +116,7 @@
   <span class="o">...</span>
   <span class="no">Response</span> <span class="no">response</span><span class="o">;</span>
   <span class="nc" data-symbol-name="fibers">fibers</span><span class="o">::</span><span class="na" data-symbol-context="fibers" data-symbol-name="Baton">Baton</span> <span class="no">baton</span><span class="o">;</span>
-  
+
   <span class="nf" data-symbol-name="asyncCall">asyncCall</span><span class="o">(</span><span class="no">request</span><span class="o">,</span> <span class="o">[&amp;](</span><span class="no">Response</span> <span class="no">r</span><span class="o">)</span> <span class="no">mutable</span> <span class="o">&#123;</span>
      <span class="no">response</span> <span class="o">=</span> <span class="nc" data-symbol-name="std">std</span><span class="o">::</span><span class="nf" data-symbol-context="std" data-symbol-name="move">move</span><span class="o">(</span><span class="no">r</span><span class="o">);</span>
      <span class="no">baton</span><span class="o">.</span><span class="nf" data-symbol-name="post">post</span><span class="o">();</span>
@@ -190,7 +190,7 @@
 <div class="remarkup-code-block" data-code-lang="php"><pre class="remarkup-code"><span class="no">fiberManager</span><span class="o">.</span><span class="nf" data-symbol-name="addTask">addTask</span><span class="o">([]()</span> <span class="o">&#123;</span>
   <span class="o">...</span>
   <span class="no">auto</span> <span class="no">response</span> <span class="o">=</span> <span class="nf" data-symbol-name="asyncCallFuture">asyncCallFuture</span><span class="o">(</span><span class="no">request</span><span class="o">).</span><span class="nf" data-symbol-name="get">get</span><span class="o">();</span>
-  
+
   <span class="c">// Now response holds response returned by the async call</span>
   <span class="o">...</span>
 <span class="o">&#125;</span></pre></div>
@@ -229,7 +229,7 @@
 
 <div class="remarkup-code-block" data-code-lang="php"><pre class="remarkup-code"><span class="o">...</span>
 <span class="no">Context</span> <span class="no">context</span><span class="o">;</span>
- 
+
 <span class="nf" data-symbol-name="asyncCall">asyncCall</span><span class="o">(</span><span class="no">request</span><span class="o">,</span> <span class="o">[</span><span class="no">request</span><span class="o">,</span> <span class="no">context</span><span class="o">](</span><span class="no">Response</span> <span class="no">response</span><span class="o">)</span> <span class="no">mutable</span> <span class="o">&#123;</span>
   <span class="nf" data-symbol-name="doSomething">doSomething</span><span class="o">(</span><span class="no">request</span><span class="o">,</span> <span class="no">response</span><span class="o">,</span> <span class="no">context</span><span class="o">);</span>
 <span class="o">&#125;);</span>
@@ -242,7 +242,7 @@
   <span class="no">Context</span> <span class="no">context</span><span class="o">;</span>
 
   <span class="no">auto</span> <span class="no">response</span> <span class="o">=</span> <span class="nf" data-symbol-name="fiberCall">fiberCall</span><span class="o">(</span><span class="no">request</span><span class="o">);</span>
- 
+
   <span class="nf" data-symbol-name="doSomething">doSomething</span><span class="o">(</span><span class="no">request</span><span class="o">,</span> <span class="no">response</span><span class="o">,</span> <span class="no">context</span><span class="o">);</span>
   <span class="o">...</span>
 <span class="o">&#125;);</span></pre></div>
@@ -255,7 +255,7 @@
 
 <p>Similarly to system threads, every fiber-task has some stack space assigned to it. Stack usage goes up with the number of nested function calls and objects allocated on the stack. folly::fibers implementation only supports fiber-tasks with fixed stack size. If you want to have many fiber-tasks running concurrently - you need to reduce the amount of stack assigned to each fiber-task, otherwise you may run out of memory.</p>
 
-<div class="remarkup-important"><span class="remarkup-note-word">IMPORTANT:</span> If a fiber-task runs out of stack space (e.g. calls a function which does a lot of stack allocations) you program will fail.</div>
+<div class="remarkup-important"><span class="remarkup-note-word">IMPORTANT:</span> If a fiber-task runs out of stack space (e.g. calls a function which does a lot of stack allocations) your program will fail.</div>
 
 <p>However if you know that some function never suspends a fiber-task, you can use <tt>fibers::runInMainContext</tt> to safely call it from a fiber-task, without any risk of running out of stack space of the fiber-task.</p>
 
@@ -308,7 +308,7 @@
 
 <p>First fiber-task will grab a lock and then suspend waiting on a <tt>fibers::Baton</tt>. Then second fiber-task will be run and it will try to grab a lock. Unlike system threads, fiber-task can be only suspended explicitly, so the whole system thread will be blocked waiting on the lock, and we end up with a dead-lock.</p>
 
-<p>There&#039;re generally two ways we can solve this problem. Ideally we would re-design the program to never not hold any locks when fiber-task is suspended. However if we are absolutely sure we need that lock - folly::fibers library provides some fiber-task-aware lock implementations (e.g. 
+<p>There&#039;re generally two ways we can solve this problem. Ideally we would re-design the program to never not hold any locks when fiber-task is suspended. However if we are absolutely sure we need that lock - folly::fibers library provides some fiber-task-aware lock implementations (e.g.
 <a href="https://github.com/facebook/folly/blob/master/folly/fibers/TimedMutex.h" target="_blank">TimedMutex</a>).</p></section><section class="dex_document"><h1>APIs</h1><p class="dex_introduction"></p><h2 id="fibers-baton">fibers::Baton <a href="#fibers-baton" class="headerLink">#</a></h2>
 
 <p>All of the features of folly::fibers library are actually built on top a single synchronization primitive called Baton. <tt>fibers::Baton</tt> is a fiber-specific version of <tt>folly::Baton</tt>. It only  supports two basic operations: <tt>wait()</tt> and <tt>post()</tt>. Whenever <tt>wait()</tt> is called on the Baton, the current thread or fiber-task is suspended, until <tt>post()</tt> is called on the same Baton. <tt>wait()</tt> does not suspend the thread or fiber-task if <tt>post()</tt> was already called on the Baton. Please refer to <a href="https://github.com/facebook/folly/blob/master/folly/fibers/Baton.h" target="_blank">Baton</a> for more detailed documentation.</p>
@@ -352,7 +352,7 @@
   <span class="o">...</span>
 <span class="o">&#125;);</span></pre></div>
 
-<p>It is important to remember that <tt>addTask()</tt> is not thread-safe. I.e. it can only be safely called from the the thread, which is running the <tt>folly::FiberManager</tt> loop.</p>
+<p>It is important to remember that <tt>addTask()</tt> is not thread-safe. I.e. it can only be safely called from the thread, which is running the <tt>folly::FiberManager</tt> loop.</p>
 
 <p>If you need to create a fiber-task from a different thread, you have to use <tt>addTaskRemote()</tt>:</p>
 
@@ -410,7 +410,7 @@
   <span class="o">&#125;);</span>
   <span class="no">auto</span> <span class="no">future2</span> <span class="o">=</span> <span class="no">fiberManager</span><span class="o">.</span><span class="nf" data-symbol-name="addTaskRemoteFuture">addTaskRemoteFuture</span><span class="o">([]()</span> <span class="o">&#123;</span>
     <span class="o">...</span>
-  <span class="o">&#125;);</span> 
+  <span class="o">&#125;);</span>
 
   <span class="no">auto</span> <span class="no">result1</span> <span class="o">=</span> <span class="no">future1</span><span class="o">.</span><span class="nf" data-symbol-name="get">get</span><span class="o">();</span>
   <span class="no">auto</span> <span class="no">result2</span> <span class="o">=</span> <span class="no">future2</span><span class="o">.</span><span class="nf" data-symbol-name="get">get</span><span class="o">();</span>
@@ -449,9 +449,9 @@
 
 <h3 id="stack-overflow-detection">Stack overflow detection <a href="#stack-overflow-detection" class="headerLink">#</a></h3>
 
-<p>By default every fiber-task stack is allocated with a special guard page next to it (this can be controlled via <tt>useGuardPages</tt> option of <tt>FiberManager</tt>). If a stack overflow happens - this guard page will be accessed, which will result in immediate segmentation fault.</p>
+<p>By default every fiber-task stack is allocated with a special guard page next to it (this can be controlled via <tt>guardPagesPerStack</tt> option of <tt>FiberManager</tt>). If a stack overflow happens - this guard page will be accessed, which will result in immediate segmentation fault.</p>
 
-<div class="remarkup-important"><span class="remarkup-note-word">IMPORTANT:</span> disabling guard page protection may result in unnoticed stack overflows. Those will inevitably cause memory corruptions, which are usually very hard to debug.</div></section><section class="dex_document"><h1>Event Loops</h1><p class="dex_introduction"></p><p>folly::fibers library doesn&#039;t implement it&#039;s own event system. Instead it allows <tt>fibers::FiberManager</tt> to work with any other event system by implementing <tt>fibers::LoopController</tt> interface.</p>
+<div class="remarkup-important"><span class="remarkup-note-word">IMPORTANT:</span> disabling guard page protection may result in unnoticed stack overflows. Those will inevitably cause memory corruptions, which are usually very hard to debug.</div></section><section class="dex_document"><h1>Event Loops</h1><p class="dex_introduction"></p><p>folly::fibers library doesn&#039;t implement its own event system. Instead it allows <tt>fibers::FiberManager</tt> to work with any other event system by implementing <tt>fibers::LoopController</tt> interface.</p>
 
 <h2 id="folly-eventbase-integrat">folly::EventBase integration <a href="#folly-eventbase-integrat" class="headerLink">#</a></h2>
 

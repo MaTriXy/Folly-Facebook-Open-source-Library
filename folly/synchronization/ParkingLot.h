@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <atomic>
@@ -21,7 +22,6 @@
 
 #include <folly/Hash.h>
 #include <folly/Indestructible.h>
-#include <folly/Optional.h>
 #include <folly/Portability.h>
 #include <folly/Unit.h>
 #include <folly/lang/SafeAssert.h>
@@ -64,9 +64,7 @@ struct WaitNodeBase {
     cond_.notify_one();
   }
 
-  bool signaled() {
-    return signaled_;
-  }
+  bool signaled() { return signaled_; }
 };
 
 extern std::atomic<uint64_t> idallocator;
@@ -168,7 +166,7 @@ class ParkingLot {
 
     template <typename D>
     WaitNode(uint64_t key, uint64_t lotid, D&& data)
-        : WaitNodeBase(key, lotid), data_(std::forward<Data>(data)) {}
+        : WaitNodeBase(key, lotid), data_(std::forward<D>(data)) {}
   };
 
  public:
@@ -302,6 +300,7 @@ void ParkingLot<Data>::unpark(const Key bits, Func&& func) {
   // B: Must be seq_cst.  Matches A.  If true, A *must* see in seq_cst
   // order any atomic updates in toPark() (and matching updates that
   // happen before unpark is called)
+  std::atomic_thread_fence(std::memory_order_seq_cst);
   if (bucket.count_.load(std::memory_order_seq_cst) == 0) {
     return;
   }

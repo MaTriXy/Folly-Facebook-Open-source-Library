@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,14 +24,12 @@
 #include <folly/init/Init.h>
 
 using namespace folly;
-using namespace folly::detail;
 
 // Benchmarks:
 // 1. Benchmark iterating through the man with FOR_EACH, and also assign
 //    iter->first and iter->second to local vars inside the FOR_EACH loop.
 // 2. Benchmark iterating through the man with FOR_EACH, but use iter->first and
 //    iter->second as is, without assigning to local variables.
-// 3. Use FOR_EACH_KV loop to iterate through the map.
 
 // For use in benchmarks below.
 std::map<int, std::string> bmMap;
@@ -55,8 +53,9 @@ void setupBenchmark(size_t iters) {
 
 void setupCharVecBenchmark(size_t iters) {
   vec_char.resize(iters);
-  std::generate(
-      vec_char.begin(), vec_char.end(), [] { return Random::rand32(128); });
+  std::generate(vec_char.begin(), vec_char.end(), [] {
+    return Random::rand32(128);
+  });
 }
 
 BENCHMARK(ForEachFunctionNoAssign, iters) {
@@ -277,12 +276,14 @@ BENCHMARK(ForLoopFetch, iters) {
 }
 
 BENCHMARK(ForEachKVNoMacroAssign, iters) {
-  int sumKeys = 0;
+  [[maybe_unused]] int sumKeys = 0;
   std::string sumValues;
 
-  BENCHMARK_SUSPEND { setupBenchmark(iters); }
+  BENCHMARK_SUSPEND {
+    setupBenchmark(iters);
+  }
 
-  FOR_EACH(iter, bmMap) {
+  FOR_EACH (iter, bmMap) {
     const int k = iter->first;
     const std::string v = iter->second;
     sumKeys += k;
@@ -291,26 +292,16 @@ BENCHMARK(ForEachKVNoMacroAssign, iters) {
 }
 
 BENCHMARK(ForEachKVNoMacroNoAssign, iters) {
-  int sumKeys = 0;
+  [[maybe_unused]] int sumKeys = 0;
   std::string sumValues;
 
-  BENCHMARK_SUSPEND { setupBenchmark(iters); }
+  BENCHMARK_SUSPEND {
+    setupBenchmark(iters);
+  }
 
-  FOR_EACH(iter, bmMap) {
+  FOR_EACH (iter, bmMap) {
     sumKeys += iter->first;
     sumValues += iter->second;
-  }
-}
-
-BENCHMARK(ForEachKVMacro, iters) {
-  int sumKeys = 0;
-  std::string sumValues;
-
-  BENCHMARK_SUSPEND { setupBenchmark(iters); }
-
-  FOR_EACH_KV(k, v, bmMap) {
-    sumKeys += k;
-    sumValues += v;
   }
 }
 
@@ -324,7 +315,9 @@ BENCHMARK(ForEachManual, iters) {
 
 BENCHMARK(ForEachRange, iters) {
   int sum = 1;
-  FOR_EACH_RANGE(i, 1, iters) { sum *= i; }
+  FOR_EACH_RANGE (i, 1, iters) {
+    sum *= i;
+  }
   doNotOptimizeAway(sum);
 }
 
@@ -333,12 +326,6 @@ BENCHMARK(ForEachDescendingManual, iters) {
   for (size_t i = iters; i-- > 1;) {
     sum *= i;
   }
-  doNotOptimizeAway(sum);
-}
-
-BENCHMARK(ForEachRangeR, iters) {
-  int sum = 1;
-  FOR_EACH_RANGE_R(i, 1U, iters) { sum *= i; }
   doNotOptimizeAway(sum);
 }
 
@@ -396,7 +383,7 @@ BENCHMARK(CharVecForRangeEnumerate, iters) {
 }
 
 int main(int argc, char** argv) {
-  folly::init(&argc, &argv);
+  folly::Init init(&argc, &argv);
   runBenchmarks();
   return 0;
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2018-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -85,4 +85,21 @@ TEST_F(OrderingTest, compare_greater_equal) {
   EXPECT_TRUE(op(3, 4));
   EXPECT_TRUE(op(3, 3));
   EXPECT_FALSE(op(4, 3));
+}
+
+TEST_F(OrderingTest, partial_ordering) {
+  EXPECT_EQ(partial_ordering::less, ordering::lt);
+  EXPECT_EQ(partial_ordering::greater, ordering::gt);
+  EXPECT_EQ(partial_ordering::equivalent, ordering::eq);
+
+  EXPECT_NE(partial_ordering::unordered, ordering::lt);
+  EXPECT_NE(partial_ordering::unordered, ordering::gt);
+  EXPECT_NE(partial_ordering::unordered, ordering::eq);
+
+  EXPECT_EQ(ordering::lt, static_cast<ordering>(partial_ordering::less));
+  EXPECT_EQ(ordering::gt, static_cast<ordering>(partial_ordering::greater));
+  EXPECT_EQ(ordering::eq, static_cast<ordering>(partial_ordering::equivalent));
+  EXPECT_THROW(
+      void(static_cast<ordering>(partial_ordering::unordered)),
+      std::out_of_range);
 }

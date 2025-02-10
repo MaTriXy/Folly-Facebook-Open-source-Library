@@ -50,7 +50,7 @@ If desired, you can specify both function argument style and `ostream` style
 streaming log arguments together:
 
 ```
-XLOG(INFO, "the number is ") <<  2 + 2);
+XLOG(INFO, "the number is ") <<  2 + 2;
 ```
 
 The `FB_LOG()` macro accepts requires a `Logger` object as its first argument,
@@ -67,18 +67,8 @@ mechanism.
 XLOGF(DBG1, "cannot engage {} thruster: {}", thruster.name(), err.what());
 ```
 
-This uses [`folly::format()`](https://github.com/facebook/folly/blob/master/folly/docs/Format.md)
-to perform the formatting internally.
-
-## `printf`-style string formatting
-
-To help existing projects convert from older logging APIs, `XLOGC()` and
-`FB_LOGC()` macros exist to support C-style `printf()` format strings.
-You must include `folly/logging/printf.h` to access these macros.
-
-```
-XLOGC(DBG1, "failed to engage thruster %d: %s", thruster.number(), err.what());
-```
+This uses [`fmt::format()`](https://fmt.dev/latest/api.html) to perform the
+formatting internally.
 
 # Log Category Selection
 
@@ -108,8 +98,8 @@ object.  The configuration string syntax is documented in
 [Config.md](Config.md).
 
 You can then apply a `LogConfig` object to the main `LoggerDB` singleton by
-using `LoggerDB::get()->updateConfig()` to incrementally update the current
-configuration, or by using `LoggerDB::get()->resetConfig()` to replace all
+using `LoggerDB::get().updateConfig()` to incrementally update the current
+configuration, or by using `LoggerDB::get().resetConfig()` to replace all
 existing settings with the new configuration.
 
 The `folly::initLogging()` function provides a convenient API for initially

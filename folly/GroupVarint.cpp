@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,17 +18,25 @@
 
 #include <folly/container/Array.h>
 
-#if HAVE_GROUP_VARINT
+#if FOLLY_HAVE_GROUP_VARINT
 namespace folly {
 
 const uint32_t GroupVarint32::kMask[] = {
-  0xff, 0xffff, 0xffffff, 0xffffffff
+    0xff,
+    0xffff,
+    0xffffff,
+    0xffffffff,
 };
 
 const uint64_t GroupVarint64::kMask[] = {
-  0xff, 0xffff, 0xffffff, 0xffffffff,
-  0xffffffffffULL, 0xffffffffffffULL, 0xffffffffffffffULL,
-  0xffffffffffffffffULL
+    0xff,
+    0xffff,
+    0xffffff,
+    0xffffffff,
+    0xffffffffffULL,
+    0xffffffffffffULL,
+    0xffffffffffffffULL,
+    0xffffffffffffffffULL,
 };
 
 namespace detail {
@@ -97,8 +105,8 @@ struct group_varint_table_length_make_item : group_varint_table_base_make_item {
 
 struct group_varint_table_sse_mask_make_item
     : group_varint_table_base_make_item {
-  constexpr auto partial_item(std::size_t d, std::size_t offset, std::size_t k)
-      const {
+  constexpr auto partial_item(
+      std::size_t d, std::size_t offset, std::size_t k) const {
     // if k < d, the j'th integer uses d bytes, consume them
     // set remaining bytes in result to 0
     // 0xff: set corresponding byte in result to 0
@@ -130,7 +138,7 @@ struct group_varint_table_sse_mask_make_item
   }
 };
 
-#if FOLLY_SSE >= 3
+#if FOLLY_SSE >= 4
 alignas(16) FOLLY_STORAGE_CONSTEXPR
     decltype(groupVarintSSEMasks) groupVarintSSEMasks =
         make_array_with<256>(group_varint_table_sse_mask_make_item{});

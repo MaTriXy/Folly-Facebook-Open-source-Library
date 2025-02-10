@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,8 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <cstdlib>
 
+#include <fmt/format.h>
+
+#include <folly/Format.h>
 #include <folly/init/Init.h>
 #include <folly/logging/GlogStyleFormatter.h>
 #include <folly/logging/LogMessage.h>
@@ -22,7 +26,11 @@
 #include <folly/logging/LoggerDB.h>
 #include <folly/portability/GTest.h>
 #include <folly/portability/Stdlib.h>
+#include <folly/system/ThreadName.h>
 
+FOLLY_GNU_DISABLE_WARNING("-Wdeprecated-declarations")
+
+using namespace fmt::literals;
 using namespace folly;
 
 namespace {
@@ -41,17 +49,25 @@ std::string formatMsg(
     StringPiece msg,
     StringPiece filename,
     unsigned int lineNumber,
+    StringPiece functionName,
     // Default timestamp: 2017-04-17 13:45:56.123456 UTC
-    uint64_t timestampNS = 1492436756123456789ULL) {
+    uint64_t timestampNS = 1492436756123456789ULL,
+    bool logThreadName = false) {
   LoggerDB db{LoggerDB::TESTING};
   auto* category = db.getCategory("test");
-  GlogStyleFormatter formatter;
+  GlogStyleFormatter formatter(logThreadName);
 
   std::chrono::system_clock::time_point logTimePoint{
       std::chrono::duration_cast<std::chrono::system_clock::duration>(
           std::chrono::nanoseconds{timestampNS})};
   LogMessage logMessage{
-      category, level, logTimePoint, filename, lineNumber, msg.str()};
+      category,
+      level,
+      logTimePoint,
+      filename,
+      lineNumber,
+      functionName,
+      msg.str()};
 
   return formatter.formatMessage(logMessage, category);
 }
@@ -64,8 +80,60 @@ TEST(GlogFormatter, log) {
   auto expected = folly::sformat(
       "W0417 13:45:56.123456 {:5d} myfile.cpp:1234] hello world\n", tid);
   EXPECT_EQ(
-      expected, formatMsg(LogLevel::WARN, "hello world", "myfile.cpp", 1234));
+      expected,
+      formatMsg(
+          LogLevel::WARN, "hello world", "myfile.cpp", 1234, "testFunction"));
 }
+
+TEST(GlogFormatter, logThreadName) {
+  auto tid = getOSThreadID();
+  auto threadName = getCurrentThreadName().value_or("Unknown");
+
+  // Test a very simple single-line log message
+  auto expected = folly::sformat(
+      "W0417 13:45:56.123456 {:5d} [{}] myfile.cpp:1234] hello world\n",
+      tid,
+      threadName);
+  EXPECT_EQ(
+      expected,
+      formatMsg(
+          LogLevel::WARN,
+          "hello world",
+          "myfile.cpp",
+          1234,
+          "testFunction",
+          1492436756123456789ULL /* timestampNS */,
+          true /* logThreadName */));
+}
+
+#ifndef _WIN32
+TEST(GlogFormatter, logThreadNameChanged) {
+  if (folly::canSetCurrentThreadName()) {
+    std::string msg;
+    std::string threadName = "foo";
+    uint64_t otherThreadID;
+    std::thread thread([&] {
+      folly::setThreadName(threadName);
+      otherThreadID = getOSThreadID();
+      msg = formatMsg(
+          LogLevel::WARN,
+          "hello world",
+          "myfile.cpp",
+          1234,
+          "testFunction",
+          1492436756123456789ULL /* timestampNS */,
+          true /* logThreadName */);
+    });
+    thread.join();
+    // Test a very simple single-line log message
+    auto expected = folly::sformat(
+        "W0417 13:45:56.123456 {:5d} [{}] myfile.cpp:1234] hello world\n",
+        otherThreadID,
+        threadName);
+    EXPECT_EQ(expected, msg);
+  }
+}
+#endif
 
 TEST(GlogFormatter, filename) {
   auto tid = getOSThreadID();
@@ -79,7 +147,8 @@ TEST(GlogFormatter, filename) {
           LogLevel::WARN,
           "hello world",
           "src/test/logging/code/myfile.cpp",
-          1234));
+          1234,
+          "testFunction"));
 
   // Log a message with a very long file name.
   expected = folly::sformat(
@@ -94,25 +163,25 @@ TEST(GlogFormatter, filename) {
           "oh noes",
           "this_is_a_really_long_file_name_that_will_probably_exceed_"
           "our_buffer_allocation_guess.cpp",
-          123456789));
+          123456789,
+          "testFunction"));
 }
 
 TEST(GlogFormatter, multiline) {
   auto tid = getOSThreadID();
-  std::map<std::string, std::string> formatMap{
-      {"tid", folly::to<std::string>(tid)}};
 
   // Log a multi-line message
-  auto expected = folly::svformat(
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777] Eeek, a mouse!\n"
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777]    .   .\n"
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777]   ( ).( )\n"
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777]    (o o) .-._.'\n"
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777]   (  -  )\n"
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777]    mm mm\n"
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777] \n"
-      "V0417 13:45:56.123456 {tid:>5s} rodent.cpp:777] =============\n",
-      formatMap);
+  auto expected = fmt::format(
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777] Eeek, a mouse!\n"
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777]    .   .\n"
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777]   ( ).( )\n"
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777]    (o o) .-._.'\n"
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777]   (  -  )\n"
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777]    mm mm\n"
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777] \n"
+      "V0417 13:45:56.123456 {tid:>5} rodent.cpp:777] =============\n",
+
+      "tid"_a = tid);
   EXPECT_EQ(
       expected,
       formatMsg(
@@ -126,20 +195,22 @@ TEST(GlogFormatter, multiline) {
           "\n"
           "=============",
           "src/rodent.cpp",
-          777));
+          777,
+          "testFunction"));
 }
 
 TEST(GlogFormatter, singleNewline) {
   auto tid = getOSThreadID();
-  std::map<std::string, std::string> formatMap{
-      {"tid", folly::to<std::string>(tid)}};
 
   // Logging a single newline is basically two empty strings.
-  auto expected = folly::svformat(
-      "V0417 13:45:56.123456 {tid:>5s} foo.txt:123] \n"
-      "V0417 13:45:56.123456 {tid:>5s} foo.txt:123] \n",
-      formatMap);
-  EXPECT_EQ(expected, formatMsg(LogLevel::DBG9, "\n", "foo.txt", 123));
+  auto expected = fmt::format(
+      "V0417 13:45:56.123456 {tid:>5} foo.txt:123] \n"
+      "V0417 13:45:56.123456 {tid:>5} foo.txt:123] \n",
+
+      "tid"_a = tid);
+  EXPECT_EQ(
+      expected,
+      formatMsg(LogLevel::DBG9, "\n", "foo.txt", 123, "testFunction"));
 }
 
 TEST(GlogFormatter, unprintableChars) {
@@ -151,22 +222,33 @@ TEST(GlogFormatter, unprintableChars) {
       tid);
   EXPECT_EQ(
       expected,
-      formatMsg(LogLevel::ERR, "foo\abar\x1btest", "escapes.cpp", 97));
+      formatMsg(
+          LogLevel::ERR,
+          "foo\abar\x1btest",
+          "escapes.cpp",
+          97,
+          "testFunction"));
   expected = folly::sformat(
       "I0417 13:45:56.123456 {:5d} escapes.cpp:98] foo\\\\bar\"test\n", tid);
   EXPECT_EQ(
-      expected, formatMsg(LogLevel::INFO, "foo\\bar\"test", "escapes.cpp", 98));
+      expected,
+      formatMsg(
+          LogLevel::INFO, "foo\\bar\"test", "escapes.cpp", 98, "testFunction"));
   expected = folly::sformat(
       "C0417 13:45:56.123456 {:5d} escapes.cpp:99] nul\\x00byte\n", tid);
   EXPECT_EQ(
       expected,
       formatMsg(
-          LogLevel::CRITICAL, std::string("nul\0byte", 8), "escapes.cpp", 99));
+          LogLevel::CRITICAL,
+          std::string("nul\0byte", 8),
+          "escapes.cpp",
+          99,
+          "testFunction"));
 }
 
 int main(int argc, char* argv[]) {
   testing::InitGoogleTest(&argc, argv);
-  folly::init(&argc, &argv);
+  folly::Init init(&argc, &argv);
 
   // Some of our tests check timestamps emitted by the formatter.
   // Set the timezone to a consistent value so that the tests are not

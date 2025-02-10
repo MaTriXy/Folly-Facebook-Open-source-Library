@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,7 +13,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/Logger.h>
+
+#include <fmt/format.h>
 #include <folly/logging/LogCategory.h>
 #include <folly/logging/LogHandler.h>
 #include <folly/logging/LogMessage.h>
@@ -99,7 +102,7 @@ TEST_F(LoggerTest, formatMessage) {
   EXPECT_EQ(logger_.getCategory(), messages[0].second);
 }
 
-TEST_F(LoggerTest, follyFormatError) {
+TEST_F(LoggerTest, formatError) {
   // If we pass in a bogus format string, logf() should not throw.
   // It should instead log a message, just complaining about the format error.
   FB_LOGF(
@@ -113,9 +116,9 @@ TEST_F(LoggerTest, follyFormatError) {
       messages[0].first.getMessage(),
       MatchesRegex(
           R"(error formatting log message: )"
-          R"(invalid format argument \{:6.3f\}: invalid specifier 'f'; )"
+          R"(.*invalid .* specifier; )"
           R"(format string: "param1: \{:06d\}, param2: \{:6.3f\}", )"
-          R"(arguments: \((.*: )?1234\), \((.*: )?hello world\!\))"));
+          R"(arguments: 1234, hello world!)"));
   EXPECT_EQ("LoggerTest.cpp", pathBasename(messages[0].first.getFileName()));
   EXPECT_EQ(LogLevel::WARN, messages[0].first.getLevel());
   EXPECT_FALSE(messages[0].first.containsNewlines());
@@ -140,38 +143,35 @@ TEST_F(LoggerTest, toString) {
 }
 
 class ToStringFailure {};
-class FormattableButNoToString {};
+class FormattableButNoToString {
+ public:
+  explicit FormattableButNoToString(uint32_t v) : value(v) {}
+  uint32_t value = 0;
+};
 
+namespace fmt {
+template <>
+struct formatter<ToStringFailure> : formatter<std::string> {
+  auto format(ToStringFailure, format_context& ctx) const { return ctx.out(); }
+};
+
+template <>
+struct formatter<FormattableButNoToString> : formatter<std::string> {
+  auto format(FormattableButNoToString, format_context& ctx) const {
+    throw std::runtime_error("test");
+    return ctx.out();
+  }
+};
+} // namespace fmt
+
+// clang-format off
 [[noreturn]] void toAppend(
     const ToStringFailure& /* arg */,
     std::string* /* result */) {
   throw std::runtime_error(
       "error converting ToStringFailure object to a string");
 }
-
-namespace folly {
-template <>
-class FormatValue<ToStringFailure> {
- public:
-  explicit FormatValue(ToStringFailure) {}
-
-  template <class FormatCallback>
-  void format(FormatArg& arg, FormatCallback& cb) const {
-    FormatValue<std::string>("ToStringFailure").format(arg, cb);
-  }
-};
-
-template <>
-class FormatValue<FormattableButNoToString> {
- public:
-  explicit FormatValue(FormattableButNoToString) {}
-
-  template <class FormatCallback>
-  void format(FormatArg&, FormatCallback&) const {
-    throw std::runtime_error("test");
-  }
-};
-} // namespace folly
+// clang-format on
 
 TEST_F(LoggerTest, toStringError) {
   // Use the folly::to<string> log API, with an object that will throw
@@ -185,10 +185,10 @@ TEST_F(LoggerTest, toStringError) {
 
   auto& messages = handler_->getMessages();
   ASSERT_EQ(1, messages.size());
-  EXPECT_EQ(
-      "error constructing log message: "
-      "error converting ToStringFailure object to a string",
-      messages[0].first.getMessage());
+  EXPECT_THAT(
+      messages[0].first.getMessage(),
+      MatchesRegex("error constructing log message: .*"
+                   "error converting ToStringFailure object to a string"));
   EXPECT_EQ("LoggerTest.cpp", pathBasename(messages[0].first.getFileName()));
   EXPECT_EQ(expectedLine, messages[0].first.getLineNumber());
   EXPECT_EQ(LogLevel::DBG1, messages[0].first.getLevel());
@@ -207,11 +207,10 @@ TEST_F(LoggerTest, formatFallbackError) {
   EXPECT_THAT(
       messages[0].first.getMessage(),
       MatchesRegex(
-          R"(error formatting log message: invalid format argument \{\}: )"
-          R"(argument index out of range, max=2; )"
+          R"(error formatting log message: .*format_error.*; )"
           R"(format string: "param1: \{\}, param2: \{\}, \{\}", )"
-          R"(arguments: \((.*: )?1234\), )"
-          R"(\((.*ToStringFailure.*: )?<error_converting_to_string>\))"));
+          R"(arguments: 1234, )"
+          R"(\[(.*ToStringFailure.*|object) of size (.*):.*\])"));
   EXPECT_EQ("LoggerTest.cpp", pathBasename(messages[0].first.getFileName()));
   EXPECT_EQ(LogLevel::WARN, messages[0].first.getLevel());
   EXPECT_FALSE(messages[0].first.containsNewlines());
@@ -221,18 +220,20 @@ TEST_F(LoggerTest, formatFallbackError) {
 
 TEST_F(LoggerTest, formatFallbackUnsupported) {
   // Check the behavior if logf() fails, and toAppend() also fails.
-  FormattableButNoToString obj;
+  FormattableButNoToString obj(0x1234cdef);
   FB_LOGF(logger_, WARN, "param1: {}, param2: {}", 1234, obj);
+
+  std::string objectHex = kIsLittleEndian ? "ef cd 34 12" : "12 34 cd ef";
+  auto expectedRegex =
+      R"(error formatting log message: .*test; )"
+      R"(format string: "param1: \{\}, param2: \{\}", )"
+      R"(arguments: 1234, )"
+      R"(\[(.*FormattableButNoToString.*|object) of size 4: )" +
+      objectHex + R"(\])";
 
   auto& messages = handler_->getMessages();
   ASSERT_EQ(1, messages.size());
-  EXPECT_THAT(
-      messages[0].first.getMessage(),
-      MatchesRegex(
-          R"(error formatting log message: test; )"
-          R"(format string: "param1: \{\}, param2: \{\}", )"
-          R"(arguments: \((.*: )?1234\), )"
-          R"(\((.*FormattableButNoToString.*: )?<no_string_conversion>\))"));
+  EXPECT_THAT(messages[0].first.getMessage(), MatchesRegex(expectedRegex));
   EXPECT_EQ("LoggerTest.cpp", pathBasename(messages[0].first.getFileName()));
   EXPECT_EQ(LogLevel::WARN, messages[0].first.getLevel());
   EXPECT_FALSE(messages[0].first.containsNewlines());
@@ -256,8 +257,7 @@ TEST_F(LoggerTest, streamingArgs) {
   messages.clear();
 
   // Test with both function-style and streaming arguments
-  FB_LOG(logger_, WARN, "foo=", foo) << " hello, "
-                                     << "world: " << 34;
+  FB_LOG(logger_, WARN, "foo=", foo) << " hello, " << "world: " << 34;
   ASSERT_EQ(1, messages.size());
   EXPECT_EQ("foo=bar hello, world: 34", messages[0].first.getMessage());
   EXPECT_EQ("LoggerTest.cpp", pathBasename(messages[0].first.getFileName()));
@@ -308,9 +308,9 @@ TEST_F(LoggerTest, logMacros) {
 
   auto& messages = handler_->getMessages();
 
-  // test.other's effective level should be ERR, so a warning
+  // test.other's effective level should be INFO, so a DBG0
   // message to it should be discarded
-  FB_LOG(other, WARN, "this should be discarded");
+  FB_LOG(other, DBG0, "this should be discarded");
   ASSERT_EQ(0, messages.size());
 
   // Disabled log messages should not evaluate their arguments
@@ -344,10 +344,8 @@ TEST_F(LoggerTest, logMacros) {
   ASSERT_EQ(1, messages.size());
   EXPECT_THAT(
       messages[0].first.getMessage(),
-      MatchesRegex(
-          R"(error formatting log message: invalid format argument \{\}: )"
-          R"(argument index out of range, max=1; )"
-          R"(format string: "whoops: \{\}, \{\}", arguments: \((.*: )?5\))"));
+      MatchesRegex(R"(error formatting log message: .*format_error.*; )"
+                   R"(format string: "whoops: \{\}, \{\}", arguments: 5)"));
   messages.clear();
 }
 
@@ -357,7 +355,15 @@ TEST_F(LoggerTest, logRawMacros) {
 
   auto& messages = handler_->getMessages();
 
-  FB_LOG_RAW(foobar, LogLevel::DBG1, "src/some/file.c", 1234, "hello", ' ', 1)
+  FB_LOG_RAW(
+      foobar,
+      LogLevel::DBG1,
+      "src/some/file.c",
+      1234,
+      "testFunction",
+      "hello",
+      ' ',
+      1)
       << " world";
   ASSERT_EQ(1, messages.size());
   EXPECT_EQ("hello 1 world", messages[0].first.getMessage());
@@ -367,7 +373,15 @@ TEST_F(LoggerTest, logRawMacros) {
   messages.clear();
 
   auto level = LogLevel::DBG1;
-  FB_LOGF_RAW(foobar, level, "test/mytest.c", 99, "{}: num={}", "test", 42)
+  FB_LOGF_RAW(
+      foobar,
+      level,
+      "test/mytest.c",
+      99,
+      "testFunction",
+      "{}: num={}",
+      "test",
+      42)
       << " plus extra stuff";
   ASSERT_EQ(1, messages.size());
   EXPECT_EQ("test: num=42 plus extra stuff", messages[0].first.getMessage());

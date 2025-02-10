@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,10 +27,14 @@
 #pragma once
 
 #include <chrono>
+#include <limits>
 #include <type_traits>
 
+#include <folly/ConstexprMath.h>
 #include <folly/Conv.h>
 #include <folly/Expected.h>
+#include <folly/Utility.h>
+#include <folly/portability/SysTime.h>
 #include <folly/portability/SysTypes.h>
 
 namespace folly {
@@ -72,10 +76,36 @@ struct is_chrono_conversion {
  */
 template <typename Src>
 Expected<time_t, ConversionCode> chronoRangeCheck(Src value) {
-  if (value > std::numeric_limits<time_t>::max()) {
-    return makeUnexpected(ConversionCode::POSITIVE_OVERFLOW);
+  static_assert(
+      std::is_integral_v<time_t> && std::is_signed_v<time_t>,
+      "This function is only implemented for time_t that are signed integrals. Please update it if you need to support a different time_t type.");
+  if constexpr (std::is_floating_point_v<Src>) {
+    // time_t max converted to a floating point does not have
+    // an exact representation.
+    // 18446742974197923840 <- Largest float before time_t max
+    // 18446744073709549568 <- Largest double before time_t max
+    // 18446744073709551615 <- time_t max (when time_t is int64_t)
+    // 18446744073709551616 <- next representable float or double.
+    // The floating point value that gets chosen depends on the floating point
+    // implementation. IEEE arthimetic rounds to nearest.
+    static_assert(
+        std::numeric_limits<Src>::round_style == std::round_to_nearest,
+        "This function is only implemented for IEEE round to nearest. Please update it if you need other round styles.");
+    if (value >= static_cast<Src>(std::numeric_limits<time_t>::max())) {
+      return makeUnexpected(ConversionCode::POSITIVE_OVERFLOW);
+    }
+  } else {
+    constexpr bool isIntegralWithLargerRange = sizeof(Src) > sizeof(time_t) ||
+        (sizeof(Src) == sizeof(time_t) && std::is_unsigned_v<Src>);
+    if constexpr (isIntegralWithLargerRange) {
+      if (value > static_cast<Src>(std::numeric_limits<time_t>::max())) {
+        return makeUnexpected(ConversionCode::POSITIVE_OVERFLOW);
+      }
+    }
   }
   if (std::is_signed<Src>::value) {
+    // int64_t lowest converted to a floating point has
+    // has an exact representation because it is a power of 2.
     if (value < std::numeric_limits<time_t>::lowest()) {
       return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
     }
@@ -133,11 +163,12 @@ static Expected<std::pair<time_t, long>, ConversionCode> durationToPosixTime(
   if (sec.hasError()) {
     return makeUnexpected(sec.error());
   }
-  auto secTimeT = sec.value();
+  auto secTimeT = static_cast<time_t>(sec.value());
 
   auto remainder = duration.count() - (secTimeT * Denominator);
-  auto subsec = (remainder * SubsecondRatio::den) / Denominator;
-  if (UNLIKELY(duration.count() < 0) && remainder != 0) {
+  long subsec =
+      static_cast<long>((remainder * SubsecondRatio::den) / Denominator);
+  if (FOLLY_UNLIKELY(duration.count() < 0) && remainder != 0) {
     if (secTimeT == std::numeric_limits<time_t>::lowest()) {
       return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
     }
@@ -249,9 +280,9 @@ Expected<std::pair<time_t, long>, ConversionCode> durationToPosixTime(
   if (duration.count() < minInput) {
     return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
   }
-  auto intermediate =
-      IntermediateType{static_cast<IntermediateRep>(duration.count()) *
-                       static_cast<IntermediateRep>(Period::num)};
+  auto intermediate = IntermediateType{
+      static_cast<IntermediateRep>(duration.count()) *
+      static_cast<IntermediateRep>(Period::num)};
 
   return durationToPosixTime<SubsecondRatio>(intermediate);
 }
@@ -280,16 +311,16 @@ struct CheckOverflowToDuration {
     static_assert(
         SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
-    if (LIKELY(seconds >= 0)) {
+    if (FOLLY_LIKELY(seconds >= 0)) {
       constexpr auto maxCount = std::numeric_limits<typename Tgt::rep>::max();
       constexpr auto maxSeconds = maxCount / Tgt::period::den;
 
       auto unsignedSeconds = to_unsigned(seconds);
-      if (LIKELY(unsignedSeconds < maxSeconds)) {
+      if (FOLLY_LIKELY(unsignedSeconds < maxSeconds)) {
         return ConversionCode::SUCCESS;
       }
 
-      if (UNLIKELY(unsignedSeconds == maxSeconds)) {
+      if (FOLLY_UNLIKELY(unsignedSeconds == maxSeconds)) {
         constexpr auto maxRemainder =
             maxCount - (maxSeconds * Tgt::period::den);
         constexpr auto maxSubseconds =
@@ -308,11 +339,11 @@ struct CheckOverflowToDuration {
       constexpr auto minCount =
           to_signed(std::numeric_limits<typename Tgt::rep>::lowest());
       constexpr auto minSeconds = (minCount / Tgt::period::den);
-      if (LIKELY(seconds >= minSeconds)) {
+      if (FOLLY_LIKELY(seconds >= minSeconds)) {
         return ConversionCode::SUCCESS;
       }
 
-      if (UNLIKELY(seconds == minSeconds - 1)) {
+      if (FOLLY_UNLIKELY(seconds == minSeconds - 1)) {
         constexpr auto maxRemainder =
             minCount - (minSeconds * Tgt::period::den) + Tgt::period::den;
         constexpr auto maxSubseconds =
@@ -337,8 +368,7 @@ struct CheckOverflowToDuration<true> {
       typename Seconds,
       typename Subseconds>
   static ConversionCode check(
-      Seconds /* seconds */,
-      Subseconds /* subseconds */) {
+      Seconds /* seconds */, Subseconds /* subseconds */) {
     static_assert(
         std::is_floating_point<typename Tgt::rep>::value, "incorrect usage");
     static_assert(
@@ -393,13 +423,14 @@ auto posixTimeToDuration(
   }
 
   if (std::is_floating_point<typename Tgt::rep>::value) {
-    return Tgt{typename Tgt::rep(seconds) +
-               (typename Tgt::rep(subseconds) / SubsecondRatio::den)};
+    return Tgt{
+        typename Tgt::rep(seconds) +
+        (typename Tgt::rep(subseconds) / SubsecondRatio::den)};
   }
 
   // If the value is negative, we have to round up a non-zero subseconds value
-  if (UNLIKELY(outputSeconds.value() < 0) && subseconds > 0) {
-    if (UNLIKELY(
+  if (FOLLY_UNLIKELY(outputSeconds.value() < 0) && subseconds > 0) {
+    if (FOLLY_UNLIKELY(
             outputSeconds.value() ==
             std::numeric_limits<typename Tgt::rep>::lowest())) {
       return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
@@ -438,7 +469,7 @@ auto posixTimeToDuration(
     return makeUnexpected(errorCode);
   }
 
-  if (LIKELY(seconds >= 0)) {
+  if (FOLLY_LIKELY(seconds >= 0)) {
     return std::chrono::duration_cast<Tgt>(
                std::chrono::duration<typename Tgt::rep>{seconds}) +
         std::chrono::duration_cast<Tgt>(
@@ -476,10 +507,10 @@ auto posixTimeToDuration(
   static_assert(
       SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
-  if (UNLIKELY(seconds < 0) && subseconds > 0) {
+  if (FOLLY_UNLIKELY(seconds < 0) && subseconds > 0) {
     // Increment seconds by one to handle truncation of negative numbers
     // properly.
-    if (UNLIKELY(seconds == std::numeric_limits<Seconds>::lowest())) {
+    if (FOLLY_UNLIKELY(seconds == std::numeric_limits<Seconds>::lowest())) {
       return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
     }
     seconds += 1;
@@ -554,13 +585,12 @@ template <
     typename Seconds,
     typename Subseconds>
 Expected<Tgt, ConversionCode> tryPosixTimeToDuration(
-    Seconds seconds,
-    Subseconds subseconds) {
+    Seconds seconds, Subseconds subseconds) {
   static_assert(
       SubsecondRatio::num == 1, "subsecond numerator should always be 1");
 
   // Normalize the input if required
-  if (UNLIKELY(subseconds < 0)) {
+  if (FOLLY_UNLIKELY(subseconds < 0)) {
     const auto overflowSeconds = (subseconds / SubsecondRatio::den);
     const auto remainder = (subseconds % SubsecondRatio::den);
     if (std::numeric_limits<Seconds>::lowest() + 1 - overflowSeconds >
@@ -568,15 +598,15 @@ Expected<Tgt, ConversionCode> tryPosixTimeToDuration(
       return makeUnexpected(ConversionCode::NEGATIVE_OVERFLOW);
     }
     seconds = seconds - 1 + overflowSeconds;
-    subseconds = remainder + SubsecondRatio::den;
-  } else if (UNLIKELY(subseconds >= SubsecondRatio::den)) {
+    subseconds = to_narrow(remainder + SubsecondRatio::den);
+  } else if (FOLLY_UNLIKELY(subseconds >= SubsecondRatio::den)) {
     const auto overflowSeconds = (subseconds / SubsecondRatio::den);
     const auto remainder = (subseconds % SubsecondRatio::den);
     if (std::numeric_limits<Seconds>::max() - overflowSeconds < seconds) {
       return makeUnexpected(ConversionCode::POSITIVE_OVERFLOW);
     }
     seconds += overflowSeconds;
-    subseconds = remainder;
+    subseconds = to_narrow(remainder);
   }
 
   return posixTimeToDuration<SubsecondRatio>(seconds, subseconds, Tgt{});

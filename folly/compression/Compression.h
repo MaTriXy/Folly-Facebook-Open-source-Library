@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,6 @@
 
 #include <folly/Optional.h>
 #include <folly/Range.h>
-#include <folly/compression/Counters.h>
 #include <folly/io/IOBuf.h>
 
 /**
@@ -32,7 +31,7 @@
  */
 
 namespace folly {
-namespace io {
+namespace compression {
 
 enum class CodecType {
   /**
@@ -63,6 +62,7 @@ enum class CodecType {
   /**
    * Use zlib compression.
    * Levels supported: 0 = no compression, 1 = fast, ..., 9 = best; default = 6
+   * Streaming compression is supported.
    */
   ZLIB = 4,
 
@@ -74,6 +74,7 @@ enum class CodecType {
   /**
    * Use LZMA2 compression.
    * Levels supported: 0 = no compression, 1 = fast, ..., 9 = best; default = 6
+   * Streaming compression is supported.
    */
   LZMA2 = 6,
   LZMA2_VARINT_SIZE = 7,
@@ -82,6 +83,7 @@ enum class CodecType {
    * Use ZSTD compression.
    * Levels supported: 1 = fast, ..., 19 = best; default = 3
    * Use ZSTD_FAST for the fastest zstd compression (negative levels).
+   * Streaming compression is supported.
    */
   ZSTD = 8,
 
@@ -89,6 +91,7 @@ enum class CodecType {
    * Use gzip compression.  This is the same compression algorithm as ZLIB but
    * gzip-compressed files tend to be easier to work with from the command line.
    * Levels supported: 0 = no compression, 1 = fast, ..., 9 = best; default = 6
+   * Streaming compression is supported.
    */
   GZIP = 9,
 
@@ -101,6 +104,9 @@ enum class CodecType {
   /**
    * Use bzip2 compression.
    * Levels supported: 1 = fast, 9 = best; default = 9
+   * Streaming compression is supported BUT FlushOp::FLUSH does NOT ensure that
+   * the decompressor can read all the data up to that point, due to a bug in
+   * the bzip2 library.
    */
   BZIP2 = 11,
 
@@ -114,6 +120,7 @@ enum class CodecType {
    * speed is around 25% faster than ZSTD.
    * This codec is fully compatible with ZSTD.
    * Levels supported: 1 = best, ..., 5 = fast; default = 1
+   * Streaming compression is supported.
    */
   ZSTD_FAST = 12,
 
@@ -122,7 +129,7 @@ enum class CodecType {
 
 class Codec {
  public:
-  virtual ~Codec() { }
+  virtual ~Codec() {}
 
   static constexpr uint64_t UNLIMITED_UNCOMPRESSED_LENGTH = uint64_t(-1);
   /**
@@ -200,12 +207,18 @@ class Codec {
       const folly::IOBuf* data,
       folly::Optional<uint64_t> uncompressedLength = folly::none) const;
 
+  /**
+   * Helper wrapper around getUncompressedLength(IOBuf)
+   */
+  folly::Optional<uint64_t> getUncompressedLength(
+      folly::StringPiece data,
+      folly::Optional<uint64_t> uncompressedLength = folly::none) const;
+
  protected:
   Codec(
       CodecType type,
       folly::Optional<int> level = folly::none,
-      folly::StringPiece name = {},
-      bool counters = true);
+      folly::StringPiece name = {});
 
  public:
   /**
@@ -226,6 +239,13 @@ class Codec {
       const folly::IOBuf* data,
       folly::Optional<uint64_t> uncompressedLength = folly::none) const;
 
+  /**
+   * Helper wrapper around canUncompress(IOBuf)
+   */
+  bool canUncompress(
+      folly::StringPiece data,
+      folly::Optional<uint64_t> uncompressedLength = folly::none) const;
+
  private:
   // default: no limits (save for special value UNKNOWN_UNCOMPRESSED_LENGTH)
   virtual uint64_t doMaxUncompressedLength() const;
@@ -241,8 +261,7 @@ class Codec {
   // these methods to avoid the copy.
   virtual std::string doCompressString(StringPiece data);
   virtual std::string doUncompressString(
-      StringPiece data,
-      folly::Optional<uint64_t> uncompressedLength);
+      StringPiece data, folly::Optional<uint64_t> uncompressedLength);
 
   virtual uint64_t doMaxCompressedLength(uint64_t uncompressedLength) const = 0;
   // default: returns the passed uncompressedLength.
@@ -251,14 +270,6 @@ class Codec {
       folly::Optional<uint64_t> uncompressedLength) const;
 
   CodecType type_;
-  folly::detail::CompressionCounter bytesBeforeCompression_;
-  folly::detail::CompressionCounter bytesAfterCompression_;
-  folly::detail::CompressionCounter bytesBeforeDecompression_;
-  folly::detail::CompressionCounter bytesAfterDecompression_;
-  folly::detail::CompressionCounter compressions_;
-  folly::detail::CompressionCounter decompressions_;
-  folly::detail::CompressionCounter compressionMilliseconds_;
-  folly::detail::CompressionCounter decompressionMilliseconds_;
 };
 
 class StreamCodec : public Codec {
@@ -382,9 +393,8 @@ class StreamCodec : public Codec {
   StreamCodec(
       CodecType type,
       folly::Optional<int> level = folly::none,
-      folly::StringPiece name = {},
-      bool counters = true)
-      : Codec(type, std::move(level), name, counters) {}
+      folly::StringPiece name = {})
+      : Codec(type, std::move(level), name) {}
 
   // Returns the uncompressed length last passed to resetStream() or none if it
   // hasn't been called yet.
@@ -448,8 +458,7 @@ constexpr int COMPRESSION_LEVEL_BEST = -3;
  * of compression level.
  */
 std::unique_ptr<Codec> getCodec(
-    CodecType type,
-    int level = COMPRESSION_LEVEL_DEFAULT);
+    CodecType type, int level = COMPRESSION_LEVEL_DEFAULT);
 
 /**
  * Return a codec for the given type. Throws on error.  The level
@@ -468,8 +477,7 @@ std::unique_ptr<Codec> getCodec(
  * of compression level.
  */
 std::unique_ptr<StreamCodec> getStreamCodec(
-    CodecType type,
-    int level = COMPRESSION_LEVEL_DEFAULT);
+    CodecType type, int level = COMPRESSION_LEVEL_DEFAULT);
 
 /**
  * Returns a codec that can uncompress any of the given codec types as well as
@@ -522,5 +530,17 @@ bool hasCodec(CodecType type);
  * Check if a specified codec is supported and supports streaming.
  */
 bool hasStreamCodec(CodecType type);
-} // namespace io
+
+/**
+ * Added here so users of folly can figure out whether the header
+ * folly/compression/CompressionContextPoolSingletons.h is present, and
+ * therefore whether it can be included.
+ */
+#define FOLLY_COMPRESSION_HAS_CONTEXT_POOL_SINGLETONS
+} // namespace compression
 } // namespace folly
+
+namespace folly::io {
+using folly::compression::Codec;
+using folly::compression::CodecType;
+} // namespace folly::io

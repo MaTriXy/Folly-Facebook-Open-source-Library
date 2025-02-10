@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/LogStreamProcessor.h>
 
 #include <folly/logging/LogStream.h>
@@ -25,12 +26,14 @@ LogStreamProcessor::LogStreamProcessor(
     LogLevel level,
     folly::StringPiece filename,
     unsigned int lineNumber,
+    folly::StringPiece functionName,
     AppendType) noexcept
     : LogStreamProcessor(
           category,
           level,
           filename,
           lineNumber,
+          functionName,
           INTERNAL,
           std::string()) {}
 
@@ -41,6 +44,7 @@ LogStreamProcessor::LogStreamProcessor(
     bool isCategoryNameOverridden,
     folly::StringPiece filename,
     unsigned int lineNumber,
+    folly::StringPiece functionName,
     AppendType) noexcept
     : LogStreamProcessor(
           categoryInfo,
@@ -49,6 +53,7 @@ LogStreamProcessor::LogStreamProcessor(
           isCategoryNameOverridden,
           filename,
           lineNumber,
+          functionName,
           INTERNAL,
           std::string()) {}
 
@@ -57,12 +62,14 @@ LogStreamProcessor::LogStreamProcessor(
     LogLevel level,
     folly::StringPiece filename,
     unsigned int lineNumber,
+    folly::StringPiece functionName,
     InternalType,
     std::string&& msg) noexcept
     : category_{category},
       level_{level},
       filename_{filename},
       lineNumber_{lineNumber},
+      functionName_{functionName},
       message_{std::move(msg)},
       stream_{this} {}
 
@@ -74,7 +81,7 @@ LogCategory* getXlogCategory(
   if (!categoryInfo->isInitialized()) {
     return categoryInfo->init(categoryName, isCategoryNameOverridden);
   }
-  return categoryInfo->getCategory(&xlog_detail::xlogFileScopeInfo);
+  return categoryInfo->getCategory(&detail::custom::xlogFileScopeInfo);
 }
 } // namespace
 
@@ -92,19 +99,18 @@ LogStreamProcessor::LogStreamProcessor(
     bool isCategoryNameOverridden,
     folly::StringPiece filename,
     unsigned int lineNumber,
+    folly::StringPiece functionName,
     InternalType,
     std::string&& msg) noexcept
     : category_{getXlogCategory(
-          categoryInfo,
-          categoryName,
-          isCategoryNameOverridden)},
+          categoryInfo, categoryName, isCategoryNameOverridden)},
       level_{level},
       filename_{filename},
       lineNumber_{lineNumber},
+      functionName_{functionName},
       message_{std::move(msg)},
       stream_{this} {}
 
-#ifdef __INCLUDE_LEVEL__
 namespace {
 LogCategory* getXlogCategory(XlogFileScopeInfo* fileScopeInfo) {
   // By the time a LogStreamProcessor is created, the XlogFileScopeInfo object
@@ -132,12 +138,14 @@ LogStreamProcessor::LogStreamProcessor(
     LogLevel level,
     folly::StringPiece filename,
     unsigned int lineNumber,
+    folly::StringPiece functionName,
     InternalType,
     std::string&& msg) noexcept
     : category_{getXlogCategory(fileScopeInfo)},
       level_{level},
       filename_{filename},
       lineNumber_{lineNumber},
+      functionName_{functionName},
       message_{std::move(msg)},
       stream_{this} {}
 
@@ -146,15 +154,16 @@ LogStreamProcessor::LogStreamProcessor(
     LogLevel level,
     folly::StringPiece filename,
     unsigned int lineNumber,
+    folly::StringPiece functionName,
     AppendType) noexcept
     : LogStreamProcessor(
           fileScopeInfo,
           level,
           filename,
           lineNumber,
+          functionName,
           INTERNAL,
           std::string()) {}
-#endif
 
 /*
  * We intentionally define the LogStreamProcessor destructor in
@@ -178,11 +187,13 @@ void LogStreamProcessor::logNow() noexcept {
   //
   // Any other error here is unexpected and we also want to fail hard
   // in that situation too.
-  category_->admitMessage(LogMessage{category_,
-                                     level_,
-                                     filename_,
-                                     lineNumber_,
-                                     extractMessageString(stream_)});
+  category_->admitMessage(LogMessage{
+      category_,
+      level_,
+      filename_,
+      lineNumber_,
+      functionName_,
+      extractMessageString(stream_)});
 }
 
 std::string LogStreamProcessor::extractMessageString(

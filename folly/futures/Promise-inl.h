@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <thread>
+#include <utility>
 
 #include <folly/executors/InlineExecutor.h>
 #include <folly/futures/detail/Core.h>
@@ -29,9 +30,13 @@ namespace detail {
 template <typename T>
 void coreDetachPromiseMaybeWithResult(Core<T>& core) {
   if (!core.hasResult()) {
-    core.setResult(Try<T>(exception_wrapper(BrokenPromise(typeid(T).name()))));
+    core.setResult(Try<T>(exception_wrapper(BrokenPromise(tag<T>))));
   }
   core.detachPromise();
+}
+template <typename T>
+void setTry(Promise<T>& p, Executor::KeepAlive<>&& ka, Try<T>&& t) {
+  p.setTry(std::move(ka), std::move(t));
 }
 } // namespace detail
 } // namespace futures
@@ -46,14 +51,14 @@ Promise<T>::Promise() : retrieved_(false), core_(Core::make()) {}
 
 template <class T>
 Promise<T>::Promise(Promise<T>&& other) noexcept
-    : retrieved_(exchange(other.retrieved_, false)),
-      core_(exchange(other.core_, nullptr)) {}
+    : retrieved_(std::exchange(other.retrieved_, false)),
+      core_(std::exchange(other.core_, nullptr)) {}
 
 template <class T>
 Promise<T>& Promise<T>::operator=(Promise<T>&& other) noexcept {
   detach();
-  retrieved_ = exchange(other.retrieved_, false);
-  core_ = exchange(other.core_, nullptr);
+  retrieved_ = std::exchange(other.retrieved_, false);
+  core_ = std::exchange(other.core_, nullptr);
   return *this;
 }
 
@@ -102,9 +107,11 @@ Future<T> Promise<T>::getFuture() {
 
 template <class T>
 template <class E>
-typename std::enable_if<std::is_base_of<std::exception, E>::value>::type
-Promise<T>::setException(E const& e) {
-  setException(make_exception_wrapper<E>(e));
+typename std::enable_if<
+    std::is_base_of<std::exception, typename std::decay<E>::type>::value>::type
+Promise<T>::setException(E&& e) {
+  setException(
+      make_exception_wrapper<typename std::decay<E>::type>(std::forward<E>(e)));
 }
 
 template <class T>
@@ -115,7 +122,7 @@ void Promise<T>::setException(exception_wrapper ew) {
 template <class T>
 template <typename F>
 void Promise<T>::setInterruptHandler(F&& fn) {
-  getCore().setInterruptHandler(std::forward<F>(fn));
+  getCore().setInterruptHandler(static_cast<F&&>(fn));
 }
 
 template <class T>
@@ -125,19 +132,24 @@ void Promise<T>::setTry(Try<T>&& t) {
 }
 
 template <class T>
+void Promise<T>::setTry(Executor::KeepAlive<>&& ka, Try<T>&& t) {
+  throwIfFulfilled();
+  core_->setResult(std::move(ka), std::move(t));
+}
+
+template <class T>
 template <class M>
 void Promise<T>::setValue(M&& v) {
-  static_assert(!std::is_same<T, void>::value,
-                "Use setValue() instead");
+  static_assert(!std::is_same<T, void>::value, "Use setValue() instead");
 
-  setTry(Try<T>(std::forward<M>(v)));
+  setTry(Try<T>(static_cast<M&&>(v)));
 }
 
 template <class T>
 template <class F>
 void Promise<T>::setWith(F&& func) {
   throwIfFulfilled();
-  setTry(makeTryWith(std::forward<F>(func)));
+  setTry(makeTryWith(static_cast<F&&>(func)));
 }
 
 template <class T>
@@ -147,5 +159,10 @@ bool Promise<T>::isFulfilled() const noexcept {
   }
   return true;
 }
+
+#if FOLLY_USE_EXTERN_FUTURE_UNIT
+// limited to the instances unconditionally forced by the futures library
+extern template class Promise<Unit>;
+#endif
 
 } // namespace folly

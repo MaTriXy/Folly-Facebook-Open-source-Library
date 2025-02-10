@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,9 +16,16 @@
 
 #pragma once
 
-#if defined(__ELF__) && (defined(__x86_64__) || defined(__i386__))
+#include <folly/CPortability.h>
 
-#include <folly/tracing/StaticTracepoint-ELFx86.h>
+#if FOLLY_HAVE_ELF &&                                                    \
+    (defined(__x86_64__) || defined(__i386__) || defined(__aarch64__) || \
+     defined(__arm__)) &&                                                \
+    (!defined(FOLLY_DISABLE_SDT) || !FOLLY_DISABLE_SDT)
+
+#define FOLLY_HAVE_SDT 1
+
+#include <folly/tracing/StaticTracepoint-ELF.h>
 
 #define FOLLY_SDT(provider, name, ...) \
   FOLLY_SDT_PROBE_N(                   \
@@ -33,13 +40,24 @@
 
 #else
 
-#define FOLLY_SDT(provider, name, ...) \
-  do {                                 \
+#define FOLLY_HAVE_SDT 0
+
+#define FOLLY_SDT(provider, name, ...)  \
+  do {                                  \
+    [](auto const&...) {}(__VA_ARGS__); \
   } while (0)
 #define FOLLY_SDT_WITH_SEMAPHORE(provider, name, ...) \
   do {                                                \
+    [](auto const&...) {}(__VA_ARGS__);               \
   } while (0)
 #define FOLLY_SDT_IS_ENABLED(provider, name) (false)
-#define FOLLY_SDT_DEFINE_SEMAPHORE(provider, name)
-#define FOLLY_SDT_DECLARE_SEMAPHORE(provider, name)
+#define FOLLY_SDT_SEMAPHORE(provider, name) \
+  folly_sdt_semaphore_##provider##_##name
+#define FOLLY_SDT_DEFINE_SEMAPHORE(provider, name)    \
+  extern "C" {                                        \
+  unsigned short FOLLY_SDT_SEMAPHORE(provider, name); \
+  }
+#define FOLLY_SDT_DECLARE_SEMAPHORE(provider, name) \
+  extern "C" unsigned short FOLLY_SDT_SEMAPHORE(provider, name)
+
 #endif

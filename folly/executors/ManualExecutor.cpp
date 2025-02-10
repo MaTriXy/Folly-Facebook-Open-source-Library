@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,11 +16,18 @@
 
 #include <folly/executors/ManualExecutor.h>
 
-#include <string.h>
+#include <cstring>
 #include <string>
 #include <tuple>
 
 namespace folly {
+
+ManualExecutor::~ManualExecutor() {
+  while (keepAliveCount_.load(std::memory_order_relaxed)) {
+    drive();
+  }
+  drain();
+}
 
 void ManualExecutor::add(Func callback) {
   std::lock_guard<std::mutex> lock(lock_);
@@ -64,9 +71,32 @@ size_t ManualExecutor::run() {
       funcs_.pop();
     }
     func();
+    func = nullptr;
   }
 
   return count;
+}
+
+size_t ManualExecutor::step() {
+  Func func;
+
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+
+    if (funcs_.empty()) {
+      return 0;
+    }
+
+    // Balance the semaphore so it doesn't grow without bound
+    // if nobody is calling wait().
+    // This may fail (with EAGAIN), that's fine.
+    sem_.tryWait();
+
+    func = std::move(funcs_.front());
+    funcs_.pop();
+  }
+  func();
+  return 1;
 }
 
 size_t ManualExecutor::drain() {

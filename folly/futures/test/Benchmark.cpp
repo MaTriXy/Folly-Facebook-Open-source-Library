@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,14 +15,16 @@
  */
 
 #include <folly/Benchmark.h>
+
+#include <vector>
+
 #include <folly/executors/InlineExecutor.h>
 #include <folly/futures/Future.h>
 #include <folly/futures/Promise.h>
+#include <folly/futures/test/TestExecutor.h>
 #include <folly/portability/GFlags.h>
-#include <folly/portability/Semaphore.h>
 #include <folly/synchronization/Baton.h>
-
-#include <vector>
+#include <folly/synchronization/NativeSemaphore.h>
 
 using namespace folly;
 
@@ -33,11 +35,29 @@ T incr(Try<T>&& t) {
   return t.value() + 1;
 }
 
+Future<int> thens(Future<int> f, size_t n, bool runInline = false) {
+  for (size_t i = 0; i < n; i++) {
+    if (runInline) {
+      f = std::move(f).thenInline(incr<int>);
+    } else {
+      f = std::move(f).then(incr<int>);
+    }
+  }
+  return f;
+}
+
 void someThens(size_t n) {
   auto f = makeFuture<int>(42);
-  for (size_t i = 0; i < n; i++) {
-    f = f.then(incr<int>);
-  }
+  f = thens(std::move(f), n);
+}
+
+void someThensOnThread(size_t n, bool runInline = false) {
+  auto executor = std::make_unique<TestExecutor>(1);
+  auto f = makeFuture<int>(42).via(executor.get());
+  f = thens(std::move(f), n / 2, runInline);
+  f = thens(std::move(f), 1, false);
+  f = thens(std::move(f), n / 2, runInline);
+  f.wait();
 }
 
 } // namespace
@@ -82,6 +102,28 @@ BENCHMARK_RELATIVE(hundredThens) {
   someThens(100);
 }
 
+BENCHMARK_DRAW_LINE();
+
+// look for >= 25% relative
+BENCHMARK_RELATIVE(fourThensOnThread) {
+  someThensOnThread(4);
+}
+
+// look for >= 25% relative
+BENCHMARK_RELATIVE(fourThensOnThreadInline) {
+  someThensOnThread(4, true);
+}
+
+// look for >= 1% relative
+BENCHMARK_RELATIVE(hundredThensOnThread) {
+  someThensOnThread(100);
+}
+
+// look for >= 1% relative
+BENCHMARK_RELATIVE(hundredThensOnThreadInline) {
+  someThensOnThread(100, true);
+}
+
 // Lock contention. Although in practice fulfills tend to be temporally
 // separate from then()s, still sometimes they will be concurrent. So the
 // higher this number is, the better.
@@ -98,15 +140,15 @@ BENCHMARK(no_contention) {
       futures.push_back(p.getFuture());
     }
 
-    consumer = std::thread([&]{
+    consumer = std::thread([&] {
       b1.post();
       for (auto& f : futures) {
-        f.then(incr<int>);
+        std::move(f).then(incr<int>);
       }
     });
     consumer.join();
 
-    producer = std::thread([&]{
+    producer = std::thread([&] {
       b2.post();
       for (auto& p : promises) {
         p.setValue(42);
@@ -125,8 +167,7 @@ BENCHMARK_RELATIVE(contention) {
   std::vector<Promise<int>> promises(10000);
   std::vector<Future<int>> futures;
   std::thread producer, consumer;
-  sem_t sem;
-  sem_init(&sem, 0, 0);
+  folly::NativeSemaphore sem;
 
   BENCHMARK_SUSPEND {
     folly::Baton<> b1, b2;
@@ -134,18 +175,18 @@ BENCHMARK_RELATIVE(contention) {
       futures.push_back(p.getFuture());
     }
 
-    consumer = std::thread([&]{
+    consumer = std::thread([&] {
       b1.post();
       for (auto& f : futures) {
-        sem_wait(&sem);
-        f.then(incr<int>);
+        sem.wait();
+        std::move(f).then(incr<int>);
       }
     });
 
-    producer = std::thread([&]{
+    producer = std::thread([&] {
       b2.post();
       for (auto& p : promises) {
-        sem_post(&sem);
+        sem.post();
         p.setValue(42);
       }
     });
@@ -175,11 +216,11 @@ BENCHMARK_DRAW_LINE();
 // The old way. Throw an exception, and rethrow to access it upstream.
 void throwAndCatchImpl() {
   makeFuture()
-      .then([](Try<Unit>&&){ throw std::runtime_error("oh no"); })
+      .then([](Try<Unit>&&) { throw std::runtime_error("oh no"); })
       .then([](Try<Unit>&& t) {
         try {
           t.value();
-        } catch(const std::runtime_error& e) {
+        } catch (const std::runtime_error&) {
           // ...
           return;
         }
@@ -208,13 +249,13 @@ void throwAndCatchWrappedImpl() {
 // Better. Wrap an exception, and rethrow to access it upstream.
 void throwWrappedAndCatchImpl() {
   makeFuture()
-      .then([](Try<Unit>&&){
+      .then([](Try<Unit>&&) {
         return makeFuture<Unit>(std::runtime_error("oh no"));
       })
       .then([](Try<Unit>&& t) {
         try {
           t.value();
-        } catch(const std::runtime_error& e) {
+        } catch (const std::runtime_error&) {
           // ...
           return;
         }
@@ -237,16 +278,21 @@ void throwWrappedAndCatchWrappedImpl() {
       });
 }
 
+// Apparently OSX doesn't implement barriers since it is an optional part of
+// POSIX realtime threads extension, therefore we test for its presence.
+// Details:
+// https://pubs.opengroup.org/onlinepubs/009695399/basedefs/xbd_chap02.html
+#if defined(_POSIX_BARRIERS) && (_POSIX_BARRIERS > 0)
 // Simulate heavy contention on func
-void contend(void(*func)()) {
+void contend(void (*func)()) {
   folly::BenchmarkSuspender s;
   const int N = 100;
   const int iters = 1000;
   pthread_barrier_t barrier;
-  pthread_barrier_init(&barrier, nullptr, N+1);
+  pthread_barrier_init(&barrier, nullptr, N + 1);
   std::vector<std::thread> threads;
   for (int i = 0; i < N; i++) {
-    threads.push_back(std::thread([&](){
+    threads.push_back(std::thread([&]() {
       pthread_barrier_wait(&barrier);
       for (int j = 0; j < iters; j++) {
         func();
@@ -261,6 +307,7 @@ void contend(void(*func)()) {
   s.rehire();
   pthread_barrier_destroy(&barrier);
 }
+#endif
 
 BENCHMARK(throwAndCatch) {
   throwAndCatchImpl();
@@ -280,6 +327,7 @@ BENCHMARK_RELATIVE(throwWrappedAndCatchWrapped) {
 
 BENCHMARK_DRAW_LINE();
 
+#if defined(_POSIX_BARRIERS) && (_POSIX_BARRIERS > 0)
 BENCHMARK(throwAndCatchContended) {
   contend(throwAndCatchImpl);
 }
@@ -295,22 +343,21 @@ BENCHMARK_RELATIVE(throwWrappedAndCatchContended) {
 BENCHMARK_RELATIVE(throwWrappedAndCatchWrappedContended) {
   contend(throwWrappedAndCatchWrappedImpl);
 }
-
 BENCHMARK_DRAW_LINE();
+#endif
 
 namespace {
 struct Bulky {
   explicit Bulky(std::string message) : message_(message) {}
-  std::string message() & {
-    return message_;
-  }
-  std::string&& message() && {
-    return std::move(message_);
-  }
+  std::string message() & { return message_; }
+  std::string&& message() && { return std::move(message_); }
 
  private:
   std::string message_;
+  FOLLY_PUSH_WARNING
+  FOLLY_CLANG_DISABLE_WARNING("-Wunused-private-field")
   std::array<int, 1024> ints_;
+  FOLLY_POP_WARNING
 };
 } // anonymous namespace
 
@@ -339,20 +386,13 @@ InlineExecutor exe;
 template <class T>
 Future<T> fGen() {
   Promise<T> p;
-  auto f = p.getFuture()
-    .then([] (T&& t) {
-      return std::move(t);
-    })
-    .then([] (T&& t) {
-      return makeFuture(std::move(t));
-    })
-    .via(&exe)
-    .then([] (T&& t) {
-      return std::move(t);
-    })
-    .then([] (T&& t) {
-      return makeFuture(std::move(t));
-    });
+  auto f =
+      p.getFuture()
+          .thenValue([](T&& t) { return std::move(t); })
+          .thenValue([](T&& t) { return makeFuture(std::move(t)); })
+          .via(&exe)
+          .thenValue([](T&& t) { return std::move(t); })
+          .thenValue([](T&& t) { return makeFuture(std::move(t)); });
   p.setValue(T());
   return f;
 }
@@ -371,12 +411,8 @@ void complexBenchmark() {
   collect(fsGen<T>());
   collectAll(fsGen<T>());
   collectAny(fsGen<T>());
-  futures::map(fsGen<T>(), [] (const T& t) {
-    return t;
-  });
-  futures::map(fsGen<T>(), [] (const T& t) {
-    return makeFuture(T(t));
-  });
+  futures::mapValue(fsGen<T>(), [](const T& t) { return t; });
+  futures::mapValue(fsGen<T>(), [](const T& t) { return makeFuture(T(t)); });
 }
 
 BENCHMARK_DRAW_LINE();
@@ -427,7 +463,7 @@ BENCHMARK_RELATIVE(complexBlob4096) {
 }
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   folly::runBenchmarks();
   return 0;
 }

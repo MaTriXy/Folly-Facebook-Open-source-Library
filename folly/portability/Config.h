@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,12 +20,16 @@
 #include <folly/folly-config.h>
 #endif
 
-#ifdef FOLLY_PLATFORM_CONFIG
-#include FOLLY_PLATFORM_CONFIG
+#if __has_include(<features.h>)
+#include <features.h> // @manual
 #endif
 
-#if FOLLY_HAVE_FEATURES_H
-#include <features.h> // @manual
+#if __has_include(<bits/c++config.h>)
+#include <bits/c++config.h> // @manual
+#endif
+
+#if __has_include(<__config>)
+#include <__config> // @manual
 #endif
 
 #ifdef __ANDROID__
@@ -34,4 +38,6 @@
 
 #ifdef __APPLE__
 #include <Availability.h> // @manual
+#include <AvailabilityMacros.h> // @manual
+#include <TargetConditionals.h> // @manual
 #endif

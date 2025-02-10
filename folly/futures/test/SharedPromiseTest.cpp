@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@
  */
 
 #include <folly/futures/SharedPromise.h>
+
 #include <folly/portability/GTest.h>
 
 using namespace folly;
@@ -114,13 +115,15 @@ TEST(SharedPromise, moveMove) {
   auto f1 = p.getFuture();
   auto f2 = p.getFuture();
   auto p2 = std::move(p);
+  EXPECT_EQ(2, p2.size());
   p = std::move(p2);
+  EXPECT_EQ(0, p2.size());
   p.setValue(std::make_shared<int>(1));
 }
 
 TEST(SharedPromise, setWith) {
   SharedPromise<int> p;
-  p.setWith([]{ return 1; });
+  p.setWith([] { return 1; });
   EXPECT_EQ(1, p.getFuture().value());
 }
 
@@ -133,6 +136,7 @@ TEST(SharedPromise, isFulfilled) {
   EXPECT_TRUE(p2.isFulfilled());
   p = std::move(p2);
   EXPECT_TRUE(p.isFulfilled());
+  EXPECT_FALSE(p2.isFulfilled());
 }
 
 TEST(SharedPromise, interruptHandler) {
@@ -142,4 +146,23 @@ TEST(SharedPromise, interruptHandler) {
   auto f = p.getFuture();
   f.cancel();
   EXPECT_TRUE(flag);
+}
+
+TEST(SharedPromise, ConstMethods) {
+  SharedPromise<int> p;
+  EXPECT_FALSE(std::as_const(p).isFulfilled());
+  auto fut = std::as_const(p).getFuture();
+  EXPECT_FALSE(fut.isReady());
+  p.setValue(42);
+  EXPECT_TRUE(fut.isReady());
+  EXPECT_EQ(42, std::move(fut).get());
+}
+
+TEST(SharedPromise, InterruptHandlerSetsException) {
+  folly::SharedPromise<int> p;
+  p.setInterruptHandler([&](auto&& ew) { p.setException(ew); });
+  auto f = p.getSemiFuture();
+  f.cancel();
+  ASSERT_TRUE(f.isReady());
+  EXPECT_THROW(std::move(f).get(), FutureCancellation);
 }

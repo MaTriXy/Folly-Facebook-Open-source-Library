@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -44,33 +44,63 @@ template <class T, AtomicIntrusiveLinkedListHook<T> T::*HookMember>
 class AtomicIntrusiveLinkedList {
  public:
   AtomicIntrusiveLinkedList() {}
+
   AtomicIntrusiveLinkedList(const AtomicIntrusiveLinkedList&) = delete;
   AtomicIntrusiveLinkedList& operator=(const AtomicIntrusiveLinkedList&) =
       delete;
-  AtomicIntrusiveLinkedList(AtomicIntrusiveLinkedList&& other) noexcept {
-    auto tmp = other.head_.load();
-    other.head_ = head_.load();
-    head_ = tmp;
-  }
-  AtomicIntrusiveLinkedList& operator=(
-      AtomicIntrusiveLinkedList&& other) noexcept {
-    auto tmp = other.head_.load();
-    other.head_ = head_.load();
-    head_ = tmp;
 
-    return *this;
+  AtomicIntrusiveLinkedList(AtomicIntrusiveLinkedList&& other) noexcept
+      : head_(other.head_.exchange(nullptr, std::memory_order_acq_rel)) {}
+
+  // Absent because would be too error-prone to use correctly because of
+  // the requirement that lists are empty upon destruction.
+  AtomicIntrusiveLinkedList& operator=(
+      AtomicIntrusiveLinkedList&& other) noexcept = delete;
+
+  /**
+   * Move the currently held elements to a new list.
+   * The current list becomes empty, but concurrent threads
+   * might still add new elements to it.
+   *
+   * Equivalent to calling a move constructor, but more linter-friendly
+   * in case you still need the old list.
+   */
+  AtomicIntrusiveLinkedList spliceAll() { return std::move(*this); }
+
+  /**
+   * Move-assign the current list to `other`, then reverse-sweep
+   * the old list with the provided callback `func`.
+   *
+   * A safe replacement for the move assignment operator, which is absent
+   * because of the resource leak concerns.
+   */
+  template <typename F>
+  void reverseSweepAndAssign(AtomicIntrusiveLinkedList&& other, F&& func) {
+    auto otherHead = other.head_.exchange(nullptr, std::memory_order_acq_rel);
+    auto head = head_.exchange(otherHead, std::memory_order_acq_rel);
+    unlinkAll(head, std::forward<F>(func));
   }
 
   /**
-   * Note: list must be empty on destruction.
+   * Note: The list must be empty on destruction.
    */
-  ~AtomicIntrusiveLinkedList() {
-    assert(empty());
-  }
+  ~AtomicIntrusiveLinkedList() { assert(empty()); }
 
-  bool empty() const {
-    return head_.load() == nullptr;
-  }
+  /**
+   * Returns the current head of the list.
+   *
+   * WARNING: The returned pointer might not be valid if the list
+   * is modified concurrently!
+   */
+  T* unsafeHead() const { return head_.load(std::memory_order_acquire); }
+
+  /**
+   * Returns true if the list is empty.
+   *
+   * WARNING: This method's return value is only valid for a snapshot
+   * of the state, it might become stale as soon as it's returned.
+   */
+  bool empty() const { return unsafeHead() == nullptr; }
 
   /**
    * Atomically insert t at the head of the list.
@@ -89,9 +119,8 @@ class AtomicIntrusiveLinkedList {
          compiler bugs (GCC prior to 4.8.3 (bug 60272), clang (bug 18899),
          MSVC (bug 819819); source:
          http://en.cppreference.com/w/cpp/atomic/atomic/compare_exchange */
-    } while (!head_.compare_exchange_weak(oldHead, t,
-                                          std::memory_order_release,
-                                          std::memory_order_relaxed));
+    } while (!head_.compare_exchange_weak(
+        oldHead, t, std::memory_order_release, std::memory_order_relaxed));
 
     return oldHead == nullptr;
   }
@@ -103,7 +132,7 @@ class AtomicIntrusiveLinkedList {
    */
   template <typename F>
   bool sweepOnce(F&& func) {
-    if (auto head = head_.exchange(nullptr)) {
+    if (auto head = head_.exchange(nullptr, std::memory_order_acq_rel)) {
       auto rhead = reverse(head);
       unlinkAll(rhead, std::forward<F>(func));
       return true;
@@ -139,16 +168,14 @@ class AtomicIntrusiveLinkedList {
   void reverseSweep(F&& func) {
     // We don't loop like sweep() does because the overall order of callbacks
     // would be strand-wise LIFO which is meaningless to callers.
-    auto head = head_.exchange(nullptr);
+    auto head = head_.exchange(nullptr, std::memory_order_acq_rel);
     unlinkAll(head, std::forward<F>(func));
   }
 
  private:
   std::atomic<T*> head_{nullptr};
 
-  static T*& next(T* t) {
-    return (t->*HookMember).next;
-  }
+  static T*& next(T* t) { return (t->*HookMember).next; }
 
   /* Reverses a linked list, returning the pointer to the new head
      (old tail) */
@@ -166,7 +193,7 @@ class AtomicIntrusiveLinkedList {
   /* Unlinks all elements in the linked list fragment pointed to by `head',
    * calling func() on every element */
   template <typename F>
-  void unlinkAll(T* head, F&& func) {
+  static void unlinkAll(T* head, F&& func) {
     while (head != nullptr) {
       auto t = head;
       head = next(t);

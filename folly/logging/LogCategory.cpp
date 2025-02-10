@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/LogCategory.h>
 
 #include <cstdio>
@@ -46,8 +47,9 @@ LogCategory::LogCategory(StringPiece name, LogCategory* parent)
   parent_->firstChild_ = this;
 }
 
-void LogCategory::admitMessage(const LogMessage& message) const {
-  processMessage(message);
+void LogCategory::admitMessage(
+    const LogMessage& message, bool skipAbortOnFatal) const {
+  processMessageWalker(this, message);
 
   // If this is a fatal message, flush the handlers to make sure the log
   // message was written out, then crash.
@@ -67,7 +69,24 @@ void LogCategory::admitMessage(const LogMessage& message) const {
           "\n");
       folly::writeFull(STDERR_FILENO, msg.data(), msg.size());
     }
-    std::abort();
+    if (!skipAbortOnFatal) {
+      std::abort();
+    }
+  }
+}
+
+/*static*/ void LogCategory::processMessageWalker(
+    const LogCategory* category, const LogMessage& message) {
+  while (true) {
+    category->processMessage(message);
+    if (category->parent_ &&
+        message.getLevel() >=
+            category->propagateLevelMessagesToParent_.load(
+                std::memory_order_relaxed)) {
+      category = category->parent_;
+    } else {
+      break;
+    }
   }
 }
 
@@ -77,6 +96,8 @@ void LogCategory::processMessage(const LogMessage& message) const {
   //
   // In the common case there will only be a small number of handlers.  Use a
   // std::array in this case to avoid a heap allocation for the vector.
+  //
+  // TODO could this just be a folly::small_vector?
   const std::shared_ptr<LogHandler>* handlers = nullptr;
   size_t numHandlers = 0;
   constexpr uint32_t kSmallOptimizationSize = 5;
@@ -112,16 +133,6 @@ void LogCategory::processMessage(const LogMessage& message) const {
           folly::exceptionStr(ex));
     }
   }
-
-  // Propagate the message up to our parent LogCategory.
-  //
-  // Maybe in the future it might be worth adding a flag to control if a
-  // LogCategory should propagate messages to its parent or not.  (This would
-  // be similar to log4j's "additivity" flag.)
-  // For now I don't have a strong use case for this.
-  if (parent_) {
-    parent_->processMessage(message);
-  }
 }
 
 void LogCategory::addHandler(std::shared_ptr<LogHandler> handler) {
@@ -150,9 +161,10 @@ void LogCategory::replaceHandlers(
   return handlers_.wlock()->swap(handlers);
 }
 
-void LogCategory::updateHandlers(const std::unordered_map<
-                                 std::shared_ptr<LogHandler>,
-                                 std::shared_ptr<LogHandler>>& handlerMap) {
+void LogCategory::updateHandlers(
+    const std::unordered_map<
+        std::shared_ptr<LogHandler>,
+        std::shared_ptr<LogHandler>>& handlerMap) {
   auto handlers = handlers_.wlock();
   for (auto& entry : *handlers) {
     auto* ptr = get_ptr(handlerMap, entry);
@@ -167,6 +179,14 @@ void LogCategory::setLevel(LogLevel level, bool inherit) {
   // the LoggerDB lock to iterate through our children in case our effective
   // level changes.
   db_->setLevel(this, level, inherit);
+}
+
+void LogCategory::setPropagateLevelMessagesToParent(LogLevel level) {
+  propagateLevelMessagesToParent_.store(level, std::memory_order_relaxed);
+}
+
+LogLevel LogCategory::getPropagateLevelMessagesToParentRelaxed() const {
+  return propagateLevelMessagesToParent_.load(std::memory_order_relaxed);
 }
 
 void LogCategory::setLevelLocked(LogLevel level, bool inherit) {

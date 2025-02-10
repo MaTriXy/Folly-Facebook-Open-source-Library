@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,13 @@
 #include <algorithm>
 #include <limits>
 
+#include <glog/logging.h>
+
+#include <folly/Portability.h>
+#include <folly/chrono/Hardware.h>
 #include <folly/detail/Futex.h>
 #include <folly/portability/Asm.h>
 #include <folly/portability/Unistd.h>
-
-#include <glog/logging.h>
 
 namespace folly {
 
@@ -68,11 +70,16 @@ namespace detail {
 /// cutoffs for different operations (read versus write, for example).
 /// To avoid contention, the spin cutoff is only updated when requested
 /// by the caller.
+///
+/// On x86 the latency of a spin loop varies dramatically across
+/// architectures due to changes in the PAUSE instruction. Skylake
+/// increases the latency by about a factor of 15 compared to previous
+/// architectures. To work around this, on x86 we measure spins using
+/// RDTSC rather than a loop counter.
 template <template <typename> class Atom>
 struct TurnSequencer {
   explicit TurnSequencer(const uint32_t firstTurn = 0) noexcept
-      : state_(encode(firstTurn << kTurnShift, 0))
-  {}
+      : state_(encode(firstTurn << kTurnShift, 0)) {}
 
   /// Returns true iff a call to waitForTurn(turn, ...) won't block
   bool isTurn(const uint32_t turn) const noexcept {
@@ -84,9 +91,10 @@ struct TurnSequencer {
 
   /// See tryWaitForTurn
   /// Requires that `turn` is not a turn in the past.
-  void waitForTurn(const uint32_t turn,
-                   Atom<uint32_t>& spinCutoff,
-                   const bool updateSpinCutoff) noexcept {
+  void waitForTurn(
+      const uint32_t turn,
+      Atom<uint32_t>& spinCutoff,
+      const bool updateSpinCutoff) noexcept {
     const auto ret = tryWaitForTurn(turn, spinCutoff, updateSpinCutoff);
     DCHECK(ret == TryWaitResult::SUCCESS);
   }
@@ -96,13 +104,13 @@ struct TurnSequencer {
   // the bottom to store the number of waiters.  We call shifted turns
   // "sturns" inside this class.
 
-  /// Blocks the current thread until turn has arrived.  If
-  /// updateSpinCutoff is true then this will spin for up to kMaxSpins tries
-  /// before blocking and will adjust spinCutoff based on the results,
-  /// otherwise it will spin for at most spinCutoff spins.
-  /// Returns SUCCESS if the wait succeeded, PAST if the turn is in the past
-  /// or TIMEDOUT if the absTime time value is not nullptr and is reached before
-  /// the turn arrives
+  /// Blocks the current thread until turn has arrived.
+  /// If updateSpinCutoff is true then this will spin for up to
+  /// kMaxSpinLimit before blocking and will adjust spinCutoff based
+  /// on the results, otherwise it will spin for at most spinCutoff.
+  /// Returns SUCCESS if the wait succeeded, PAST if the turn is in the
+  /// past or TIMEDOUT if the absTime time value is not nullptr and is
+  /// reached before the turn arrives
   template <
       class Clock = std::chrono::steady_clock,
       class Duration = typename Clock::duration>
@@ -114,11 +122,12 @@ struct TurnSequencer {
           nullptr) noexcept {
     uint32_t prevThresh = spinCutoff.load(std::memory_order_relaxed);
     const uint32_t effectiveSpinCutoff =
-        updateSpinCutoff || prevThresh == 0 ? kMaxSpins : prevThresh;
+        updateSpinCutoff || prevThresh == 0 ? kMaxSpinLimit : prevThresh;
 
+    uint64_t begin = 0;
     uint32_t tries;
     const uint32_t sturn = turn << kTurnShift;
-    for (tries = 0; ; ++tries) {
+    for (tries = 0;; ++tries) {
       uint32_t state = state_.load(std::memory_order_acquire);
       uint32_t current_sturn = decodeCurrentSturn(state);
       if (current_sturn == sturn) {
@@ -126,16 +135,27 @@ struct TurnSequencer {
       }
 
       // wrap-safe version of (current_sturn >= sturn)
-      if(sturn - current_sturn >= std::numeric_limits<uint32_t>::max() / 2) {
+      if (sturn - current_sturn >= std::numeric_limits<uint32_t>::max() / 2) {
         // turn is in the past
         return TryWaitResult::PAST;
       }
 
       // the first effectSpinCutoff tries are spins, after that we will
       // record ourself as a waiter and block with futexWait
-      if (tries < effectiveSpinCutoff) {
-        asm_volatile_pause();
-        continue;
+      if (kSpinUsingHardwareClock) {
+        auto now = hardware_timestamp();
+        if (tries == 0) {
+          begin = now;
+        }
+        if (tries == 0 || now < begin + effectiveSpinCutoff) {
+          asm_volatile_pause();
+          continue;
+        }
+      } else {
+        if (tries < effectiveSpinCutoff) {
+          asm_volatile_pause();
+          continue;
+        }
       }
 
       uint32_t current_max_waiter_delta = decodeMaxWaitersDelta(state);
@@ -153,27 +173,32 @@ struct TurnSequencer {
         }
       }
       if (absTime) {
-        auto futexResult =
-            state_.futexWaitUntil(new_state, *absTime, futexChannel(turn));
+        auto futexResult = detail::futexWaitUntil(
+            &state_, new_state, *absTime, futexChannel(turn));
         if (futexResult == FutexResult::TIMEDOUT) {
           return TryWaitResult::TIMEDOUT;
         }
       } else {
-        state_.futexWait(new_state, futexChannel(turn));
+        detail::futexWait(&state_, new_state, futexChannel(turn));
       }
     }
 
     if (updateSpinCutoff || prevThresh == 0) {
-      // if we hit kMaxSpins then spinning was pointless, so the right
-      // spinCutoff is kMinSpins
+      // if we hit kMaxSpinLimit then spinning was pointless, so the right
+      // spinCutoff is kMinSpinLimit
       uint32_t target;
-      if (tries >= kMaxSpins) {
-        target = kMinSpins;
+      uint64_t elapsed = !kSpinUsingHardwareClock || tries == 0
+          ? tries
+          : hardware_timestamp() - begin;
+      if (tries >= kMaxSpinLimit) {
+        target = kMinSpinLimit;
       } else {
         // to account for variations, we allow ourself to spin 2*N when
         // we think that N is actually required in order to succeed
-        target = std::min<uint32_t>(kMaxSpins,
-                                    std::max<uint32_t>(kMinSpins, tries * 2));
+        target = std::min(
+            uint32_t{kMaxSpinLimit},
+            std::max(
+                uint32_t{kMinSpinLimit}, static_cast<uint32_t>(elapsed) * 2));
       }
 
       if (prevThresh == 0) {
@@ -197,13 +222,13 @@ struct TurnSequencer {
     while (true) {
       DCHECK(state == encode(turn << kTurnShift, decodeMaxWaitersDelta(state)));
       uint32_t max_waiter_delta = decodeMaxWaitersDelta(state);
-      uint32_t new_state =
-          encode((turn + 1) << kTurnShift,
-                 max_waiter_delta == 0 ? 0 : max_waiter_delta - 1);
+      uint32_t new_state = encode(
+          (turn + 1) << kTurnShift,
+          max_waiter_delta == 0 ? 0 : max_waiter_delta - 1);
       if (state_.compare_exchange_strong(state, new_state)) {
         if (max_waiter_delta != 0) {
-          state_.futexWake(std::numeric_limits<int>::max(),
-                           futexChannel(turn + 1));
+          detail::futexWake(
+              &state_, std::numeric_limits<int>::max(), futexChannel(turn + 1));
         }
         break;
       }
@@ -219,25 +244,29 @@ struct TurnSequencer {
   }
 
  private:
-  enum : uint32_t {
-    /// kTurnShift counts the bits that are stolen to record the delta
-    /// between the current turn and the maximum waiter. It needs to be big
-    /// enough to record wait deltas of 0 to 32 inclusive.  Waiters more
-    /// than 32 in the future will be woken up 32*n turns early (since
-    /// their BITSET will hit) and will adjust the waiter count again.
-    /// We go a bit beyond and let the waiter count go up to 63, which
-    /// is free and might save us a few CAS
-    kTurnShift = 6,
-    kWaitersMask = (1 << kTurnShift) - 1,
+  static constexpr bool kSpinUsingHardwareClock = kIsArchAmd64;
+  static constexpr uint32_t kCyclesPerSpinLimit =
+      kSpinUsingHardwareClock ? 1 : 10;
 
-    /// The minimum spin count that we will adaptively select
-    kMinSpins = 20,
+  /// kTurnShift counts the bits that are stolen to record the delta
+  /// between the current turn and the maximum waiter. It needs to be big
+  /// enough to record wait deltas of 0 to 32 inclusive.  Waiters more
+  /// than 32 in the future will be woken up 32*n turns early (since
+  /// their BITSET will hit) and will adjust the waiter count again.
+  /// We go a bit beyond and let the waiter count go up to 63, which is
+  /// free and might save us a few CAS
+  static constexpr uint32_t kTurnShift = 6;
+  static constexpr uint32_t kWaitersMask = (1 << kTurnShift) - 1;
 
-    /// The maximum spin count that we will adaptively select, and the
-    /// spin count that will be used when probing to get a new data point
-    /// for the adaptation
-    kMaxSpins = 2000,
-  };
+  /// The minimum spin duration that we will adaptively select. The value
+  /// here is cycles, adjusted to the way in which the limit will actually
+  /// be applied.
+  static constexpr uint32_t kMinSpinLimit = 200 / kCyclesPerSpinLimit;
+
+  /// The maximum spin duration that we will adaptively select, and the
+  /// spin duration that will be used when probing to get a new data
+  /// point for the adaptation
+  static constexpr uint32_t kMaxSpinLimit = 20000 / kCyclesPerSpinLimit;
 
   /// This holds both the current turn, and the highest waiting turn,
   /// stored as (current_turn << 6) | min(63, max(waited_turn - current_turn))

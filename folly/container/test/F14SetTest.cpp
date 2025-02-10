@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,78 +14,167 @@
  * limitations under the License.
  */
 
+#include <folly/Portability.h>
+
+// Allow tests for keys that throw in copy/move constructors. This
+// warning has to be disabled before the templates are defined in the
+// header to have any effect.
+FOLLY_GNU_DISABLE_WARNING("-Wdeprecated-declarations")
+
+// clang-format off:
 #include <folly/container/F14Set.h>
+// clang-format on
 
+#include <chrono>
+#include <numeric>
+#include <random>
+#include <string>
 #include <unordered_map>
+#include <unordered_set>
 
+#include <glog/logging.h>
+
+#include <folly/Benchmark.h>
 #include <folly/Conv.h>
 #include <folly/FBString.h>
 #include <folly/container/test/F14TestUtil.h>
+#include <folly/container/test/TrackingTypes.h>
+#include <folly/lang/Keep.h>
 #include <folly/portability/GTest.h>
+#include <folly/test/TestUtils.h>
+
+using namespace folly;
+using namespace folly::f14;
+using namespace folly::string_piece_literals;
+using namespace folly::test;
+
+extern "C" FOLLY_KEEP int check_std_unordered_set_int_accumulate(
+    std::unordered_set<int> const& set) {
+  return std::accumulate(set.begin(), set.end(), 0);
+}
+extern "C" FOLLY_KEEP int check_folly_f14_node_set_int_accumulate(
+    folly::F14NodeSet<int> const& set) {
+  return std::accumulate(set.begin(), set.end(), 0);
+}
+extern "C" FOLLY_KEEP int check_folly_f14_vector_set_int_accumulate(
+    folly::F14VectorSet<int> const& set) {
+  return std::accumulate(set.begin(), set.end(), 0);
+}
+extern "C" FOLLY_KEEP int check_folly_f14_value_set_int_accumulate(
+    folly::F14ValueSet<int> const& set) {
+  return std::accumulate(set.begin(), set.end(), 0);
+}
+
+extern "C" FOLLY_KEEP size_t
+check_std_unordered_set_int_count(std::unordered_set<int> const& set, int key) {
+  return set.count(key);
+}
+extern "C" FOLLY_KEEP size_t
+check_folly_node_set_int_count(folly::F14NodeSet<int> const& set, int key) {
+  return set.count(key);
+}
+extern "C" FOLLY_KEEP size_t
+check_folly_vector_set_int_count(folly::F14VectorSet<int> const& set, int key) {
+  return set.count(key);
+}
+extern "C" FOLLY_KEEP size_t
+check_folly_value_set_int_count(folly::F14ValueSet<int> const& set, int key) {
+  return set.count(key);
+}
+
+static constexpr bool kFallback = folly::f14::detail::getF14IntrinsicsMode() ==
+    folly::f14::detail::F14IntrinsicsMode::None;
+
+template <typename T>
+void runSanityChecks(T const& t) {
+  (void)t;
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+  F14TableStats::compute(t);
+#endif
+}
 
 template <template <typename, typename, typename, typename> class TSet>
 void testCustomSwap() {
   using std::swap;
 
-  TSet<
-      int,
-      folly::f14::DefaultHasher<int>,
-      folly::f14::DefaultKeyEqual<int>,
-      folly::f14::SwapTrackingAlloc<int>>
+  TSet<int, DefaultHasher<int>, DefaultKeyEqual<int>, SwapTrackingAlloc<int>>
       m0, m1;
-  folly::f14::resetTracking();
+  resetTracking();
   swap(m0, m1);
 
-  EXPECT_EQ(
-      0, folly::f14::Tracked<0>::counts.dist(folly::f14::Counts{0, 0, 0, 0}));
+  EXPECT_EQ(0, Tracked<0>::counts().dist(Counts{0, 0, 0, 0}));
 }
 
 TEST(F14Set, customSwap) {
-  testCustomSwap<folly::F14ValueSet>();
-  testCustomSwap<folly::F14NodeSet>();
-  testCustomSwap<folly::F14VectorSet>();
-  testCustomSwap<folly::F14FastSet>();
+  testCustomSwap<F14ValueSet>();
+  testCustomSwap<F14NodeSet>();
+  testCustomSwap<F14VectorSet>();
+  testCustomSwap<F14FastSet>();
 }
 
 namespace {
 template <
-    template <typename, typename, typename, typename> class TSet,
+    template <typename, typename, typename, typename>
+    class TSet,
     typename K>
 void runAllocatedMemorySizeTest() {
-  using namespace folly::f14;
   using A = SwapTrackingAlloc<K>;
 
   resetTracking();
-  TSet<K, DefaultHasher<K>, DefaultKeyEqual<K>, A> m;
-  EXPECT_EQ(testAllocatedMemorySize, m.getAllocatedMemorySize());
+  {
+    TSet<K, DefaultHasher<K>, DefaultKeyEqual<K>, A> s;
 
-  for (size_t i = 0; i < 1000; ++i) {
-    m.insert(folly::to<K>(i));
-    m.erase(folly::to<K>(i / 10 + 2));
-    EXPECT_EQ(testAllocatedMemorySize, m.getAllocatedMemorySize());
-    std::size_t size = 0;
-    std::size_t count = 0;
-    m.visitAllocationClasses([&](std::size_t, std::size_t) mutable {});
-    m.visitAllocationClasses([&](std::size_t bytes, std::size_t n) {
-      size += bytes * n;
-      count += n;
-    });
-    EXPECT_EQ(testAllocatedMemorySize, size);
-    EXPECT_EQ(testAllocatedBlockCount, count);
+    // if F14 intrinsics are not available then we fall back to using
+    // std::unordered_set underneath, but in that case the allocation
+    // info is only best effort
+    if (!kFallback) {
+      EXPECT_EQ(testAllocatedMemorySize(), 0);
+      EXPECT_EQ(s.getAllocatedMemorySize(), 0);
+    }
+    auto emptySetAllocatedMemorySize = testAllocatedMemorySize();
+    auto emptySetAllocatedBlockCount = testAllocatedBlockCount();
+
+    for (size_t i = 0; i < 1000; ++i) {
+      s.insert(to<K>(i));
+      s.erase(to<K>(i / 10 + 2));
+      if (!kFallback) {
+        EXPECT_EQ(testAllocatedMemorySize(), s.getAllocatedMemorySize());
+      }
+      EXPECT_GE(s.getAllocatedMemorySize(), sizeof(K) * s.size());
+      std::size_t size = 0;
+      std::size_t count = 0;
+      s.visitAllocationClasses([&](std::size_t, std::size_t) mutable {});
+      s.visitAllocationClasses([&](std::size_t bytes, std::size_t n) {
+        size += bytes * n;
+        count += n;
+      });
+      if (!kFallback) {
+        EXPECT_EQ(testAllocatedMemorySize(), size);
+        EXPECT_EQ(testAllocatedBlockCount(), count);
+      }
+    }
+
+    s = decltype(s){};
+    EXPECT_EQ(testAllocatedMemorySize(), emptySetAllocatedMemorySize);
+    EXPECT_EQ(testAllocatedBlockCount(), emptySetAllocatedBlockCount);
+
+    s.reserve(5);
+    EXPECT_GT(testAllocatedMemorySize(), 0);
+    s = {};
+    if (!kFallback) {
+      EXPECT_GT(testAllocatedMemorySize(), 0);
+    }
   }
-
-  m = decltype(m){};
-  EXPECT_EQ(testAllocatedMemorySize, 0);
-  EXPECT_EQ(testAllocatedBlockCount, 0);
-  m.visitAllocationClasses([](std::size_t, std::size_t n) { EXPECT_EQ(n, 0); });
+  EXPECT_EQ(testAllocatedMemorySize(), 0);
+  EXPECT_EQ(testAllocatedBlockCount(), 0);
 }
 
 template <typename K>
 void runAllocatedMemorySizeTests() {
-  runAllocatedMemorySizeTest<folly::F14ValueSet, K>();
-  runAllocatedMemorySizeTest<folly::F14NodeSet, K>();
-  runAllocatedMemorySizeTest<folly::F14VectorSet, K>();
-  runAllocatedMemorySizeTest<folly::F14FastSet, K>();
+  runAllocatedMemorySizeTest<F14ValueSet, K>();
+  runAllocatedMemorySizeTest<F14NodeSet, K>();
+  runAllocatedMemorySizeTest<F14VectorSet, K>();
+  runAllocatedMemorySizeTest<F14FastSet, K>();
 }
 } // namespace
 
@@ -93,47 +182,17 @@ TEST(F14Set, getAllocatedMemorySize) {
   runAllocatedMemorySizeTests<bool>();
   runAllocatedMemorySizeTests<int>();
   runAllocatedMemorySizeTests<long>();
-  runAllocatedMemorySizeTests<long double>();
+  runAllocatedMemorySizeTests<double>();
   runAllocatedMemorySizeTests<std::string>();
-  runAllocatedMemorySizeTests<folly::fbstring>();
-
-  {
-    folly::F14ValueSet<int> set;
-    set.insert(10);
-    EXPECT_EQ(sizeof(set), 4 * sizeof(void*));
-    if (alignof(folly::max_align_t) == 16) {
-      // chunks will be allocated as 2 max_align_t-s
-      EXPECT_EQ(set.getAllocatedMemorySize(), 32);
-    } else {
-      // chunks will be allocated using aligned_malloc with the true size
-      EXPECT_EQ(set.getAllocatedMemorySize(), 24);
-    }
-  }
-  {
-    folly::F14NodeSet<int> set;
-    set.insert(10);
-    EXPECT_EQ(sizeof(set), 4 * sizeof(void*));
-    if (alignof(folly::max_align_t) == 16) {
-      // chunks will be allocated as 2 max_align_t-s
-      EXPECT_EQ(set.getAllocatedMemorySize(), 36);
-    } else {
-      // chunks will be allocated using aligned_malloc with the true size
-      EXPECT_EQ(set.getAllocatedMemorySize(), 20 + 2 * sizeof(void*));
-    }
-  }
-  {
-    folly::F14VectorSet<int> set;
-    set.insert(10);
-    EXPECT_EQ(sizeof(set), 8 + 2 * sizeof(void*));
-    EXPECT_EQ(set.getAllocatedMemorySize(), 32);
-  }
+  runAllocatedMemorySizeTests<fbstring>();
 }
 
 template <typename S>
-void runVisitContiguousRangesTest() {
+void runVisitContiguousRangesTest(int n) {
   S set;
 
-  for (int i = 0; i < 1000; ++i) {
+  for (int i = 0; i < n; ++i) {
+    makeUnpredictable(i);
     set.insert(i);
     set.erase(i / 2);
   }
@@ -151,38 +210,130 @@ void runVisitContiguousRangesTest() {
       iter->second = true;
     }
   });
+
+  // ensure no entries were skipped
+  for (auto& e : visited) {
+    EXPECT_TRUE(e.second);
+  }
+}
+
+template <typename S>
+void runVisitContiguousRangesTest() {
+  runVisitContiguousRangesTest<S>(0); // empty
+  runVisitContiguousRangesTest<S>(5); // single chunk
+  runVisitContiguousRangesTest<S>(1000); // many chunks
 }
 
 TEST(F14ValueSet, visitContiguousRanges) {
-  runVisitContiguousRangesTest<folly::F14ValueSet<int>>();
+  runVisitContiguousRangesTest<F14ValueSet<int>>();
 }
 
 TEST(F14NodeSet, visitContiguousRanges) {
-  runVisitContiguousRangesTest<folly::F14NodeSet<int>>();
+  runVisitContiguousRangesTest<F14NodeSet<int>>();
 }
 
 TEST(F14VectorSet, visitContiguousRanges) {
-  runVisitContiguousRangesTest<folly::F14VectorSet<int>>();
+  runVisitContiguousRangesTest<F14VectorSet<int>>();
 }
 
 TEST(F14FastSet, visitContiguousRanges) {
-  runVisitContiguousRangesTest<folly::F14FastSet<int>>();
+  runVisitContiguousRangesTest<F14FastSet<int>>();
 }
 
-///////////////////////////////////
-#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
-///////////////////////////////////
+#if FOLLY_HAS_MEMORY_RESOURCE
+TEST(F14Set, pmrEmpty) {
+  pmr::F14ValueSet<int> s1;
+  pmr::F14NodeSet<int> s2;
+  pmr::F14VectorSet<int> s3;
+  pmr::F14FastSet<int> s4;
+  EXPECT_TRUE(s1.empty() && s2.empty() && s3.empty() && s4.empty());
+}
+#endif
 
-#include <chrono>
-#include <random>
-#include <string>
-#include <unordered_set>
+namespace {
+struct NestedHash {
+  template <typename N>
+  std::size_t operator()(N const& v) const;
+};
 
-#include <folly/Range.h>
+template <template <class...> class TSet>
+struct Nested {
+  std::unique_ptr<TSet<Nested, NestedHash>> set_;
 
-using namespace folly;
-using namespace folly::f14;
-using namespace folly::string_piece_literals;
+  explicit Nested(int depth)
+      : set_(std::make_unique<TSet<Nested, NestedHash>>()) {
+    if (depth > 0) {
+      set_->emplace(depth - 1);
+    }
+  }
+};
+
+template <typename N>
+std::size_t NestedHash::operator()(N const& v) const {
+  std::size_t rv = 0;
+  for (auto& k : *v.set_) {
+    rv += operator()(k);
+  }
+  return Hash{}(rv);
+}
+
+template <template <class...> class TSet>
+bool operator==(Nested<TSet> const& lhs, Nested<TSet> const& rhs) {
+  return *lhs.set_ == *rhs.set_;
+}
+
+template <template <class...> class TSet>
+bool operator!=(Nested<TSet> const& lhs, Nested<TSet> const& rhs) {
+  return !(lhs == rhs);
+}
+
+template <template <class...> class TSet>
+void testNestedSetEquality() {
+  auto n1 = Nested<TSet>(100);
+  auto n2 = Nested<TSet>(100);
+  auto n3 = Nested<TSet>(99);
+  EXPECT_TRUE(n1 == n1);
+  EXPECT_TRUE(n1 == n2);
+  EXPECT_FALSE(n1 == n3);
+  EXPECT_FALSE(n1 != n1);
+  EXPECT_FALSE(n1 != n2);
+  EXPECT_TRUE(n1 != n3);
+}
+
+template <template <class...> class TSet>
+void testEqualityRefinement() {
+  TSet<std::pair<int, int>, HashFirst, EqualFirst> s1;
+  TSet<std::pair<int, int>, HashFirst, EqualFirst> s2;
+  s1.insert(std::make_pair(0, 0));
+  s1.insert(std::make_pair(1, 1));
+  EXPECT_FALSE(s1.insert(std::make_pair(0, 2)).second);
+  EXPECT_EQ(s1.size(), 2);
+  EXPECT_EQ(s1.count(std::make_pair(0, 10)), 1);
+  for (auto& k : s1) {
+    s2.emplace(k.first, k.second + 1);
+  }
+  EXPECT_EQ(s1.size(), s2.size());
+  for (auto& k : s1) {
+    EXPECT_EQ(s2.count(k), 1);
+  }
+  EXPECT_FALSE(s1 == s2);
+  EXPECT_TRUE(s1 != s2);
+}
+} // namespace
+
+TEST(F14Set, nestedSetEquality) {
+  testNestedSetEquality<F14ValueSet>();
+  testNestedSetEquality<F14NodeSet>();
+  testNestedSetEquality<F14VectorSet>();
+  testNestedSetEquality<F14FastSet>();
+}
+
+TEST(F14Set, equalityRefinement) {
+  testEqualityRefinement<F14ValueSet>();
+  testEqualityRefinement<F14NodeSet>();
+  testEqualityRefinement<F14VectorSet>();
+  testEqualityRefinement<F14FastSet>();
+}
 
 namespace {
 std::string s(char const* p) {
@@ -195,6 +346,19 @@ void runSimple() {
   T h;
 
   EXPECT_EQ(h.size(), 0);
+  h.reserve(0);
+  std::vector<std::string> v({"abc", "abc"});
+  h.insert(v.begin(), v.begin());
+  EXPECT_EQ(h.size(), 0);
+  if (!kFallback) {
+    EXPECT_EQ(h.bucket_count(), 0);
+  }
+  h.insert(v.begin(), v.end());
+  EXPECT_EQ(h.size(), 1);
+  h = T{};
+  if (!kFallback) {
+    EXPECT_EQ(h.bucket_count(), 0);
+  }
 
   h.insert(s("abc"));
   EXPECT_TRUE(h.find(s("def")) == h.end());
@@ -227,7 +391,7 @@ void runSimple() {
   EXPECT_TRUE(h3.find(s("xxx")) == h3.end());
 
   for (uint64_t i = 0; i < 1000; ++i) {
-    h.insert(std::move(std::to_string(i * i * i)));
+    h.insert(std::move(to<std::string>(i * i * i)));
     EXPECT_EQ(h.size(), i + 1);
   }
   {
@@ -235,9 +399,9 @@ void runSimple() {
     swap(h, h2);
   }
   for (uint64_t i = 0; i < 1000; ++i) {
-    EXPECT_TRUE(h2.find(std::to_string(i * i * i)) != h2.end());
-    EXPECT_EQ(*h2.find(std::to_string(i * i * i)), std::to_string(i * i * i));
-    EXPECT_TRUE(h2.find(std::to_string(i * i * i + 2)) == h2.end());
+    EXPECT_TRUE(h2.find(to<std::string>(i * i * i)) != h2.end());
+    EXPECT_EQ(*h2.find(to<std::string>(i * i * i)), to<std::string>(i * i * i));
+    EXPECT_TRUE(h2.find(to<std::string>(i * i * i + 2)) == h2.end());
   }
 
   T h4{h2};
@@ -254,6 +418,8 @@ void runSimple() {
   EXPECT_EQ(h8.size(), 2);
   EXPECT_EQ(h8.count(s("abc")), 1);
   EXPECT_EQ(h8.count(s("xyz")), 0);
+  EXPECT_TRUE(h8.contains(s("abc")));
+  EXPECT_FALSE(h8.contains(s("xyz")));
 
   EXPECT_TRUE(h7 != h8);
   EXPECT_TRUE(h8 != h9);
@@ -266,21 +432,69 @@ void runSimple() {
   EXPECT_TRUE(h2.empty());
   EXPECT_TRUE(h7.empty());
   for (uint64_t i = 0; i < 1000; ++i) {
-    auto k = std::to_string(i * i * i);
+    auto k = to<std::string>(i * i * i);
     EXPECT_EQ(h4.count(k), 1);
     EXPECT_EQ(h5.count(k), 1);
     EXPECT_EQ(h6.count(k), 1);
     EXPECT_EQ(h8.count(k), 1);
+    EXPECT_TRUE(h4.contains(k));
+    EXPECT_TRUE(h5.contains(k));
+    EXPECT_TRUE(h6.contains(k));
+    EXPECT_TRUE(h8.contains(k));
   }
 
-  F14TableStats::compute(h);
-  F14TableStats::compute(h2);
-  F14TableStats::compute(h3);
-  F14TableStats::compute(h4);
-  F14TableStats::compute(h5);
-  F14TableStats::compute(h6);
-  F14TableStats::compute(h7);
-  F14TableStats::compute(h8);
+  h8.clear();
+  h8.emplace(s("abc"));
+  if (!kFallback) {
+    EXPECT_GT(h8.bucket_count(), 1);
+  }
+  h8 = {};
+  if (!kFallback) {
+    EXPECT_GT(h8.bucket_count(), 1);
+  }
+  h9 = {s("abc"), s("def")};
+  EXPECT_TRUE(h8.empty());
+  EXPECT_EQ(h9.size(), 2);
+
+  auto expectH8 = [&h8](T& ref) { EXPECT_EQ(&ref, &h8); };
+  expectH8((h8 = h2));
+  expectH8((h8 = std::move(h2)));
+  expectH8((h8 = {}));
+
+  runSanityChecks(h);
+  runSanityChecks(h2);
+  runSanityChecks(h3);
+  runSanityChecks(h4);
+  runSanityChecks(h5);
+  runSanityChecks(h6);
+  runSanityChecks(h7);
+  runSanityChecks(h8);
+}
+
+template <typename T>
+void runEraseWhileIterating() {
+  constexpr int kNumElements = 1000;
+
+  // mul and kNumElements should be relatively prime
+  for (int mul : {1, 3, 17, 137, kNumElements - 1}) {
+    for (int interval : {1, 3, 5, kNumElements / 2}) {
+      T h;
+      for (auto i = 0; i < kNumElements; ++i) {
+        EXPECT_TRUE(h.emplace((i * mul) % kNumElements).second);
+      }
+
+      int sum = 0;
+      for (auto it = h.begin(); it != h.end();) {
+        sum += *it;
+        if (*it % interval == 0) {
+          it = h.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      EXPECT_EQ(kNumElements * (kNumElements - 1) / 2, sum);
+    }
+  }
 }
 
 template <typename T>
@@ -288,10 +502,10 @@ void runRehash() {
   unsigned n = 10000;
   T h;
   for (unsigned i = 0; i < n; ++i) {
-    h.insert(std::to_string(i));
+    h.insert(to<std::string>(i));
   }
   EXPECT_EQ(h.size(), n);
-  F14TableStats::compute(h);
+  runSanityChecks(h);
 }
 
 // T should be a set of uint64_t
@@ -384,6 +598,8 @@ void runRandom() {
         EXPECT_EQ(*t, *r);
       }
       EXPECT_EQ(t0.count(k), r0.count(k));
+      // TODO: When std::unordered_set supports c++20:
+      // EXPECT_EQ(t0.contains(k), r0.contains(k));
     } else if (pct < 60) {
       // equal_range
       auto t = t0.equal_range(k);
@@ -467,7 +683,7 @@ void runRandom() {
       EXPECT_EQ((t0 == t1), (r0 == r1));
     } else if (pct < 99) {
       // clear
-      t0.computeStats();
+      runSanityChecks(t0);
       t0.clear();
       r0.clear();
     } else if (pct < 100) {
@@ -496,12 +712,68 @@ TEST(F14VectorSet, simple) {
 }
 
 TEST(F14FastSet, simple) {
-  // F14FastSet inherits from a conditional typedef. Verify it compiles.
+  // F14FastSet internally uses a conditional typedef. Verify it compiles.
   runRandom<F14FastSet<uint64_t>>();
   runSimple<F14FastSet<std::string>>();
 }
 
-TEST(F14VectorMap, reverse_iterator) {
+#if FOLLY_HAS_MEMORY_RESOURCE
+TEST(F14ValueSet, pmrSimple) {
+  runSimple<pmr::F14ValueSet<std::string>>();
+}
+
+TEST(F14NodeSet, pmrSimple) {
+  runSimple<pmr::F14NodeSet<std::string>>();
+}
+
+TEST(F14VectorSet, pmrSimple) {
+  runSimple<pmr::F14VectorSet<std::string>>();
+}
+
+TEST(F14FastSet, pmrSimple) {
+  // F14FastSet internally uses a conditional typedef. Verify it compiles.
+  runRandom<pmr::F14FastSet<uint64_t>>();
+  runSimple<pmr::F14FastSet<std::string>>();
+}
+#endif
+
+TEST(F14Set, ContainerSize) {
+  SKIP_IF(kFallback);
+
+  {
+    F14ValueSet<int> set;
+    set.insert(10);
+    EXPECT_EQ(sizeof(set), 3 * sizeof(void*));
+    if (alignof(folly::max_align_t) == 16) {
+      // chunks will be allocated as 2 max_align_t-s
+      EXPECT_EQ(set.getAllocatedMemorySize(), 32);
+    } else {
+      // chunks will be allocated using aligned_malloc with the true size
+      EXPECT_EQ(set.getAllocatedMemorySize(), 24);
+    }
+  }
+  {
+    F14NodeSet<int> set;
+    set.insert(10);
+    EXPECT_EQ(sizeof(set), 3 * sizeof(void*));
+    if (alignof(folly::max_align_t) == 16) {
+      // chunks will be allocated as 2 max_align_t-s
+      EXPECT_EQ(set.getAllocatedMemorySize(), 36);
+    } else {
+      // chunks will be allocated using aligned_malloc with the true size
+      EXPECT_EQ(set.getAllocatedMemorySize(), 20 + 2 * sizeof(void*));
+    }
+  }
+  {
+    F14VectorSet<int> set;
+    set.insert(10);
+    EXPECT_EQ(sizeof(set), 8 + 2 * sizeof(void*));
+    EXPECT_EQ(set.getAllocatedMemorySize(), 32);
+  }
+}
+
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+TEST(F14VectorMap, reverseIterator) {
   using TSet = F14VectorSet<uint64_t>;
   auto populate = [](TSet& h, uint64_t lo, uint64_t hi) {
     for (auto i = lo; i < hi; ++i) {
@@ -540,6 +812,33 @@ TEST(F14VectorMap, reverse_iterator) {
   }
 }
 
+TEST(F14VectorSet, OrderPreservingReinsertionView) {
+  F14VectorSet<int> s1;
+  for (size_t i = 0; i < 5; ++i) {
+    s1.emplace(i);
+  }
+
+  F14VectorSet<int> s2;
+  for (const auto& k : order_preserving_reinsertion_view(s1)) {
+    s2.insert(k);
+  }
+
+  EXPECT_EQ(asVector(s1), asVector(s2));
+}
+#endif
+
+TEST(F14ValueSet, eraseWhileIterating) {
+  runEraseWhileIterating<F14ValueSet<int>>();
+}
+
+TEST(F14NodeSet, eraseWhileIterating) {
+  runEraseWhileIterating<F14NodeSet<int>>();
+}
+
+TEST(F14VectorSet, eraseWhileIterating) {
+  runEraseWhileIterating<F14VectorSet<int>>();
+}
+
 TEST(F14ValueSet, rehash) {
   runRehash<F14ValueSet<std::string>>();
 }
@@ -564,19 +863,23 @@ TEST(F14VectorSet, random) {
   runRandom<F14VectorSet<uint64_t>>();
 }
 
-TEST(F14ValueSet, grow_stats) {
+TEST(F14ValueSet, growStats) {
+  SKIP_IF(kFallback);
+
   F14ValueSet<uint64_t> h;
   for (unsigned i = 1; i <= 3072; ++i) {
     h.insert(i);
   }
   // F14ValueSet just before rehash
-  F14TableStats::compute(h);
+  runSanityChecks(h);
   h.insert(0);
   // F14ValueSet just after rehash
-  F14TableStats::compute(h);
+  runSanityChecks(h);
 }
 
-TEST(F14ValueSet, steady_state_stats) {
+TEST(F14ValueSet, steadyStateStats) {
+  SKIP_IF(kFallback);
+
   // 10k keys, 14% probability of insert, 90% chance of erase, so the
   // table should converge to 1400 size without triggering the rehash
   // that would occur at 1536.
@@ -591,15 +894,17 @@ TEST(F14ValueSet, steady_state_stats) {
       h.erase(key);
     }
     if (((i + 1) % 10000) == 0) {
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
       auto stats = F14TableStats::compute(h);
       // Verify that average miss probe length is bounded despite continued
       // erase + reuse.  p99 of the average across 10M random steps is 4.69,
       // average is 2.96.
       EXPECT_LT(f14::expectedProbe(stats.missProbeLengthHisto), 10.0);
+#endif
     }
   }
   // F14ValueSet at steady state
-  F14TableStats::compute(h);
+  runSanityChecks(h);
 }
 
 // S should be a set of Tracked<0>.  F should take a set
@@ -614,7 +919,7 @@ void runInsertCases(std::string const& /* name */, F const& insertFunc) {
     insertFunc(s, k);
     // fresh key, value_type const& ->
     // copy is expected
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{1, 0, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{1, 0, 0, 0}), 0);
   }
   {
     typename S::value_type k{0};
@@ -623,7 +928,7 @@ void runInsertCases(std::string const& /* name */, F const& insertFunc) {
     insertFunc(s, std::move(k));
     // fresh key, value_type&& ->
     // move is expected
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 1, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 1, 0, 0}), 0);
   }
 }
 
@@ -650,12 +955,12 @@ void runInsertAndEmplace() {
     resetTracking();
     EXPECT_TRUE(s.insert(k1).second);
     // copy is expected on successful insert
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{1, 0, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{1, 0, 0, 0}), 0);
 
     resetTracking();
     EXPECT_FALSE(s.insert(k2).second);
     // no copies or moves on failing insert
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 0, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 0, 0, 0}), 0);
   }
   {
     typename S::value_type k1{0};
@@ -664,64 +969,80 @@ void runInsertAndEmplace() {
     resetTracking();
     EXPECT_TRUE(s.insert(std::move(k1)).second);
     // move is expected on successful insert
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 1, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 1, 0, 0}), 0);
 
     resetTracking();
     EXPECT_FALSE(s.insert(std::move(k2)).second);
     // no copies or moves on failing insert
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 0, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 0, 0, 0}), 0);
   }
   {
     typename S::value_type k1{0};
     typename S::value_type k2{0};
     uint64_t k3 = 0;
-    uint64_t k4 = 10;
     S s;
     resetTracking();
     EXPECT_TRUE(s.emplace(k1).second);
     // copy is expected on successful emplace
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{1, 0, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{1, 0, 0, 0}), 0)
+        << Tracked<0>::counts();
 
     resetTracking();
     EXPECT_FALSE(s.emplace(k2).second);
-    // no copies or moves on failing emplace with value_type
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 0, 0, 0}), 0);
+    if (!kFallback) {
+      // no copies or moves on failing emplace with value_type
+      EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 0, 0, 0}), 0)
+          << Tracked<0>::counts();
+    }
 
     resetTracking();
     EXPECT_FALSE(s.emplace(k3).second);
-    // copy convert expected for failing emplace with wrong type
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 0, 1, 0}), 0);
+    if (!kFallback) {
+      // copy convert expected for failing emplace with wrong type
+      EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 0, 1, 0}), 0)
+          << Tracked<0>::counts();
+    }
 
+    s.clear();
     resetTracking();
-    EXPECT_TRUE(s.emplace(k4).second);
+    EXPECT_TRUE(s.emplace(k3).second);
     // copy convert + move expected for successful emplace with wrong type
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 1, 1, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 1, 1, 0}), 0)
+        << Tracked<0>::counts();
   }
   {
     typename S::value_type k1{0};
     typename S::value_type k2{0};
     uint64_t k3 = 0;
-    uint64_t k4 = 10;
     S s;
     resetTracking();
     EXPECT_TRUE(s.emplace(std::move(k1)).second);
     // move is expected on successful emplace
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 1, 0, 0}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 1, 0, 0}), 0)
+        << Tracked<0>::counts();
 
     resetTracking();
     EXPECT_FALSE(s.emplace(std::move(k2)).second);
-    // no copies or moves on failing emplace with value_type
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 0, 0, 0}), 0);
+    if (!kFallback) {
+      // no copies or moves on failing emplace with value_type
+      EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 0, 0, 0}), 0)
+          << Tracked<0>::counts();
+    }
 
     resetTracking();
     EXPECT_FALSE(s.emplace(std::move(k3)).second);
-    // move convert expected for failing emplace with wrong type
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 0, 0, 1}), 0);
+    if (!kFallback) {
+      // move convert expected for failing emplace with wrong type
+      EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 0, 0, 1}), 0)
+          << Tracked<0>::counts();
+    }
 
+    s.clear();
     resetTracking();
-    EXPECT_TRUE(s.emplace(std::move(k4)).second);
+    EXPECT_TRUE(s.emplace(std::move(k3)).second);
     // move convert + move expected for successful emplace with wrong type
-    EXPECT_EQ(Tracked<0>::counts.dist(Counts{0, 1, 0, 1}), 0);
+    EXPECT_EQ(Tracked<0>::counts().dist(Counts{0, 1, 0, 1}), 0)
+        << Tracked<0>::counts();
   }
 
   // Calling the default pair constructor via emplace is valid, but not
@@ -729,10 +1050,13 @@ void runInsertAndEmplace() {
   S s;
   typename S::value_type k;
   EXPECT_EQ(s.count(k), 0);
+  EXPECT_FALSE(s.contains(k));
   s.emplace();
   EXPECT_EQ(s.count(k), 1);
+  EXPECT_TRUE(s.contains(k));
   s.emplace();
   EXPECT_EQ(s.count(k), 1);
+  EXPECT_TRUE(s.contains(k));
 }
 
 TEST(F14ValueSet, destructuring) {
@@ -747,16 +1071,25 @@ TEST(F14VectorSet, destructuring) {
   runInsertAndEmplace<F14VectorSet<Tracked<0>>>();
 }
 
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
 TEST(F14ValueSet, maxSize) {
   F14ValueSet<int> s;
   EXPECT_EQ(
-      s.max_size(), std::numeric_limits<std::size_t>::max() / sizeof(int));
+      s.max_size(),
+      std::min(
+          folly::f14::detail::SizeAndChunkShift::kMaxSize,
+          std::allocator_traits<decltype(s)::allocator_type>::max_size(
+              s.get_allocator())));
 }
 
 TEST(F14NodeSet, maxSize) {
   F14NodeSet<int> s;
   EXPECT_EQ(
-      s.max_size(), std::numeric_limits<std::size_t>::max() / sizeof(int));
+      s.max_size(),
+      std::min(
+          folly::f14::detail::SizeAndChunkShift::kMaxSize,
+          std::allocator_traits<decltype(s)::allocator_type>::max_size(
+              s.get_allocator())));
 }
 
 TEST(F14VectorSet, maxSize) {
@@ -764,9 +1097,12 @@ TEST(F14VectorSet, maxSize) {
   EXPECT_EQ(
       s.max_size(),
       std::min(
-          std::size_t{std::numeric_limits<uint32_t>::max()},
-          std::numeric_limits<std::size_t>::max() / sizeof(int)));
+          {folly::f14::detail::SizeAndChunkShift::kMaxSize,
+           std::size_t{std::numeric_limits<uint32_t>::max()},
+           std::allocator_traits<decltype(s)::allocator_type>::max_size(
+               s.get_allocator())}));
 }
+#endif
 
 template <typename S>
 void runMoveOnlyTest() {
@@ -782,19 +1118,19 @@ void runMoveOnlyTest() {
 }
 
 TEST(F14ValueSet, moveOnly) {
-  runMoveOnlyTest<F14ValueSet<f14::MoveOnlyTestInt>>();
+  runMoveOnlyTest<F14ValueSet<MoveOnlyTestInt>>();
 }
 
 TEST(F14NodeSet, moveOnly) {
-  runMoveOnlyTest<F14NodeSet<f14::MoveOnlyTestInt>>();
+  runMoveOnlyTest<F14NodeSet<MoveOnlyTestInt>>();
 }
 
 TEST(F14VectorSet, moveOnly) {
-  runMoveOnlyTest<F14VectorSet<f14::MoveOnlyTestInt>>();
+  runMoveOnlyTest<F14VectorSet<MoveOnlyTestInt>>();
 }
 
 TEST(F14FastSet, moveOnly) {
-  runMoveOnlyTest<F14FastSet<f14::MoveOnlyTestInt>>();
+  runMoveOnlyTest<F14FastSet<MoveOnlyTestInt>>();
 }
 
 template <typename S>
@@ -819,6 +1155,10 @@ void runEraseIntoTest() {
   EXPECT_TRUE(t0.find(20) != t0.end());
 
   t1.insert(20);
+  t1.eraseInto(t1.cbegin(), insertIntoT0);
+  EXPECT_TRUE(t1.empty());
+
+  t1.insert(20);
   t1.insert(30);
   t1.insert(40);
   t1.eraseInto(t1.begin(), t1.end(), insertIntoT0Mut);
@@ -841,33 +1181,33 @@ void runEraseIntoTest() {
 }
 
 TEST(F14ValueSet, eraseInto) {
-  runEraseIntoTest<F14ValueSet<f14::MoveOnlyTestInt>>();
+  runEraseIntoTest<F14ValueSet<MoveOnlyTestInt>>();
 }
 
 TEST(F14NodeSet, eraseInto) {
-  runEraseIntoTest<F14NodeSet<f14::MoveOnlyTestInt>>();
+  runEraseIntoTest<F14NodeSet<MoveOnlyTestInt>>();
 }
 
 TEST(F14VectorSet, eraseInto) {
-  runEraseIntoTest<F14VectorSet<f14::MoveOnlyTestInt>>();
+  runEraseIntoTest<F14VectorSet<MoveOnlyTestInt>>();
 }
 
 TEST(F14FastSet, eraseInto) {
-  runEraseIntoTest<F14FastSet<f14::MoveOnlyTestInt>>();
+  runEraseIntoTest<F14FastSet<MoveOnlyTestInt>>();
 }
 
 TEST(F14ValueSet, heterogeneous) {
   // note: std::string is implicitly convertible to but not from StringPiece
-  using Hasher = folly::transparent<folly::hasher<folly::StringPiece>>;
-  using KeyEqual = folly::transparent<std::equal_to<folly::StringPiece>>;
+  using Hasher = transparent<hasher<StringPiece>>;
+  using KeyEqual = transparent<std::equal_to<StringPiece>>;
 
   constexpr auto hello = "hello"_sp;
   constexpr auto buddy = "buddy"_sp;
   constexpr auto world = "world"_sp;
 
   F14ValueSet<std::string, Hasher, KeyEqual> set;
-  set.emplace(hello.str());
-  set.emplace(world.str());
+  set.emplace(hello);
+  set.emplace(world);
 
   auto checks = [hello, buddy](auto& ref) {
     // count
@@ -878,9 +1218,29 @@ TEST(F14ValueSet, heterogeneous) {
     EXPECT_TRUE(ref.end() == ref.find(buddy));
     EXPECT_EQ(hello, *ref.find(hello));
 
+    const auto buddyHashToken = ref.prehash(buddy);
+    const auto helloHashToken = ref.prehash(hello);
+
+    EXPECT_TRUE(
+        buddyHashToken == ref.prehash(buddy, ref.hash_function()(buddy)));
+    EXPECT_TRUE(
+        helloHashToken == ref.prehash(hello, ref.hash_function()(hello)));
+#if FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
+    EXPECT_FALSE(
+        buddyHashToken == ref.prehash(hello, ref.hash_function()(hello)));
+#endif
+
     // prehash + find
-    EXPECT_TRUE(ref.end() == ref.find(ref.prehash(buddy), buddy));
-    EXPECT_EQ(hello, *ref.find(ref.prehash(hello), hello));
+    EXPECT_TRUE(ref.end() == ref.find(buddyHashToken, buddy));
+    EXPECT_EQ(hello, *ref.find(helloHashToken, hello));
+
+    // contains
+    EXPECT_FALSE(ref.contains(buddy));
+    EXPECT_TRUE(ref.contains(hello));
+
+    // contains with prehash
+    EXPECT_FALSE(ref.contains(buddyHashToken, buddy));
+    EXPECT_TRUE(ref.contains(helloHashToken, hello));
 
     // equal_range
     EXPECT_TRUE(std::make_pair(ref.end(), ref.end()) == ref.equal_range(buddy));
@@ -890,7 +1250,7 @@ TEST(F14ValueSet, heterogeneous) {
   };
 
   checks(set);
-  checks(folly::as_const(set));
+  checks(std::as_const(set));
 }
 
 template <typename S>
@@ -973,12 +1333,13 @@ void runHeterogeneousInsertTest() {
 
   resetTracking();
   EXPECT_EQ(set.count(10), 0);
-  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+  EXPECT_FALSE(set.contains(10));
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
       << Tracked<1>::counts;
 
   resetTracking();
   set.insert(10);
-  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 1}), 0)
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 1}), 0)
       << Tracked<1>::counts;
 
   resetTracking();
@@ -991,26 +1352,63 @@ void runHeterogeneousInsertTest() {
       std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
   set.emplace(10);
   set.emplace(k);
-  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
       << Tracked<1>::counts;
 
   resetTracking();
   set.erase(20);
   EXPECT_EQ(set.size(), 1);
-  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
       << Tracked<1>::counts;
 
   resetTracking();
   set.erase(10);
   EXPECT_EQ(set.size(), 0);
-  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
+      << Tracked<1>::counts;
+
+  set.insert(10);
+  resetTracking();
+  set.erase(set.find(10));
+  EXPECT_EQ(set.size(), 0);
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
       << Tracked<1>::counts;
 
   set.insert(10);
   resetTracking();
   set.eraseInto(10, [](auto&&) {});
-  EXPECT_EQ(Tracked<1>::counts.dist(Counts{0, 0, 0, 0}), 0)
+  EXPECT_EQ(Tracked<1>::counts().dist(Counts{0, 0, 0, 0}), 0)
       << Tracked<1>::counts;
+}
+
+template <typename S>
+void runHeterogeneousInsertStringTest() {
+  S set;
+  StringPiece k{"foo"};
+  std::vector<StringPiece> v{k};
+
+  set.insert(k);
+  set.insert("foo");
+  set.insert(StringPiece{"foo"});
+  set.insert(v.begin(), v.end());
+  set.insert(
+      std::make_move_iterator(v.begin()), std::make_move_iterator(v.end()));
+
+  set.emplace();
+  set.emplace(k);
+  set.emplace("foo");
+  set.emplace(StringPiece("foo"));
+
+  set.erase("");
+  set.erase(k);
+  set.erase(StringPiece{"foo"});
+  EXPECT_TRUE(set.empty());
+
+  set.insert(k);
+  set.erase(set.find(k));
+  set.insert(k);
+  typename S::const_iterator it = set.find(k);
+  set.erase(it);
 }
 
 TEST(F14ValueSet, heterogeneousInsert) {
@@ -1018,6 +1416,11 @@ TEST(F14ValueSet, heterogeneousInsert) {
       Tracked<1>,
       TransparentTrackedHash<1>,
       TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14ValueSet<
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14ValueSet<std::string>>();
 }
 
 TEST(F14NodeSet, heterogeneousInsert) {
@@ -1025,6 +1428,11 @@ TEST(F14NodeSet, heterogeneousInsert) {
       Tracked<1>,
       TransparentTrackedHash<1>,
       TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14NodeSet<
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14NodeSet<std::string>>();
 }
 
 TEST(F14VectorSet, heterogeneousInsert) {
@@ -1032,6 +1440,11 @@ TEST(F14VectorSet, heterogeneousInsert) {
       Tracked<1>,
       TransparentTrackedHash<1>,
       TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14VectorSet<
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14VectorSet<std::string>>();
 }
 
 TEST(F14FastSet, heterogeneousInsert) {
@@ -1039,18 +1452,77 @@ TEST(F14FastSet, heterogeneousInsert) {
       Tracked<1>,
       TransparentTrackedHash<1>,
       TransparentTrackedEqual<1>>>();
+  runHeterogeneousInsertStringTest<F14FastSet<
+      std::string,
+      transparent<hasher<StringPiece>>,
+      transparent<DefaultKeyEqual<StringPiece>>>>();
+  runHeterogeneousInsertStringTest<F14FastSet<std::string>>();
+}
+
+namespace {
+
+// std::is_convertible is not transitive :( Problem scenario: B<T> is
+// implicitly convertible to A, so hasher that takes A can be used as a
+// transparent hasher for a map with key of type B<T>. C is implicitly
+// convertible to any B<T>, but we have to disable heterogeneous find
+// for C.  There is no way to infer the T of the intermediate type so C
+// can't be used to explicitly construct A.
+
+struct A {
+  int value;
+
+  bool operator==(A const& rhs) const { return value == rhs.value; }
+  bool operator!=(A const& rhs) const { return !(*this == rhs); }
+};
+
+struct AHasher {
+  std::size_t operator()(A const& v) const { return v.value; }
+};
+
+template <typename T>
+struct B {
+  int value;
+
+  explicit B(int v) : value(v) {}
+
+  /* implicit */ B(A const& v) : value(v.value) {}
+
+  /* implicit */ operator A() const { return A{value}; }
+};
+
+struct C {
+  int value;
+
+  template <typename T>
+  /* implicit */ operator B<T>() const {
+    return B<T>{value};
+  }
+};
+} // namespace
+
+TEST(F14FastSet, disabledDoubleTransparent) {
+  static_assert(std::is_convertible<B<char>, A>::value, "");
+  static_assert(std::is_convertible<C, B<char>>::value, "");
+  static_assert(!std::is_convertible<C, A>::value, "");
+
+  F14FastSet<B<char>, transparent<AHasher>, transparent<std::equal_to<A>>> set;
+  set.emplace(A{10});
+
+  EXPECT_TRUE(set.find(C{10}) != set.end());
+  EXPECT_TRUE(set.find(C{20}) == set.end());
 }
 
 namespace {
 struct CharArrayHasher {
   template <std::size_t N>
   std::size_t operator()(std::array<char, N> const& value) const {
-    return folly::Hash{}(StringPiece{value.begin(), value.end()});
+    return Hash{}(StringPiece{value.data(), &value.data()[value.size()]});
   }
 };
 
 template <
-    template <typename, typename, typename, typename> class S,
+    template <typename, typename, typename, typename>
+    class S,
     std::size_t N>
 struct RunAllValueSizeTests {
   void operator()() const {
@@ -1080,6 +1552,188 @@ TEST(F14ValueSet, valueSize) {
   RunAllValueSizeTests<F14ValueSet, 32>{}();
 }
 
-///////////////////////////////////
-#endif // FOLLY_F14_VECTOR_INTRINSICS_AVAILABLE
-///////////////////////////////////
+template <typename S, typename F>
+void runRandomInsertOrderTest(F&& func) {
+  if (FOLLY_F14_PERTURB_INSERTION_ORDER) {
+    std::string prev;
+    bool diffFound = false;
+    for (int tries = 0; tries < 100; ++tries) {
+      S set;
+      for (char x = '0'; x <= '9'; ++x) {
+        set.emplace(func(x));
+      }
+      std::string s;
+      for (auto&& e : set) {
+        s += e;
+      }
+      LOG(INFO) << s << "\n";
+      if (prev.empty()) {
+        prev = s;
+        continue;
+      }
+      if (prev != s) {
+        diffFound = true;
+        break;
+      }
+    }
+    EXPECT_TRUE(diffFound) << "no randomness found in insert order";
+  }
+}
+
+TEST(F14Set, randomInsertOrder) {
+  runRandomInsertOrderTest<F14ValueSet<char>>([](char x) { return x; });
+  runRandomInsertOrderTest<F14FastSet<char>>([](char x) { return x; });
+  runRandomInsertOrderTest<F14FastSet<std::string>>([](char x) {
+    return std::string{std::size_t{1}, x};
+  });
+}
+
+template <template <class...> class TSet>
+void testContainsWithPrecomputedHash() {
+  TSet<int> m{};
+  const auto key{1};
+  m.insert(key);
+  const auto hashToken = m.prehash(key);
+  EXPECT_TRUE(m.contains(hashToken, key));
+  const auto otherKey{2};
+  const auto hashTokenNotFound = m.prehash(otherKey);
+  EXPECT_FALSE(m.contains(hashTokenNotFound, otherKey));
+  m.prefetch(hashToken);
+  m.prefetch(hashTokenNotFound);
+}
+
+TEST(F14Set, containsWithPrecomputedHash) {
+  testContainsWithPrecomputedHash<F14ValueSet>();
+  testContainsWithPrecomputedHash<F14NodeSet>();
+  testContainsWithPrecomputedHash<F14VectorSet>();
+  testContainsWithPrecomputedHash<F14FastSet>();
+}
+
+template <template <class...> class TSet>
+void testEraseIf() {
+  TSet<int> s{1, 2, 3, 4};
+  const auto isEvenKey = [](const auto& key) { return key % 2 == 0; };
+  EXPECT_EQ(2u, erase_if(s, isEvenKey));
+  ASSERT_EQ(2u, s.size());
+  EXPECT_TRUE(s.contains(1));
+  EXPECT_TRUE(s.contains(3));
+}
+
+TEST(F14Set, eraseIf) {
+  testEraseIf<F14ValueSet>();
+  testEraseIf<F14FastSet>();
+  testEraseIf<F14VectorSet>();
+  testEraseIf<F14NodeSet>();
+}
+
+template <template <class...> class TSet>
+void testExceptionOnInsert() {
+  TSet<ThrowOnCopyTestInt> m{};
+  ThrowOnCopyTestInt key;
+  EXPECT_THROW(m.insert(key), std::exception);
+  EXPECT_TRUE(m.empty());
+}
+
+TEST(F14Set, ExceptionOnInsert) {
+  testExceptionOnInsert<F14ValueSet>();
+  testExceptionOnInsert<F14NodeSet>();
+  testExceptionOnInsert<F14VectorSet>();
+  testExceptionOnInsert<F14FastSet>();
+}
+
+template <template <class...> class TSet>
+void testIterDeductionGuide() {
+  TSet<int> source({1, 2});
+
+  TSet dest1(source.begin(), source.end());
+  static_assert(std::is_same_v<decltype(dest1), decltype(source)>);
+  EXPECT_EQ(dest1, source);
+
+  TSet dest2(source.begin(), source.end(), 2);
+  static_assert(std::is_same_v<decltype(dest2), decltype(source)>);
+  EXPECT_EQ(dest2, source);
+
+  TSet dest3(source.begin(), source.end(), 2, f14::DefaultHasher<int>{});
+  static_assert(std::is_same_v<decltype(dest3), decltype(source)>);
+  EXPECT_EQ(dest3, source);
+
+  TSet dest4(
+      source.begin(),
+      source.end(),
+      2,
+      f14::DefaultHasher<int>{},
+      f14::DefaultKeyEqual<int>{});
+  static_assert(std::is_same_v<decltype(dest4), decltype(source)>);
+  EXPECT_EQ(dest4, source);
+
+  TSet dest5(
+      source.begin(),
+      source.end(),
+      2,
+      f14::DefaultHasher<int>{},
+      f14::DefaultKeyEqual<int>{},
+      f14::DefaultAlloc<int>{});
+  static_assert(std::is_same_v<decltype(dest5), decltype(source)>);
+  EXPECT_EQ(dest5, source);
+
+  TSet dest6(source.begin(), source.end(), 2, f14::DefaultAlloc<int>{});
+  static_assert(std::is_same_v<decltype(dest6), decltype(source)>);
+  EXPECT_EQ(dest6, source);
+
+  TSet dest7(
+      source.begin(),
+      source.end(),
+      2,
+      f14::DefaultHasher<int>{},
+      f14::DefaultAlloc<int>{});
+  static_assert(std::is_same_v<decltype(dest7), decltype(source)>);
+  EXPECT_EQ(dest7, source);
+}
+
+TEST(F14Set, iterDeductionGuide) {
+  testIterDeductionGuide<F14ValueSet>();
+  testIterDeductionGuide<F14NodeSet>();
+  testIterDeductionGuide<F14VectorSet>();
+  testIterDeductionGuide<F14FastSet>();
+}
+
+template <template <class...> class TSet>
+void testInitializerListDeductionGuide() {
+  TSet<int> source({1, 2});
+
+  TSet dest1({1, 2}, 2);
+  static_assert(std::is_same_v<decltype(dest1), decltype(source)>);
+  EXPECT_EQ(dest1, source);
+
+  TSet dest2({1, 2}, 2, f14::DefaultHasher<int>{});
+  static_assert(std::is_same_v<decltype(dest2), decltype(source)>);
+  EXPECT_EQ(dest2, source);
+
+  TSet dest3({1, 2}, 2, f14::DefaultHasher<int>{}, f14::DefaultKeyEqual<int>{});
+  static_assert(std::is_same_v<decltype(dest3), decltype(source)>);
+  EXPECT_EQ(dest3, source);
+
+  TSet dest4(
+      {1, 2},
+      2,
+      f14::DefaultHasher<int>{},
+      f14::DefaultKeyEqual<int>{},
+      f14::DefaultAlloc<int>{});
+  static_assert(std::is_same_v<decltype(dest4), decltype(source)>);
+  EXPECT_EQ(dest4, source);
+
+  TSet dest5({1, 2}, 2, f14::DefaultAlloc<int>{});
+  static_assert(std::is_same_v<decltype(dest5), decltype(source)>);
+  EXPECT_EQ(dest5, source);
+
+  TSet dest6({1, 2}, 2, f14::DefaultHasher<int>{}, f14::DefaultAlloc<int>{});
+  static_assert(std::is_same_v<decltype(dest6), decltype(source)>);
+  EXPECT_EQ(dest6, source);
+}
+
+TEST(F14Set, initializerListDeductionGuide) {
+  testInitializerListDeductionGuide<F14ValueSet>();
+  testInitializerListDeductionGuide<F14NodeSet>();
+  testInitializerListDeductionGuide<F14VectorSet>();
+  testInitializerListDeductionGuide<F14FastSet>();
+}

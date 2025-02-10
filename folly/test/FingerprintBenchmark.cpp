@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,12 +21,11 @@
 #include <folly/Format.h>
 #include <folly/detail/SlowFingerprint.h>
 
-using namespace std;
 using namespace folly;
 using folly::detail::SlowFingerprint;
 
 namespace {
-constexpr int kMaxIds = 64 << 10;  // 64Ki
+constexpr int kMaxIds = 64 << 10; // 64Ki
 constexpr int kMaxTerms = 64 << 10;
 
 // Globals are generally bad, but this is a benchmark, so there.
@@ -55,6 +54,11 @@ void initialize() {
   }
 }
 
+template <template <int> class T, int Bits>
+constexpr size_t fpBits(tag_t<T<Bits>>) {
+  return Bits;
+}
+
 template <class FP>
 void fingerprintIds(int num_iterations, int num_ids) {
   for (int iter = 0; iter < num_iterations; iter++) {
@@ -64,9 +68,9 @@ void fingerprintIds(int num_iterations, int num_ids) {
     }
     // GOTCHA: if we don't actually call write(), compiler optimizes
     // away the inner loop!
-    uint64_t out;
-    fp.write(&out);
-    VLOG(1) << out;
+    uint64_t out[fpBits(tag<FP>) + 63 / 64]; // ceil(bits / 64.0)
+    fp.write(out);
+    compiler_must_not_elide(out);
   }
 }
 
@@ -79,42 +83,42 @@ void fingerprintTerms(int num_iterations, int num_terms) {
     }
     // GOTCHA: if we don't actually call write(), compiler optimizes
     // away the inner loop!
-    uint64_t out;
-    fp.write(&out);
-    VLOG(1) << out;
+    uint64_t out[fpBits(tag<FP>) + 63 / 64]; // ceil(bits / 64.0)
+    fp.write(out);
+    compiler_must_not_elide(out);
   }
 }
 
 void fastFingerprintIds64(int num_iterations, int num_ids) {
-  fingerprintIds<Fingerprint<64> >(num_iterations, num_ids);
+  fingerprintIds<Fingerprint<64>>(num_iterations, num_ids);
 }
 
 void slowFingerprintIds64(int num_iterations, int num_ids) {
-  fingerprintIds<SlowFingerprint<64> >(num_iterations, num_ids);
+  fingerprintIds<SlowFingerprint<64>>(num_iterations, num_ids);
 }
 
 void fastFingerprintIds96(int num_iterations, int num_ids) {
-  fingerprintIds<Fingerprint<96> >(num_iterations, num_ids);
+  fingerprintIds<Fingerprint<96>>(num_iterations, num_ids);
 }
 
 void fastFingerprintIds128(int num_iterations, int num_ids) {
-  fingerprintIds<Fingerprint<128> >(num_iterations, num_ids);
+  fingerprintIds<Fingerprint<128>>(num_iterations, num_ids);
 }
 
 void fastFingerprintTerms64(int num_iterations, int num_ids) {
-  fingerprintTerms<Fingerprint<64> >(num_iterations, num_ids);
+  fingerprintTerms<Fingerprint<64>>(num_iterations, num_ids);
 }
 
 void slowFingerprintTerms64(int num_iterations, int num_ids) {
-  fingerprintTerms<SlowFingerprint<64> >(num_iterations, num_ids);
+  fingerprintTerms<SlowFingerprint<64>>(num_iterations, num_ids);
 }
 
 void fastFingerprintTerms96(int num_iterations, int num_ids) {
-  fingerprintTerms<Fingerprint<96> >(num_iterations, num_ids);
+  fingerprintTerms<Fingerprint<96>>(num_iterations, num_ids);
 }
 
 void fastFingerprintTerms128(int num_iterations, int num_ids) {
-  fingerprintTerms<Fingerprint<128> >(num_iterations, num_ids);
+  fingerprintTerms<Fingerprint<128>>(num_iterations, num_ids);
 }
 
 } // namespace
@@ -124,13 +128,14 @@ void fastFingerprintTerms128(int num_iterations, int num_ids) {
 // the benchmark without providing any useful data.
 
 int main(int argc, char** argv) {
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
-  # define BM(name, min, max) \
-  for (size_t i = min; i <= max; i *= 2) { \
-    addBenchmark( \
-        __FILE__, \
-        sformat("{}_{}", #name, i).c_str(), \
-        [=](int iters) { name(iters, i); return iters; }); \
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
+#define BM(name, min, max)                                             \
+  for (size_t i = min; i <= max; i *= 2) {                             \
+    addBenchmark(                                                      \
+        __FILE__, sformat("{}_{}", #name, i).c_str(), [=](int iters) { \
+          name(iters, i);                                              \
+          return iters;                                                \
+        });                                                            \
   }
   BM(fastFingerprintIds64, 1, kMaxIds)
   BM(slowFingerprintIds64, 1, kMaxIds)
@@ -140,7 +145,7 @@ int main(int argc, char** argv) {
   BM(slowFingerprintTerms64, 1, kMaxTerms)
   BM(fastFingerprintTerms96, 1, kMaxTerms)
   BM(fastFingerprintTerms128, 1, kMaxTerms)
-  # undef BM
+#undef BM
 
   initialize();
   runBenchmarks();

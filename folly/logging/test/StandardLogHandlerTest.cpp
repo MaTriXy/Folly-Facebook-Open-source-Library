@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/logging/StandardLogHandler.h>
 
 #include <folly/Conv.h>
@@ -32,8 +33,7 @@ namespace {
 class TestLogFormatter : public LogFormatter {
  public:
   std::string formatMessage(
-      const LogMessage& message,
-      const LogCategory* handlerCategory) override {
+      const LogMessage& message, const LogCategory* handlerCategory) override {
     return folly::to<std::string>(
         logLevelToString(message.getLevel()),
         "::",
@@ -51,18 +51,16 @@ class TestLogFormatter : public LogFormatter {
 
 class TestLogWriter : public LogWriter {
  public:
-  void writeMessage(folly::StringPiece buffer, uint32_t /* flags */ = 0)
-      override {
+  void writeMessage(
+      folly::StringPiece buffer, uint32_t /* flags */ = 0) override {
     messages_.emplace_back(buffer.str());
   }
   void flush() override {}
 
-  std::vector<std::string>& getMessages() {
-    return messages_;
-  }
-  const std::vector<std::string>& getMessages() const {
-    return messages_;
-  }
+  std::vector<std::string>& getMessages() { return messages_; }
+  const std::vector<std::string>& getMessages() const { return messages_; }
+
+  bool ttyOutput() const override { return false; }
 
  private:
   std::vector<std::string> messages_;
@@ -78,11 +76,13 @@ TEST(StandardLogHandler, simple) {
   auto logCategory = db.getCategory("log_cat");
   auto handlerCategory = db.getCategory("handler_cat");
 
-  LogMessage msg{logCategory,
-                 LogLevel::DBG8,
-                 "src/test.cpp",
-                 1234,
-                 std::string{"hello world"}};
+  LogMessage msg{
+      logCategory,
+      LogLevel::DBG8,
+      "src/test.cpp",
+      1234,
+      "testMethod",
+      std::string{"hello world"}};
   handler.handleMessage(msg, handlerCategory);
   ASSERT_EQ(1, writer->getMessages().size());
   EXPECT_EQ(
@@ -100,7 +100,8 @@ TEST(StandardLogHandler, levelCheck) {
   auto handlerCategory = db.getCategory("handler_cat");
 
   auto logMsg = [&](LogLevel level, folly::StringPiece message) {
-    LogMessage msg{logCategory, level, "src/test.cpp", 1234, message};
+    LogMessage msg{
+        logCategory, level, "src/test.cpp", 1234, "testMethod", message};
     handler.handleMessage(msg, handlerCategory);
   };
 

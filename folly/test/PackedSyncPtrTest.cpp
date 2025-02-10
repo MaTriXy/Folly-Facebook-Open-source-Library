@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,6 +23,8 @@
 
 #include <folly/portability/GTest.h>
 
+#if FOLLY_HAS_PACKED_SYNC_PTR
+
 using folly::PackedSyncPtr;
 
 namespace {
@@ -30,15 +32,18 @@ namespace {
 // Compile time check for packability.  This requires that
 // PackedSyncPtr is a POD struct on gcc.
 FOLLY_PACK_PUSH
-struct ignore { PackedSyncPtr<int> foo; char c; } FOLLY_PACK_ATTR;
+struct ignore {
+  FOLLY_PACK_ATTR PackedSyncPtr<int> foo;
+  char c;
+} FOLLY_PACK_ATTR;
 FOLLY_PACK_POP
 static_assert(sizeof(ignore) == 9, "PackedSyncPtr wasn't packable");
 
 } // namespace
 
 TEST(PackedSyncPtr, Basic) {
-  PackedSyncPtr<std::pair<int,int>> sp;
-  sp.init(new std::pair<int,int>[2]);
+  PackedSyncPtr<std::pair<int, int>> sp;
+  sp.init(new std::pair<int, int>[2]);
   EXPECT_EQ(sizeof(sp), 8);
   sp->first = 5;
   EXPECT_EQ(sp[0].first, 5);
@@ -57,7 +62,7 @@ TEST(PackedSyncPtr, Basic) {
   EXPECT_EQ(sp.extra(), 0x13);
   EXPECT_EQ((sp.get() + 1)->second, 7);
   delete[] sp.get();
-  auto newP = new std::pair<int,int>();
+  auto newP = new std::pair<int, int>();
   sp.set(newP);
   EXPECT_EQ(sp.extra(), 0x13);
   EXPECT_EQ(sp.get(), newP);
@@ -72,17 +77,12 @@ struct SyncVec {
   SyncVec() { base.init(); }
   ~SyncVec() { free(base.get()); }
   void push_back(const T& t) {
-    base.set((T*) realloc(base.get(),
-      (base.extra() + 1) * sizeof(T)));
+    base.set((T*)realloc(base.get(), (base.extra() + 1) * sizeof(T)));
     base[base.extra()] = t;
     base.setExtra(base.extra() + 1);
   }
-  void lock() {
-    base.lock();
-  }
-  void unlock() {
-    base.unlock();
-  }
+  void lock() { base.lock(); }
+  void unlock() { base.unlock(); }
 
   T* begin() const { return base.get(); }
   T* end() const { return base.get() + base.extra(); }
@@ -119,7 +119,7 @@ TEST(PackedSyncPtr, Application) {
     // Make sure every thread successfully inserted it's ID into every vec
     std::set<intptr_t> idsFound;
     for (auto& elem : kv.second) {
-      EXPECT_TRUE(idsFound.insert(elem).second);  // check for dups
+      EXPECT_TRUE(idsFound.insert(elem).second); // check for dups
     }
     EXPECT_EQ(idsFound.size(), nthrs); // check they are all there
   }
@@ -136,3 +136,5 @@ TEST(PackedSyncPtr, extraData) {
   EXPECT_EQ(p.get(), unaligned);
   p.unlock();
 }
+
+#endif

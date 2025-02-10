@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -50,23 +50,22 @@ inline void forEach(InputIterator first, InputIterator last, F&& f) {
   Baton baton;
 
   auto taskFunc = [&tasksTodo, &e, &f, &baton](size_t id, FuncType&& func) {
-    return [
-      id,
-      &tasksTodo,
-      &e,
-      &f,
-      &baton,
-      func_ = std::forward<FuncType>(func)
-    ]() mutable {
-      try {
-        callFuncs(std::forward<FuncType>(func_), f, id);
-      } catch (...) {
-        e = std::current_exception();
-      }
-      if (--tasksTodo == 0) {
-        baton.post();
-      }
-    };
+    return
+        [id,
+         &tasksTodo,
+         &e,
+         &f,
+         &baton,
+         func_ = std::forward<FuncType>(func)]() mutable {
+          try {
+            callFuncs(std::forward<FuncType>(func_), f, id);
+          } catch (...) {
+            e = current_exception();
+          }
+          if (--tasksTodo == 0) {
+            baton.post();
+          }
+        };
   };
 
   auto firstTask = first;

@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,13 +16,19 @@
 
 #pragma once
 
-#include <folly/ScopeGuard.h>
-#include <folly/io/IOBuf.h>
-
 #include <stdexcept>
 #include <string>
 
+#include <folly/ScopeGuard.h>
+#include <folly/io/IOBuf.h>
+
 namespace folly {
+
+namespace io {
+enum class CursorAccess;
+template <CursorAccess>
+class RWCursor;
+} // namespace io
 
 /**
  * An IOBufQueue encapsulates a chain of IOBufs and provides
@@ -34,35 +40,45 @@ namespace folly {
  */
 class IOBufQueue {
  private:
+  template <io::CursorAccess>
+  friend class io::RWCursor;
+
   /**
    * This guard should be taken by any method that intends to do any changes
    * to in data_ (e.g. appending to it).
    *
    * It flushes the writable tail cache and refills it on destruction.
+   *
+   * If while the guard is held new IOBufs are appended to the chain,
+   * allowTailReuse allows forking the old tail IOBuf so we can reuse its
+   * writable tail.
    */
-  auto updateGuard() {
+  auto updateGuard(bool allowTailReuse = false) {
     flushCache();
-    return folly::makeGuard([this] { updateWritableTailCache(); });
+    folly::IOBuf* oldTail =
+        (allowTailReuse && head_ != nullptr) ? head_->prev() : nullptr;
+    return folly::makeGuard([this, oldTail] {
+      if (oldTail != nullptr) {
+        maybeReuseTail(*oldTail);
+      }
+      updateWritableTailCache();
+    });
   }
 
   struct WritableRangeCacheData {
-    std::pair<uint8_t*, uint8_t*> cachedRange;
-    bool attached{false};
+    std::pair<uint8_t*, uint8_t*> cachedRange{};
+    bool attached{};
 
     WritableRangeCacheData() = default;
 
-    WritableRangeCacheData(WritableRangeCacheData&& other)
+    WritableRangeCacheData(WritableRangeCacheData&& other) noexcept
         : cachedRange(other.cachedRange), attached(other.attached) {
-      other.cachedRange = {};
-      other.attached = false;
+      other.cachedRange = std::pair<uint8_t*, uint8_t*>{};
+      other.attached = {};
     }
-    WritableRangeCacheData& operator=(WritableRangeCacheData&& other) {
-      cachedRange = other.cachedRange;
-      attached = other.attached;
-
-      other.cachedRange = {};
-      other.attached = false;
-
+    WritableRangeCacheData& operator=(WritableRangeCacheData&& other) noexcept {
+      cachedRange = std::exchange(other.cachedRange, {});
+      attached = std::exchange(other.attached, {});
       return *this;
     }
 
@@ -77,6 +93,9 @@ class IOBufQueue {
   };
 
   /**
+   * Get Options with cacheChainLength=true.
+   * @methodset Configuration
+   *
    * Commonly used Options, currently the only possible value other than
    * the default.
    */
@@ -110,7 +129,7 @@ class IOBufQueue {
      * Move constructor/assignment can move the cached range, but must update
      * the reference in IOBufQueue.
      */
-    WritableRangeCache(WritableRangeCache&& other)
+    WritableRangeCache(WritableRangeCache&& other) noexcept
         : data_(std::move(other.data_)), queue_(other.queue_) {
       if (data_.attached) {
         queue_->updateCacheRef(data_);
@@ -170,9 +189,7 @@ class IOBufQueue {
     /**
      * Get a pointer to the underlying IOBufQueue object.
      */
-    IOBufQueue* queue() {
-      return queue_;
-    }
+    IOBufQueue* queue() { return queue_; }
 
     /**
      * Return a pointer to the start of cached writable tail.
@@ -189,7 +206,7 @@ class IOBufQueue {
      *
      * Note: doesn't populate cache.
      */
-    size_t length() {
+    size_t length() const {
       dcheckIntegrity();
       return data_.cachedRange.second - data_.cachedRange.first;
     }
@@ -197,12 +214,12 @@ class IOBufQueue {
     /**
      * Mark n bytes as occupied (e.g. postallocate).
      */
-    void append(size_t n) {
+    void append(size_t n) noexcept {
       dcheckIntegrity();
       // This can happen only if somebody is misusing the interface.
       // E.g. calling append after touching IOBufQueue or without checking
       // the length().
-      if (LIKELY(data_.cachedRange.first != nullptr)) {
+      if (FOLLY_LIKELY(data_.cachedRange.first != nullptr)) {
         DCHECK_LE(n, length());
         data_.cachedRange.first += n;
       } else {
@@ -215,26 +232,20 @@ class IOBufQueue {
      * The caller must guarantee that the cache is set (e.g. the caller just
      * called fillCache or checked that it's not empty).
      */
-    void appendUnsafe(size_t n) {
-      data_.cachedRange.first += n;
-    }
+    void appendUnsafe(size_t n) { data_.cachedRange.first += n; }
 
     /**
      * Fill the cache of writable tail from the underlying IOBufQueue.
      */
-    void fillCache() {
-      queue_->fillWritableRangeCache(data_);
-    }
+    void fillCache() { queue_->fillWritableRangeCache(data_); }
 
    private:
     WritableRangeCacheData data_;
     IOBufQueue* queue_;
 
-    FOLLY_NOINLINE void appendSlow(size_t n) {
-      queue_->postallocate(n);
-    }
+    FOLLY_NOINLINE void appendSlow(size_t n) { queue_->postallocate(n); }
 
-    void dcheckIntegrity() {
+    void dcheckIntegrity() const {
       // Tail start should always be less than tail end.
       DCHECK_LE(
           (void*)data_.cachedRange.first, (void*)data_.cachedRange.second);
@@ -267,22 +278,35 @@ class IOBufQueue {
   ~IOBufQueue();
 
   /**
-   * Return a space to prepend bytes and the amount of headroom available.
+   * @brief Get writeable headroom
+   * @methodset Access
+   *
+   * @return A pair of buffer-address and writeable-length
    */
   std::pair<void*, std::size_t> headroom();
 
   /**
-   * Indicate that n bytes from the headroom have been used.
+   * @brief Indicate that n bytes from the headroom have been used.
+   * @methodset Shifting
+   *
+   * @note Prepending happens at the end of the available headroom. If this
+   * IOBufQueue's headroom() returns `{buf, len}`, then prepend(n) will
+   * cause a subsequent call to headroom() to return `{buf, len-n}`.
    */
   void markPrepended(std::size_t n);
 
   /**
-   * Prepend an existing range; throws std::overflow_error if not enough
-   * room.
+   * @brief Prepend an existing range
+   * @methodset Modifiers
+   *
+   * Throws std::overflow_error if not enough room.
    */
   void prepend(const void* buf, std::size_t n);
 
   /**
+   * @overloadbrief Append data.
+   * @methodset Modifiers
+   *
    * Add a buffer or buffer chain to the end of this queue. The
    * queue takes ownership of buf.
    *
@@ -290,16 +314,33 @@ class IOBufQueue {
    * by copying some data from the first buffers in the buf chain (and
    * releasing the buffers), if possible.  If pack is false, we leave
    * the chain topology unchanged.
+   *
+   * If allowTailReuse is true, the current tail is split and reappended at the
+   * end of the chain when possible and beneficial. This can reduce memory
+   * overhead when append() is interleaved with other writes: without this
+   * option, appending a new buffer strands the previous tail, even if there is
+   * room left. It is preferable to enable this only if the whole chain is
+   * likely to share the lifetime, since the split tail buffers hold the entire
+   * allocation of the buffer they were split from.
    */
-  void append(std::unique_ptr<folly::IOBuf>&& buf, bool pack = false);
+  void append(
+      std::unique_ptr<folly::IOBuf>&& buf,
+      bool pack = false,
+      bool allowTailReuse = false);
+  void append(
+      const folly::IOBuf& buf, bool pack = false, bool allowTailReuse = false);
+  void append(
+      folly::IOBuf&& buf, bool pack = false, bool allowTailReuse = false);
 
   /**
-   * Add a queue to the end of this queue. The queue takes ownership of
+   * Add a queue to the end of this queue. `this` takes ownership of
    * all buffers from the other queue.
    */
-  void append(IOBufQueue& other, bool pack = false);
-  void append(IOBufQueue&& other, bool pack = false) {
-    append(other, pack); // call lvalue reference overload, above
+  void append(
+      IOBufQueue& other, bool pack = false, bool allowTailReuse = false);
+  void append(
+      IOBufQueue&& other, bool pack = false, bool allowTailReuse = false) {
+    append(other, pack, allowTailReuse);
   }
 
   /**
@@ -312,11 +353,12 @@ class IOBufQueue {
    * Copy a string to the end of this queue.
    * The caller retains ownership of the source data.
    */
-  void append(StringPiece sp) {
-    append(sp.data(), sp.size());
-  }
+  void append(StringPiece sp) { append(sp.data(), sp.size()); }
 
   /**
+   * @brief Append a buffer by wrapping.
+   * @methodset Modifiers
+   *
    * Append a chain of IOBuf objects that point to consecutive regions
    * within buf.
    *
@@ -334,13 +376,15 @@ class IOBufQueue {
       std::size_t blockSize = (1U << 31)); // default block size: 2GB
 
   /**
-   * Obtain a writable block of contiguous bytes at the end of this
-   * queue, allocating more space if necessary.  The amount of space
-   * reserved will be at least min.  If min contiguous space is not
-   * available at the end of the queue, and IOBuf with size newAllocationSize
-   * is appended to the chain and returned.  The actual available space
-   * may be larger than newAllocationSize, but will be truncated to max,
-   * if specified.
+   * @brief Obtain a writable block of contiguous bytes at the end of this
+   * queue, allocating more space if necessary.
+   * @methodset Allocation
+   *
+   * The amount of space reserved will be at least min.  If min contiguous space
+   * is not available at the end of the queue, and IOBuf with size
+   * newAllocationSize is appended to the chain and returned.  The actual
+   * available space may be larger than newAllocationSize, but will be truncated
+   * to max, if specified.
    *
    * If the caller subsequently writes anything into the returned space,
    * it must call the postallocate() method.
@@ -348,10 +392,10 @@ class IOBufQueue {
    * @return The starting address of the block and the length in bytes.
    *
    * @note The point of the preallocate()/postallocate() mechanism is
-   *       to support I/O APIs such as Thrift's TAsyncSocket::ReadCallback
-   *       that request a buffer from the application and then, in a later
-   *       callback, tell the application how much of the buffer they've
-   *       filled with data.
+   *       to support I/O APIs such as AsyncSocket::ReadCallback that
+   *       request a buffer from the application and then, in a later
+   *       callback, tell the application how much of the buffer they
+   *       have filled with data.
    */
   std::pair<void*, std::size_t> preallocate(
       std::size_t min,
@@ -359,7 +403,7 @@ class IOBufQueue {
       std::size_t max = std::numeric_limits<std::size_t>::max()) {
     dcheckCacheIntegrity();
 
-    if (LIKELY(writableTail() != nullptr && tailroom() >= min)) {
+    if (FOLLY_LIKELY(writableTail() != nullptr && tailroom() >= min)) {
       return std::make_pair(
           writableTail(), std::min<std::size_t>(max, tailroom()));
     }
@@ -368,8 +412,9 @@ class IOBufQueue {
   }
 
   /**
-   * Tell the queue that the caller has written data into the first n
+   * @brief Tell the queue that the caller has written data into the first n
    * bytes provided by the previous preallocate() call.
+   * @methodset Allocation
    *
    * @note n should be less than or equal to the size returned by
    *       preallocate().  If n is zero, the caller may skip the call
@@ -377,7 +422,7 @@ class IOBufQueue {
    *       invoke any other non-const methods on this IOBufQueue between
    *       the call to preallocate and the call to postallocate().
    */
-  void postallocate(std::size_t n) {
+  void postallocate(std::size_t n) noexcept {
     dcheckCacheIntegrity();
     DCHECK_LE(
         (void*)(cachePtr_->cachedRange.first + n),
@@ -386,8 +431,12 @@ class IOBufQueue {
   }
 
   /**
-   * Obtain a writable block of n contiguous bytes, allocating more space
-   * if necessary, and mark it as used.  The caller can fill it later.
+   * @brief Obtain a writable block of n contiguous bytes, allocating more space
+   * if necessary, and mark it as used.
+   * @methodset Allocation
+   *
+   * The space is obtained at the end of the queue. The caller can fill it
+   * later.
    */
   void* allocate(std::size_t n) {
     void* p = preallocate(n, n).first;
@@ -395,19 +444,30 @@ class IOBufQueue {
     return p;
   }
 
-  void* writableTail() const {
+  /**
+   * @brief Get a pointer to the writable tail section.
+   * @methodset Access
+   */
+  void* writableTail() {
     dcheckCacheIntegrity();
     return cachePtr_->cachedRange.first;
   }
 
+  /**
+   * @brief Get the amount of free space at the end of the buffer.
+   * @methodset Access
+   */
   size_t tailroom() const {
     dcheckCacheIntegrity();
     return cachePtr_->cachedRange.second - cachePtr_->cachedRange.first;
   }
 
   /**
-   * Split off the first n bytes of the queue into a separate IOBuf chain,
-   * and transfer ownership of the new chain to the caller.  The IOBufQueue
+   * @brief Split off the first n bytes of the queue into a separate IOBuf
+   * chain.
+   * @methodset Modifiers
+   *
+   * Transfer ownership of the new chain to the caller.  The IOBufQueue
    * retains ownership of everything after the split point.
    *
    * @warning If the split point lies in the middle of some IOBuf within
@@ -417,11 +477,12 @@ class IOBufQueue {
    * @throws std::underflow_error if n exceeds the number of bytes
    *         in the queue.
    */
-  std::unique_ptr<folly::IOBuf> split(size_t n) {
-    return split(n, true);
-  }
+  std::unique_ptr<folly::IOBuf> split(size_t n) { return split(n, true); }
 
   /**
+   * @brief Split at most n bytes.
+   * @methodset Modifiers
+   *
    * Similar to split, but will return the entire queue instead of throwing
    * if n exceeds the number of bytes in the queue.
    */
@@ -430,31 +491,44 @@ class IOBufQueue {
   }
 
   /**
+   * @brief Remove bytes from the front.
+   * @methodset Shifting
+   *
    * Similar to IOBuf::trimStart, but works on the whole queue.  Will
    * pop off buffers that have been completely trimmed.
    */
   void trimStart(size_t amount);
 
   /**
+   * @brief Maybe remove bytes from the front.
+   * @methodset Shifting
+   *
    * Similar to trimStart, but will trim at most amount bytes and returns
    * the number of bytes trimmed.
    */
   size_t trimStartAtMost(size_t amount);
 
   /**
+   * @brief Remove bytes from the end.
+   * @methodset Shifting
+   *
    * Similar to IOBuf::trimEnd, but works on the whole queue.  Will
    * pop off buffers that have been completely trimmed.
    */
   void trimEnd(size_t amount);
 
   /**
+   * @brief Maybe remove bytes from the end.
+   * @methodset Shifting
+   *
    * Similar to trimEnd, but will trim at most amount bytes and returns
    * the number of bytes trimmed.
    */
   size_t trimEndAtMost(size_t amount);
 
   /**
-   * Transfer ownership of the queue's entire IOBuf chain to the caller.
+   * @brief Transfer ownership of the queue's entire IOBuf chain to the caller.
+   * @methodset Conversions
    */
   std::unique_ptr<folly::IOBuf> move() {
     auto guard = updateGuard();
@@ -463,8 +537,12 @@ class IOBufQueue {
     return res;
   }
 
+  /// @copydoc move()
+  folly::IOBuf moveAsValue() { return std::move(*move()); }
+
   /**
-   * Access the front IOBuf.
+   * @brief Access the front IOBuf.
+   * @methodset Access
    *
    * Note: caller will see the current state of the chain, but may not see
    *       future updates immediately, due to the presence of a tail cache.
@@ -479,18 +557,22 @@ class IOBufQueue {
   }
 
   /**
-   * returns the first IOBuf in the chain and removes it from the chain
+   * @brief Removes and returns the first IOBuf in the chain.
+   * @methodset Conversions
    *
    * @return first IOBuf in the chain or nullptr if none.
    */
   std::unique_ptr<folly::IOBuf> pop_front();
 
   /**
+   * @brief Get cached chain length.
+   * @methodset Capacity
+   *
    * Total chain length, only valid if cacheLength was specified in the
    * constructor.
    */
   size_t chainLength() const {
-    if (UNLIKELY(!options_.cacheChainLength)) {
+    if (FOLLY_UNLIKELY(!options_.cacheChainLength)) {
       throw std::invalid_argument("IOBufQueue: chain length not cached");
     }
     dcheckCacheIntegrity();
@@ -498,7 +580,8 @@ class IOBufQueue {
   }
 
   /**
-   * Returns true iff the IOBuf chain length is 0.
+   * @brief Returns true iff the IOBuf chain length is 0.
+   * @methodset Capacity
    */
   bool empty() const {
     dcheckCacheIntegrity();
@@ -506,30 +589,48 @@ class IOBufQueue {
         (head_->empty() && cachePtr_->cachedRange.first == tailStart_);
   }
 
-  const Options& options() const {
-    return options_;
-  }
-
   /**
-   * Clear the queue.  Note that this does not release the buffers, it
-   * just sets their length to zero; useful if you want to reuse the
-   * same queue without reallocating.
+   * @brief Get the options used to configure this IOBufQueue.
+   * @methodset Configuration
    */
-  void clear();
+  const Options& options() const { return options_; }
 
   /**
-   * Append the queue to a std::string. Non-destructive.
+   * @brief Clear the queue, freeing all the buffers.
+   * @methodset Allocation
+   *
+   * Options are preserved.
+   */
+  void reset() { move(); }
+
+  /**
+   * @brief Clear the queue, but try to clear and keep the largest buffer for
+   * reuse when possible.
+   * @methodset Allocation
+   *
+   * Options are preserved.
+   */
+  void clearAndTryReuseLargestBuffer();
+
+  /**
+   * @brief Append the queue to a std::string.
+   * @methodset Utility
+   *
+   * Non-destructive.
    */
   void appendToString(std::string& out) const;
 
   /**
-   * Calls IOBuf::gather() on the head of the queue, if it exists.
+   * @brief Calls IOBuf::gather() on the head of the queue, if it exists.
+   * @methodset Capacity
    */
   void gather(std::size_t maxLength);
 
   /** Movable */
   IOBufQueue(IOBufQueue&&) noexcept;
-  IOBufQueue& operator=(IOBufQueue&&);
+  IOBufQueue& operator=(IOBufQueue&&) noexcept;
+
+  static constexpr size_t kMaxPackCopy = 4096;
 
  private:
   std::unique_ptr<folly::IOBuf> split(size_t n, bool throwOnUnderflow);
@@ -556,7 +657,7 @@ class IOBufQueue {
   WritableRangeCacheData* cachePtr_{nullptr};
   WritableRangeCacheData localCache_;
 
-  void dcheckCacheIntegrity() const {
+  void dcheckCacheIntegrity() const noexcept {
     // Tail start should always be less than tail end.
     DCHECK_LE((void*)tailStart_, (void*)cachePtr_->cachedRange.first);
     DCHECK_LE(
@@ -570,19 +671,21 @@ class IOBufQueue {
     DCHECK(cachePtr_->attached);
 
     // Either cache is empty or it coincides with the tail.
-    DCHECK(
-        cachePtr_->cachedRange.first == nullptr ||
-        (head_ != nullptr && tailStart_ == head_->prev()->writableTail() &&
-         tailStart_ <= cachePtr_->cachedRange.first &&
-         cachePtr_->cachedRange.first >= head_->prev()->writableTail() &&
-         cachePtr_->cachedRange.second ==
-             head_->prev()->writableTail() + head_->prev()->tailroom()));
+    if (cachePtr_->cachedRange.first != nullptr) {
+      DCHECK(head_ != nullptr);
+      DCHECK(tailStart_ == head_->prev()->writableTail());
+      DCHECK(tailStart_ <= cachePtr_->cachedRange.first);
+      DCHECK(cachePtr_->cachedRange.first >= head_->prev()->writableTail());
+      DCHECK(
+          cachePtr_->cachedRange.second ==
+          head_->prev()->writableTail() + head_->prev()->tailroom());
+    }
   }
 
   /**
    * Populate dest with writable tail range cache.
    */
-  void fillWritableRangeCache(WritableRangeCacheData& dest) {
+  void fillWritableRangeCache(WritableRangeCacheData& dest) noexcept {
     dcheckCacheIntegrity();
     if (cachePtr_ != &dest) {
       dest = std::move(*cachePtr_);
@@ -593,7 +696,7 @@ class IOBufQueue {
   /**
    * Clear current writable tail cache and reset it to localCache_
    */
-  void clearWritableRangeCache() {
+  void clearWritableRangeCache() noexcept {
     flushCache();
 
     if (cachePtr_ != &localCache_) {
@@ -607,7 +710,7 @@ class IOBufQueue {
   /**
    * Commit any pending changes to the tail of the queue.
    */
-  void flushCache() const {
+  void flushCache() const noexcept {
     dcheckCacheIntegrity();
 
     if (tailStart_ != cachePtr_->cachedRange.first) {
@@ -623,17 +726,17 @@ class IOBufQueue {
   }
 
   // For WritableRangeCache move assignment/construction.
-  void updateCacheRef(WritableRangeCacheData& newRef) {
+  void updateCacheRef(WritableRangeCacheData& newRef) noexcept {
     cachePtr_ = &newRef;
   }
 
   /**
    * Update cached writable tail range. Called by updateGuard()
    */
-  void updateWritableTailCache() {
-    if (LIKELY(head_ != nullptr)) {
+  void updateWritableTailCache() noexcept {
+    if (FOLLY_LIKELY(head_ != nullptr)) {
       IOBuf* buf = head_->prev();
-      if (LIKELY(!buf->isSharedOne())) {
+      if (FOLLY_LIKELY(!buf->isSharedOne())) {
         tailStart_ = buf->writableTail();
         cachePtr_->cachedRange = std::pair<uint8_t*, uint8_t*>(
             tailStart_, tailStart_ + buf->tailroom());
@@ -645,9 +748,9 @@ class IOBufQueue {
   }
 
   std::pair<void*, std::size_t> preallocateSlow(
-      std::size_t min,
-      std::size_t newAllocationSize,
-      std::size_t max);
+      std::size_t min, std::size_t newAllocationSize, std::size_t max);
+
+  void maybeReuseTail(folly::IOBuf& oldTail);
 };
 
 } // namespace folly

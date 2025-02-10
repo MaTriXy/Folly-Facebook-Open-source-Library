@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,13 +20,16 @@ namespace detail {
 
 template <typename T>
 template <typename Tag, typename VaultTag>
-SingletonHolder<T>& SingletonHolder<T>::singleton() {
-  /* library-local */ static auto entry =
-      createGlobal<SingletonHolder<T>, std::pair<Tag, VaultTag>>([]() {
-        return new SingletonHolder<T>({typeid(T), typeid(Tag)},
-                                      *SingletonVault::singleton<VaultTag>());
-      });
-  return *entry;
+struct SingletonHolder<T>::Impl : SingletonHolder<T> {
+  Impl()
+      : SingletonHolder<T>(
+            {typeid(T), typeid(Tag)}, *SingletonVault::singleton<VaultTag>()) {}
+};
+
+template <typename T>
+template <typename Tag, typename VaultTag>
+inline SingletonHolder<T>& SingletonHolder<T>::singleton() {
+  return detail::createGlobal<Impl<Tag, VaultTag>, void>();
 }
 
 [[noreturn]] void singletonWarnDoubleRegistrationAndAbort(
@@ -53,6 +56,8 @@ void SingletonHolder<T>::registerSingleton(CreateFunc c, TeardownFunc t) {
      * Singleton<int> a([] { return new int(3); });
      * Singleton<int> b([] { return new int(4); });
      *
+     * Adding tags should fix this (see documentation in the header).
+     *
      */
     singletonWarnDoubleRegistrationAndAbort(type());
   }
@@ -68,7 +73,8 @@ void SingletonHolder<T>::registerSingletonMock(CreateFunc c, TeardownFunc t) {
   if (state_ == SingletonHolderState::NotRegistered) {
     detail::singletonWarnRegisterMockEarlyAndAbort(type());
   }
-  if (state_ == SingletonHolderState::Living) {
+  if (state_ == SingletonHolderState::Living ||
+      state_ == SingletonHolderState::LivingInChildAfterFork) {
     destroyInstance();
   }
 
@@ -89,8 +95,9 @@ void SingletonHolder<T>::registerSingletonMock(CreateFunc c, TeardownFunc t) {
 
 template <typename T>
 T* SingletonHolder<T>::get() {
-  if (LIKELY(state_.load(std::memory_order_acquire) ==
-             SingletonHolderState::Living)) {
+  if (FOLLY_LIKELY(
+          state_.load(std::memory_order_acquire) ==
+          SingletonHolderState::Living)) {
     return instance_ptr_;
   }
   createInstance();
@@ -104,28 +111,31 @@ T* SingletonHolder<T>::get() {
 
 template <typename T>
 std::weak_ptr<T> SingletonHolder<T>::get_weak() {
-  if (UNLIKELY(state_.load(std::memory_order_acquire) !=
-               SingletonHolderState::Living)) {
+  if (FOLLY_UNLIKELY(
+          state_.load(std::memory_order_acquire) !=
+          SingletonHolderState::Living)) {
     createInstance();
   }
 
-  return instance_weak_;
+  return instance_weak_core_cached_.get();
 }
 
 template <typename T>
 std::shared_ptr<T> SingletonHolder<T>::try_get() {
-  if (UNLIKELY(state_.load(std::memory_order_acquire) !=
-               SingletonHolderState::Living)) {
+  if (FOLLY_UNLIKELY(
+          state_.load(std::memory_order_acquire) !=
+          SingletonHolderState::Living)) {
     createInstance();
   }
 
-  return instance_weak_.lock();
+  return instance_weak_core_cached_.lock();
 }
 
 template <typename T>
 folly::ReadMostlySharedPtr<T> SingletonHolder<T>::try_get_fast() {
-  if (UNLIKELY(state_.load(std::memory_order_acquire) !=
-               SingletonHolderState::Living)) {
+  if (FOLLY_UNLIKELY(
+          state_.load(std::memory_order_acquire) !=
+          SingletonHolderState::Living)) {
     createInstance();
   }
 
@@ -133,8 +143,14 @@ folly::ReadMostlySharedPtr<T> SingletonHolder<T>::try_get_fast() {
 }
 
 template <typename T>
+template <typename Func>
+invoke_result_t<Func, T*> detail::SingletonHolder<T>::apply(Func f) {
+  return f(try_get().get());
+}
+
+template <typename T>
 void SingletonHolder<T>::vivify() {
-  if (UNLIKELY(
+  if (FOLLY_UNLIKELY(
           state_.load(std::memory_order_relaxed) !=
           SingletonHolderState::Living)) {
     createInstance();
@@ -155,15 +171,30 @@ void SingletonHolder<T>::preDestroyInstance(
 
 template <typename T>
 void SingletonHolder<T>::destroyInstance() {
+  if (state_.load(std::memory_order_relaxed) ==
+      SingletonHolderState::LivingInChildAfterFork) {
+    if (vault_.failOnUseAfterFork_) {
+      LOG(DFATAL) << "Attempting to destroy singleton " << type().name()
+                  << " in child process after fork";
+    } else {
+      LOG(ERROR) << "Attempting to destroy singleton " << type().name()
+                 << " in child process after fork";
+    }
+  }
   state_ = SingletonHolderState::Dead;
+  instance_core_cached_.reset();
   instance_.reset();
   instance_copy_.reset();
   if (destroy_baton_) {
     constexpr std::chrono::seconds kDestroyWaitTime{5};
+    auto const wait_options =
+        destroy_baton_->wait_options().logging_enabled(false);
     auto last_reference_released =
-        destroy_baton_->try_wait_for(kDestroyWaitTime);
+        destroy_baton_->try_wait_for(kDestroyWaitTime, wait_options);
     if (last_reference_released) {
+      vault_.addToShutdownLog("Destroying " + type().name());
       teardown_(instance_ptr_);
+      vault_.addToShutdownLog(type().name() + " destroyed.");
     } else {
       print_destructor_stack_trace_->store(true);
       detail::singletonWarnDestroyInstanceLeak(type(), instance_ptr_);
@@ -172,9 +203,18 @@ void SingletonHolder<T>::destroyInstance() {
 }
 
 template <typename T>
+void SingletonHolder<T>::inChildAfterFork() {
+  auto expected = SingletonHolderState::Living;
+  state_.compare_exchange_strong(
+      expected,
+      SingletonHolderState::LivingInChildAfterFork,
+      std::memory_order_relaxed,
+      std::memory_order_relaxed);
+}
+
+template <typename T>
 SingletonHolder<T>::SingletonHolder(
-    TypeDescriptor typeDesc,
-    SingletonVault& vault)
+    TypeDescriptor typeDesc, SingletonVault& vault) noexcept
     : SingletonHolderBase(typeDesc), vault_(vault) {}
 
 template <typename T>
@@ -196,7 +236,7 @@ bool SingletonHolder<T>::creationStarted() {
 template <typename T>
 void SingletonHolder<T>::createInstance() {
   if (creating_thread_.load(std::memory_order_acquire) ==
-        std::this_thread::get_id()) {
+      std::this_thread::get_id()) {
     detail::singletonWarnCreateCircularDependencyAndAbort(type());
   }
 
@@ -204,8 +244,25 @@ void SingletonHolder<T>::createInstance() {
   if (state_.load(std::memory_order_acquire) == SingletonHolderState::Living) {
     return;
   }
+  if (state_.load(std::memory_order_relaxed) ==
+      SingletonHolderState::LivingInChildAfterFork) {
+    if (vault_.failOnUseAfterFork_) {
+      LOG(DFATAL) << "Attempting to use singleton " << type().name()
+                  << " in child process after fork";
+    } else {
+      LOG(ERROR) << "Attempting to use singleton " << type().name()
+                 << " in child process after fork";
+    }
+    auto expected = SingletonHolderState::LivingInChildAfterFork;
+    state_.compare_exchange_strong(
+        expected,
+        SingletonHolderState::Living,
+        std::memory_order_relaxed,
+        std::memory_order_relaxed);
+    return;
+  }
   if (state_.load(std::memory_order_acquire) ==
-        SingletonHolderState::NotRegistered) {
+      SingletonHolderState::NotRegistered) {
     detail::singletonWarnCreateUnregisteredAndAbort(type());
   }
 
@@ -223,7 +280,8 @@ void SingletonHolder<T>::createInstance() {
   creating_thread_.store(std::this_thread::get_id(), std::memory_order_release);
 
   auto state = vault_.state_.rlock();
-  if (vault_.type_ != SingletonVault::Type::Relaxed &&
+  if (vault_.type_.load(std::memory_order_relaxed) !=
+          SingletonVault::Type::Relaxed &&
       !state->registrationComplete) {
     detail::singletonWarnCreateBeforeRegistrationCompleteAndAbort(type());
   }
@@ -233,13 +291,12 @@ void SingletonHolder<T>::createInstance() {
 
   auto destroy_baton = std::make_shared<folly::Baton<>>();
   auto print_destructor_stack_trace =
-    std::make_shared<std::atomic<bool>>(false);
+      std::make_shared<std::atomic<bool>>(false);
 
   // Can't use make_shared -- no support for a custom deleter, sadly.
   std::shared_ptr<T> instance(
       create_(),
-      [ destroy_baton, print_destructor_stack_trace, type = type() ](
-          T*) mutable {
+      [destroy_baton, print_destructor_stack_trace, type = type()](T*) mutable {
         destroy_baton->post();
         if (print_destructor_stack_trace->load()) {
           detail::singletonPrintDestructionStackTrace(type);
@@ -254,8 +311,10 @@ void SingletonHolder<T>::createInstance() {
 
   instance_weak_ = instance;
   instance_ptr_ = instance.get();
+  instance_core_cached_.reset(instance);
   instance_.reset(std::move(instance));
   instance_weak_fast_ = instance_;
+  instance_weak_core_cached_.reset(instance_core_cached_);
 
   destroy_baton_ = std::move(destroy_baton);
   print_destructor_stack_trace_ = std::move(print_destructor_stack_trace);
@@ -265,6 +324,7 @@ void SingletonHolder<T>::createInstance() {
   state_.store(SingletonHolderState::Living, std::memory_order_release);
 
   vault_.creationOrder_.wlock()->push_back(type());
+  vault_.instantiatedAtLeastOnce_.wlock()->insert(type());
 }
 
 } // namespace detail

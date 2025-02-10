@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,8 +15,10 @@
  */
 
 #include <folly/memory/MallctlHelper.h>
+
 #include <folly/Format.h>
 #include <folly/String.h>
+#include <folly/lang/Exception.h>
 
 #include <stdexcept>
 
@@ -24,10 +26,11 @@ namespace folly {
 
 namespace detail {
 
-[[noreturn]] void handleMallctlError(const char* cmd, int err) {
+[[noreturn]] void handleMallctlError(const char* fn, const char* cmd, int err) {
   assert(err != 0);
-  throw std::runtime_error(
-      sformat("mallctl {}: {} ({})", cmd, errnoStr(err), err));
+  cmd = cmd ? cmd : "<none>";
+  throw_exception<std::runtime_error>(
+      sformat("mallctl[{}] {}: {} ({})", fn, cmd, errnoStr(err), err));
 }
 
 } // namespace detail

@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,11 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
+
+#include <limits.h>
 #include <atomic>
 #include <memory>
 
 #include <folly/lang/SafeAssert.h>
+
+#if defined(__GLIBCXX__)
 
 namespace folly {
 namespace detail {
@@ -40,82 +45,24 @@ class shared_ptr_internals {
   typedef std::_Sp_counted_base<std::_S_atomic> counted_base;
   template <typename T>
   using CountedPtr = std::shared_ptr<T>;
-  template <typename T>
-  static counted_base* get_counted_base(const std::shared_ptr<T>& bar) {
-    // reinterpret_pointer_cast<const void>
-    // Not quite C++ legal, but explicit template instantiation access to
-    // private members requires full type name (i.e. shared_ptr<const void>, not
-    // shared_ptr<T>)
-    const std::shared_ptr<const void>& ptr(
-        reinterpret_cast<const std::shared_ptr<const void>&>(bar));
-    return (ptr.*fieldPtr(access_shared_ptr{})).*fieldPtr(access_base{});
-  }
-
-  static void inc_shared_count(counted_base* base, long count) {
-    // Check that we don't exceed the maximum number of atomic_shared_ptrs.
-    // Consider setting EXTERNAL_COUNT lower if this CHECK is hit.
-    FOLLY_SAFE_CHECK(
-        base->_M_get_use_count() + count < INT_MAX,
-        "atomic_shared_ptr overflow");
-    __gnu_cxx::__atomic_add_dispatch(
-        &(base->*fieldPtr(access_use_count{})), count);
-  }
 
   template <typename T>
-  static void release_shared(counted_base* base, long count) {
-    // If count == 1, this is equivalent to base->_M_release()
-    if (__gnu_cxx::__exchange_and_add_dispatch(
-            &(base->*fieldPtr(access_use_count{})), -count) == count) {
-      base->_M_dispose();
+  static counted_base* get_counted_base(const std::shared_ptr<T>& bar);
 
-      if (__gnu_cxx::__exchange_and_add_dispatch(
-              &(base->*fieldPtr(access_weak_count{})), -1) == 1) {
-        base->_M_destroy();
-      }
-    }
-  }
+  static void inc_shared_count(counted_base* base, long count);
 
   template <typename T>
-  static T* get_shared_ptr(counted_base* base) {
-    // See if this was a make_shared allocation
-    auto inplace = base->_M_get_deleter(typeid(std::_Sp_make_shared_tag));
-    if (inplace) {
-      return (T*)inplace;
-    }
-    // Could also be a _Sp_counted_deleter, but the layout is the same
-    using derived_type = std::_Sp_counted_ptr<const void*, std::_S_atomic>;
-    auto ptr = reinterpret_cast<derived_type*>(base);
-    return (T*)(ptr->*fieldPtr(access_counted_ptr_ptr{}));
-  }
+  static void release_shared(counted_base* base, long count);
 
   template <typename T>
-  static T* release_ptr(std::shared_ptr<T>& p) {
-    auto res = p.get();
-    std::shared_ptr<const void>& ptr(
-        reinterpret_cast<std::shared_ptr<const void>&>(p));
-    ptr.*fieldPtr(access_shared_ptr_ptr{}) = nullptr;
-    (ptr.*fieldPtr(access_refcount{})).*fieldPtr(access_base{}) = nullptr;
-    return res;
-  }
+  static T* get_shared_ptr(counted_base* base);
+
+  template <typename T>
+  static T* release_ptr(std::shared_ptr<T>& p);
 
   template <typename T>
   static std::shared_ptr<T> get_shared_ptr_from_counted_base(
-      counted_base* base,
-      bool inc = true) {
-    if (!base) {
-      return nullptr;
-    }
-    std::shared_ptr<const void> newp;
-    if (inc) {
-      inc_shared_count(base, 1);
-    }
-    newp.*fieldPtr(access_shared_ptr_ptr{}) =
-        get_shared_ptr<const void>(base); // _M_ptr
-    (newp.*fieldPtr(access_refcount{})).*fieldPtr(access_base{}) = base;
-    // reinterpret_pointer_cast<T>
-    auto res = reinterpret_cast<std::shared_ptr<T>*>(&newp);
-    return std::move(*res);
-  }
+      counted_base* base, bool inc = true);
 
  private:
   /* Accessors for private members using explicit template instantiation */
@@ -157,9 +104,7 @@ class shared_ptr_internals {
 
   template <typename Tag, typename Tag::type M>
   struct Rob {
-    friend typename Tag::type fieldPtr(Tag) {
-      return M;
-    }
+    friend typename Tag::type fieldPtr(Tag) { return M; }
   };
 };
 
@@ -185,5 +130,87 @@ template struct shared_ptr_internals::Rob<
     shared_ptr_internals::access_refcount,
     &std::__shared_ptr<const void, std::_S_atomic>::_M_refcount>;
 
+template <typename T>
+inline shared_ptr_internals::counted_base*
+shared_ptr_internals::get_counted_base(const std::shared_ptr<T>& bar) {
+  // reinterpret_pointer_cast<const void>
+  // Not quite C++ legal, but explicit template instantiation access to
+  // private members requires full type name (i.e. shared_ptr<const void>, not
+  // shared_ptr<T>)
+  const std::shared_ptr<const void>& ptr(
+      reinterpret_cast<const std::shared_ptr<const void>&>(bar));
+  return (ptr.*fieldPtr(access_shared_ptr{})).*fieldPtr(access_base{});
+}
+
+inline void shared_ptr_internals::inc_shared_count(
+    counted_base* base, long count) {
+  // Check that we don't exceed the maximum number of atomic_shared_ptrs.
+  // Consider setting EXTERNAL_COUNT lower if this CHECK is hit.
+  FOLLY_SAFE_CHECK(
+      base->_M_get_use_count() + count < INT_MAX, "atomic_shared_ptr overflow");
+  __gnu_cxx::__atomic_add_dispatch(
+      &(base->*fieldPtr(access_use_count{})), static_cast<int>(count));
+}
+
+template <typename T>
+inline void shared_ptr_internals::release_shared(
+    counted_base* base, long count) {
+  // If count == 1, this is equivalent to base->_M_release()
+  if (__gnu_cxx::__exchange_and_add_dispatch(
+          &(base->*fieldPtr(access_use_count{})), -static_cast<int>(count)) ==
+      count) {
+    base->_M_dispose();
+
+    if (__gnu_cxx::__exchange_and_add_dispatch(
+            &(base->*fieldPtr(access_weak_count{})), -1) == 1) {
+      base->_M_destroy();
+    }
+  }
+}
+
+template <typename T>
+inline T* shared_ptr_internals::get_shared_ptr(counted_base* base) {
+  // See if this was a make_shared allocation
+  auto inplace = base->_M_get_deleter(typeid(std::_Sp_make_shared_tag));
+  if (inplace) {
+    return (T*)inplace;
+  }
+  // Could also be a _Sp_counted_deleter, but the layout is the same
+  using derived_type = std::_Sp_counted_ptr<const void*, std::_S_atomic>;
+  auto ptr = reinterpret_cast<derived_type*>(base);
+  return (T*)(ptr->*fieldPtr(access_counted_ptr_ptr{}));
+}
+
+template <typename T>
+inline T* shared_ptr_internals::release_ptr(std::shared_ptr<T>& p) {
+  auto res = p.get();
+  std::shared_ptr<const void>& ptr(
+      reinterpret_cast<std::shared_ptr<const void>&>(p));
+  ptr.*fieldPtr(access_shared_ptr_ptr{}) = nullptr;
+  (ptr.*fieldPtr(access_refcount{})).*fieldPtr(access_base{}) = nullptr;
+  return res;
+}
+
+template <typename T>
+inline std::shared_ptr<T>
+shared_ptr_internals::get_shared_ptr_from_counted_base(
+    counted_base* base, bool inc) {
+  if (!base) {
+    return nullptr;
+  }
+  std::shared_ptr<const void> newp;
+  if (inc) {
+    inc_shared_count(base, 1);
+  }
+  newp.*fieldPtr(access_shared_ptr_ptr{}) =
+      get_shared_ptr<const void>(base); // _M_ptr
+  (newp.*fieldPtr(access_refcount{})).*fieldPtr(access_base{}) = base;
+  // reinterpret_pointer_cast<T>
+  auto res = reinterpret_cast<std::shared_ptr<T>*>(&newp);
+  return std::move(*res);
+}
+
 } // namespace detail
 } // namespace folly
+
+#endif // defined(__GLIBCXX__)

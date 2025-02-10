@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
+#include <folly/system/Shell.h>
+
 #include <glog/logging.h>
 
 #include <folly/portability/GTest.h>
-#include <folly/system/Shell.h>
 
 using namespace folly;
 
@@ -47,7 +48,7 @@ TEST(Shell, Shellify) {
 // Don't warn about using this deprecated function in the test for it.
 FOLLY_PUSH_WARNING
 FOLLY_GNU_DISABLE_WARNING("-Wdeprecated-declarations")
-TEST(Shell, Shellify_deprecated) {
+TEST(Shell, ShellifyDeprecated) {
   auto command = shellify("rm -rf /");
   EXPECT_EQ(command[0], "/bin/sh");
   EXPECT_EQ(command[1], "-c");

@@ -6,10 +6,6 @@ executing benchmarks. Currently the framework targets only
 single-threaded testing (though you can internally use fork-join
 parallelism and measure total run time).
 
-To use this library, you need to be using gcc 4.6 or later. Include
-`folly/Benchmark.h` and make sure `folly/benchmark.cpp` is part of the
-build (either directly or packaged with a library).
-
 ### Overview
 ***
 
@@ -17,21 +13,20 @@ Using `folly/Benchmark.h` is very simple. Here's an example:
 
 ``` Cpp
     #include <folly/Benchmark.h>
-    #include <folly/container/Foreach.h>
     #include <vector>
     using namespace std;
     using namespace folly;
     BENCHMARK(insertFrontVector) {
       // Let's insert 100 elements at the front of a vector
       vector<int> v;
-      FOR_EACH_RANGE (i, 0, 100) {
+      for (unsigned int i = 0; i < 100; ++i) {
         v.insert(v.begin(), i);
       }
     }
     BENCHMARK(insertBackVector) {
       // Let's insert 100 elements at the back of a vector
       vector<int> v;
-      FOR_EACH_RANGE (i, 0, 100) {
+      for (unsigned int i = 0; i < 100; ++i) {
         v.insert(v.end(), i);
       }
     }
@@ -77,13 +72,13 @@ implicitly `unsigned`. Consider a slightly reworked example:
     using namespace folly;
     BENCHMARK(insertFrontVector, n) {
       vector<int> v;
-      FOR_EACH_RANGE (i, 0, n) {
+      for (unsigned int i = 0; i < n; ++i) {
         v.insert(v.begin(), i);
       }
     }
     BENCHMARK(insertBackVector, n) {
       vector<int> v;
-      FOR_EACH_RANGE (i, 0, n) {
+      for (unsigned int i = 0; i < n; ++i) {
         v.insert(v.end(), i);
       }
     }
@@ -120,7 +115,7 @@ numbers should be compared against some baseline.
 
 To support baseline-driven measurements, `folly/Benchmark.h` defines
 `BENCHMARK_RELATIVE`, which works much like `BENCHMARK`, except it
-considers the most recent lexically-ocurring `BENCHMARK` a baseline,
+considers the most recent lexically-occurring `BENCHMARK` a baseline,
 and fills the "relative" column. Say, for example, we want to use
 front insertion for a vector as a baseline and see how back insertion
 compares with it:
@@ -133,13 +128,13 @@ compares with it:
     using namespace folly;
     BENCHMARK(insertFrontVector, n) {
       vector<int> v;
-      FOR_EACH_RANGE (i, 0, n) {
+      for (unsigned int i = 0; i < n; ++i) {
         v.insert(v.begin(), i);
       }
     }
     BENCHMARK_RELATIVE(insertBackVector, n) {
       vector<int> v;
-      FOR_EACH_RANGE (i, 0, n) {
+      for (unsigned int i = 0; i < n; ++i) {
         v.insert(v.end(), i);
       }
     }
@@ -192,6 +187,26 @@ measurements in any way.
     }
 ```
 
+If you want to print arbitrary text (e.g. a comment or for whatever
+reason), use `BENCHMARK_DRAW_TEXT("your text here")`. The output will
+be the literal value so escape codes like `\n` or `\t` will not work.
+To add multiple lines of output use multiple `BENCHMARK_DRAW_TEXT`
+calls.
+
+``` Cpp
+    BENCHMARK(foo) {
+      Foo foo;
+      foo.doSomething();
+    }
+
+    BENCHMARK_DRAW_TEXT("Note: bar is expected to be 2x more expensive.");
+
+    BENCHMARK(bar) {
+      Bar bar;
+      bar.doSomething();
+    }
+```
+
 ### Suspending a benchmark
 ***
 
@@ -206,7 +221,7 @@ pseudo-statement `BENCHMARK_SUSPEND` as follows:
       BENCHMARK_SUSPEND {
         v.reserve(n);
       }
-      FOR_EACH_RANGE (i, 0, n) {
+      for (unsigned int i = 0; i < n; ++i) {
         v.insert(v.end(), i);
       }
     }
@@ -232,7 +247,7 @@ object. The previous example could have been written like this:
       vector<int> v;
       v.reserve(n);
       braces.dismiss();
-      FOR_EACH_RANGE (i, 0, n) {
+      for (unsigned int i = 0; i < n; ++i) {
         v.insert(v.end(), i);
       }
     }

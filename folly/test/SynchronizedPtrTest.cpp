@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/SynchronizedPtr.h>
 
 #include <folly/Optional.h>
@@ -73,9 +74,9 @@ TEST(SynchronizedPtrTest, Replaceable) {
   folly::SynchronizedPtr<folly::Replaceable<int>> pInt{0};
   folly::SynchronizedPtr<folly::Replaceable<int const>> pcInt{2};
   basics(pInt);
-  EXPECT_TRUE(
-      (std::is_same<folly::Replaceable<int>&, decltype(*pInt.wlockPointer())>::
-           value));
+  EXPECT_TRUE((
+      std::is_same<folly::Replaceable<int>&, decltype(*pInt.wlockPointer())>::
+          value));
   EXPECT_TRUE((std::is_same<
                folly::Replaceable<int const>&,
                decltype(*pcInt.wlockPointer())>::value));
@@ -90,9 +91,9 @@ TEST(SynchronizedPtrTest, Replaceable) {
 TEST(SynchronizedPtrTest, Optional) {
   folly::SynchronizedPtr<folly::Optional<int>, folly::RWSpinLock> pInt{0};
   basics(pInt);
-  EXPECT_TRUE(
-      (std::is_same<folly::Optional<int>&, decltype(*pInt.wlockPointer())>::
-           value));
+  EXPECT_TRUE((
+      std::is_same<folly::Optional<int>&, decltype(*pInt.wlockPointer())>::
+          value));
   EXPECT_TRUE(static_cast<bool>(pInt.rlock()));
   pInt.withWLockPointer([](auto&& ptr) {
     EXPECT_TRUE((std::is_same<folly::Optional<int>&, decltype(ptr)>::value));
@@ -107,9 +108,7 @@ TEST(SynchronizedPtrTest, Virtual) {
     virtual ~A() = default;
   };
   struct B : A {
-    void poke(bool& b) const override {
-      b = true;
-    }
+    void poke(bool& b) const override { b = true; }
   };
   folly::SynchronizedPtr<A*> pA{new B()};
   bool itWorks = false;

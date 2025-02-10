@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <folly/io/IOBuf.h>
@@ -31,7 +32,7 @@ class WriteChainAsyncTransportWrapper
   using DecoratedAsyncTransportWrapper<T>::DecoratedAsyncTransportWrapper;
 
   void write(
-      folly::AsyncTransportWrapper::WriteCallback* callback,
+      AsyncTransport::WriteCallback* callback,
       const void* buf,
       size_t bytes,
       folly::WriteFlags flags = folly::WriteFlags::NONE) override {
@@ -40,25 +41,12 @@ class WriteChainAsyncTransportWrapper
   }
 
   void writev(
-      folly::AsyncTransportWrapper::WriteCallback* callback,
+      AsyncTransport::WriteCallback* callback,
       const iovec* vec,
       size_t count,
       folly::WriteFlags flags = folly::WriteFlags::NONE) override {
-    std::unique_ptr<folly::IOBuf> writeBuffer;
-
-    for (size_t i = 0; i < count; ++i) {
-      size_t len = vec[i].iov_len;
-      void* data = vec[i].iov_base;
-      auto buf = folly::IOBuf::wrapBuffer(data, len);
-      if (i == 0) {
-        writeBuffer = std::move(buf);
-      } else {
-        writeBuffer->prependChain(std::move(buf));
-      }
-    }
-    if (writeBuffer) {
-      writeChain(callback, std::move(writeBuffer), flags);
-    }
+    auto writeBuffer = folly::IOBuf::wrapIov(vec, count);
+    writeChain(callback, std::move(writeBuffer), flags);
   }
 
   /**
@@ -66,7 +54,7 @@ class WriteChainAsyncTransportWrapper
    * derived classes to do that.
    */
   void writeChain(
-      folly::AsyncTransportWrapper::WriteCallback* callback,
+      AsyncTransport::WriteCallback* callback,
       std::unique_ptr<folly::IOBuf>&& buf,
       folly::WriteFlags flags = folly::WriteFlags::NONE) override = 0;
 };

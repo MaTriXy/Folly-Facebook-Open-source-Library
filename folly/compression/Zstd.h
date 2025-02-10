@@ -1,11 +1,11 @@
 /*
- * Copyright 2018-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,11 +24,13 @@
 
 #if FOLLY_HAVE_LIBZSTD
 
+#ifndef ZSTD_STATIC_LINKING_ONLY
 #define ZSTD_STATIC_LINKING_ONLY
+#endif
 #include <zstd.h>
 
 namespace folly {
-namespace io {
+namespace compression {
 namespace zstd {
 
 /**
@@ -60,19 +62,13 @@ class Options {
   }
 
   /// Get a reference to the ZSTD_CCtx_params.
-  ZSTD_CCtx_params const* params() const {
-    return params_.get();
-  }
+  ZSTD_CCtx_params const* params() const { return params_.get(); }
 
   /// Get the compression level.
-  int level() const {
-    return level_;
-  }
+  int level() const { return level_; }
 
   /// Get the maximum window size.
-  size_t maxWindowSize() const {
-    return maxWindowSize_;
-  }
+  size_t maxWindowSize() const { return maxWindowSize_; }
 
  private:
   static void freeCCtxParams(ZSTD_CCtx_params* params);
@@ -90,7 +86,7 @@ std::unique_ptr<Codec> getCodec(Options options);
 std::unique_ptr<StreamCodec> getStreamCodec(Options options);
 
 } // namespace zstd
-} // namespace io
+} // namespace compression
 } // namespace folly
 
 #endif

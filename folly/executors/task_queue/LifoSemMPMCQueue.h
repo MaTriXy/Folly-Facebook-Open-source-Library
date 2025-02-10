@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,16 +22,22 @@
 
 namespace folly {
 
-template <class T, QueueBehaviorIfFull kBehavior = QueueBehaviorIfFull::THROW>
+template <
+    class T,
+    QueueBehaviorIfFull kBehavior = QueueBehaviorIfFull::THROW,
+    class Semaphore = folly::LifoSem>
 class LifoSemMPMCQueue : public BlockingQueue<T> {
  public:
   // Note: The queue pre-allocates all memory for max_capacity
-  explicit LifoSemMPMCQueue(size_t max_capacity) : queue_(max_capacity) {}
+  explicit LifoSemMPMCQueue(
+      size_t max_capacity,
+      const typename Semaphore::Options& semaphoreOptions = {})
+      : sem_(semaphoreOptions), queue_(max_capacity) {}
 
   BlockingQueueAddResult add(T item) override {
     switch (kBehavior) { // static
       case QueueBehaviorIfFull::THROW:
-        if (!queue_.write(std::move(item))) {
+        if (!queue_.writeIfNotFull(std::move(item))) {
           throw QueueFullException("LifoSemMPMCQueue full, can't add item");
         }
         break;
@@ -57,19 +63,15 @@ class LifoSemMPMCQueue : public BlockingQueue<T> {
         return folly::none;
       }
     }
-    return std::move(item);
+    return item;
   }
 
-  size_t capacity() {
-    return queue_.capacity();
-  }
+  size_t capacity() { return queue_.capacity(); }
 
-  size_t size() override {
-    return queue_.size();
-  }
+  size_t size() override { return queue_.size(); }
 
  private:
-  folly::LifoSem sem_;
+  Semaphore sem_;
   folly::MPMCQueue<T> queue_;
 };
 

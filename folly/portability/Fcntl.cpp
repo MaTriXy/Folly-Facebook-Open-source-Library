@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,10 +24,6 @@
 namespace folly {
 namespace portability {
 namespace fcntl {
-int creat(char const* fn, int pm) {
-  return _creat(fn, pm);
-}
-
 int fcntl(int fd, int cmd, ...) {
   va_list args;
   int res = -1;
@@ -85,6 +81,15 @@ int fcntl(int fd, int cmd, ...) {
   return res;
 }
 
+int posix_fallocate(int fd, off_t offset, off_t len) {
+  // We'll pretend we always have enough space. We
+  // can't exactly pre-allocate on windows anyways.
+  return 0;
+}
+} // namespace fcntl
+} // namespace portability
+
+namespace fileops {
 int open(char const* fn, int of, int pm) {
   int fh;
   int realMode = _S_IREAD;
@@ -102,16 +107,12 @@ int open(char const* fn, int of, int pm) {
     // NUL, which achieves the same result.
     fn = "NUL";
   }
+  if ((of & _O_TEXT) != _O_TEXT) {
+    of |= _O_BINARY;
+  }
   errno_t res = _sopen_s(&fh, fn, of, _SH_DENYNO, realMode);
   return res ? -1 : fh;
 }
-
-int posix_fallocate(int fd, off_t offset, off_t len) {
-  // We'll pretend we always have enough space. We
-  // can't exactly pre-allocate on windows anyways.
-  return 0;
-}
-}
-}
-}
+} // namespace fileops
+} // namespace folly
 #endif

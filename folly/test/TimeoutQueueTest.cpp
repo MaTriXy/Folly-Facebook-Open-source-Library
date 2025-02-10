@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,17 +25,19 @@ TEST(TimeoutQueue, Simple) {
   EventVec events;
 
   TimeoutQueue q;
-  TimeoutQueue::Callback cb = [&events](
-      TimeoutQueue::Id id, int64_t /* now */) { events.push_back(id); };
+  TimeoutQueue::Callback cb =
+      [&events](TimeoutQueue::Id id, int64_t /* now */) {
+        events.push_back(id);
+      };
 
   EXPECT_EQ(1, q.add(0, 10, cb));
   EXPECT_EQ(2, q.add(0, 11, cb));
   EXPECT_EQ(3, q.addRepeating(0, 9, cb));
 
   EXPECT_TRUE(events.empty());
-  EXPECT_EQ(21, q.runOnce(12));  // now+9
+  EXPECT_EQ(21, q.runOnce(12)); // now+9
 
-  bool r = (EventVec{3,1,2} == events);
+  bool r = (EventVec{3, 1, 2} == events);
   EXPECT_TRUE(r);
 
   events.clear();
@@ -65,7 +67,7 @@ TEST(TimeoutQueue, Erase) {
     now = q.runOnce(now);
   }
 
-  bool r = (EventVec{1,1,1,2} == events);
+  bool r = (EventVec{1, 1, 1, 2} == events);
   EXPECT_TRUE(r);
 }
 
@@ -94,10 +96,10 @@ TEST(TimeoutQueue, RunOnceReschedule) {
   TimeoutQueue q;
   TimeoutQueue::Callback cb;
   cb = [&count, &q, &cb](TimeoutQueue::Id id, int64_t now) {
-      if (++count < 100) {
-        EXPECT_LT(id, q.add(now, 0, cb));
-      }
-    };
+    if (++count < 100) {
+      EXPECT_LT(id, q.add(now, 0, cb));
+    }
+  };
 
   EXPECT_EQ(1, q.add(0, 0, cb));
 

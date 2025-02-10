@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -34,15 +34,11 @@ namespace folly {
 /// possible to construct a value of this type, but it is always the same value
 /// every time, so it is uninteresting.
 struct Unit {
-  constexpr bool operator==(const Unit& /*other*/) const {
-    return true;
-  }
-  constexpr bool operator!=(const Unit& /*other*/) const {
-    return false;
-  }
+  constexpr bool operator==(const Unit& /*other*/) const { return true; }
+  constexpr bool operator!=(const Unit& /*other*/) const { return false; }
 };
 
-constexpr Unit unit {};
+constexpr Unit unit{};
 
 template <typename T>
 struct lift_unit {

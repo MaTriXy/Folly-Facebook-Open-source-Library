@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,11 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #include <folly/init/Init.h>
 #include <folly/logging/Init.h>
-#include <folly/logging/xlog.h>
-
 #include <folly/logging/example/lib.h>
+#include <folly/logging/xlog.h>
 
 using namespace example;
 
@@ -28,20 +28,22 @@ static ExampleObject staticInitialized("static");
 // Configure folly to enable INFO+ messages, and everything else to
 // enable WARNING+.
 //
-// Set the default log handler to log asynchronously by default.
-FOLLY_INIT_LOGGING_CONFIG(".=WARNING,folly=INFO; default:async=true");
+// Set the default log handler to log asynchronously by default
+// (except log messages with level WARNING and above synchronously)
+FOLLY_INIT_LOGGING_CONFIG(
+    ".=WARNING,folly=INFO; default:async=true,sync_level=WARNING");
 
 int main(int argc, char* argv[]) {
   // Using log macros before calling folly::initLogging() will use the default
   // log settings defined by folly::initializeLoggerDB().  The default behavior
-  // is to log WARNING+ messages to stderr.
-  XLOG(INFO) << "log messages less than WARNING will be ignored";
+  // is to log INFO+ messages to stderr.
+  XLOG(DBG) << "log messages less than INFO will be ignored before initLogging";
   XLOG(ERR) << "error messages before initLogging() will be logged to stderr";
 
   // folly::Init() will automatically initialize the logging settings based on
   // the FOLLY_INIT_LOGGING_CONFIG declaration above and the --logging command
   // line flag.
-  auto init = folly::Init(&argc, &argv);
+  folly::Init init(&argc, &argv);
 
   // All XLOG() statements in this file will log to the category
   // folly.logging.example.main

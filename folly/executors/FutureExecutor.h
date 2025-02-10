@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -45,11 +45,12 @@ class FutureExecutor : public ExecutorImpl {
     using T = typename invoke_result_t<F>::value_type;
     folly::Promise<T> promise;
     auto future = promise.getFuture();
-    ExecutorImpl::add(
-        [ promise = std::move(promise), func = std::move(func) ]() mutable {
-          func().then([promise = std::move(promise)](
-              folly::Try<T> && t) mutable { promise.setTry(std::move(t)); });
-        });
+    ExecutorImpl::add([promise = std::move(promise),
+                       func = std::move(func)]() mutable {
+      func().then([promise = std::move(promise)](folly::Try<T>&& t) mutable {
+        promise.setTry(std::move(t));
+      });
+    });
     return future;
   }
 
@@ -64,13 +65,13 @@ class FutureExecutor : public ExecutorImpl {
   template <typename F>
   typename std::enable_if<
       !folly::isFuture<invoke_result_t<F>>::value,
-      folly::Future<typename folly::lift_unit<invoke_result_t<F>>::type>>::type
+      folly::Future<folly::lift_unit_t<invoke_result_t<F>>>>::type
   addFuture(F func) {
-    using T = typename folly::lift_unit<invoke_result_t<F>>::type;
+    using T = folly::lift_unit_t<invoke_result_t<F>>;
     folly::Promise<T> promise;
     auto future = promise.getFuture();
     ExecutorImpl::add(
-        [ promise = std::move(promise), func = std::move(func) ]() mutable {
+        [promise = std::move(promise), func = std::move(func)]() mutable {
           promise.setWith(std::move(func));
         });
     return future;

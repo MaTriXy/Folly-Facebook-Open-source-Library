@@ -1,11 +1,11 @@
 /*
- * Copyright 2018-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 /*
  *  This file serves as a helper for bridging folly fibers and python
  *  asyncio.future.
@@ -23,16 +24,13 @@
 #include <Python.h>
 #include <folly/Function.h>
 #include <folly/fibers/FiberManagerInternal.h>
-#include <folly/python/fiber_manager_api.h>
 
 namespace folly {
 namespace python {
 
-inline folly::fibers::FiberManager* getFiberManager(
-    const folly::fibers::FiberManager::Options& opts = {}) {
-  import_folly__fiber_manager();
-  return get_fiber_manager(opts);
-}
+// Must be called from main context
+folly::fibers::FiberManager* getFiberManager(
+    const folly::fibers::FiberManager::Options& opts = {});
 
 /**
  * Helper function with similar callback/userData parameters as bridgeFuture.
@@ -49,15 +47,16 @@ void bridgeFibers(
   // to make sure it isn't removed by python in that time.
   Py_INCREF(userData);
   auto guard = folly::makeGuard([=] { Py_DECREF(userData); });
-  fiberManager->addTask([function = std::move(function),
-                         callback = std::move(callback),
-                         userData,
-                         guard = std::move(guard)]() mutable {
-    // This will run from inside the gil, called by the asyncio add_reader
-    auto res = folly::makeTryWith([&] { return function(); });
-    callback(std::move(res), userData);
-    // guard goes out of scope here, and its stored function is called
-  });
+  fiberManager->addTask(
+      [function = std::move(function),
+       callback = std::move(callback),
+       userData,
+       guard = std::move(guard)]() mutable {
+        // This will run from inside the gil, called by the asyncio add_reader
+        auto res = folly::makeTryWith([&] { return function(); });
+        callback(std::move(res), userData);
+        // guard goes out of scope here, and its stored function is called
+      });
 }
 
 } // namespace python

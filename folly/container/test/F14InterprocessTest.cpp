@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,12 +23,13 @@
 
 #include <boost/interprocess/allocators/adaptive_pool.hpp>
 #include <boost/interprocess/managed_shared_memory.hpp>
-#include <folly/Format.h>
+
+#include <fmt/core.h>
+
 #include <folly/Random.h>
 #include <folly/Traits.h>
 #include <folly/container/F14Map.h>
 #include <folly/container/F14Set.h>
-#include <folly/container/test/F14TestUtil.h>
 #include <folly/portability/GTest.h>
 
 using namespace boost::interprocess;
@@ -108,12 +109,11 @@ using ShmF14VectorI2VVI = folly::F14VectorMap<
 
 namespace {
 std::string makeRandomName() {
-  return folly::sformat("f14test_{}", folly::Random::rand64());
+  return fmt::format("f14test_{}", folly::Random::rand64());
 }
 
 std::shared_ptr<managed_shared_memory> makeShmSegment(
-    std::size_t n,
-    std::string name = makeRandomName()) {
+    std::size_t n, std::string name = makeRandomName()) {
   auto deleter = [=](managed_shared_memory* p) {
     delete p;
     shared_memory_object::remove(name.c_str());
@@ -174,29 +174,34 @@ TEST(ShmF14VectorSet, simple) {
 
 template <typename M>
 void runSimultaneousAccessMapTest() {
-  auto name = makeRandomName();
-  auto segment1 = makeShmSegment(8192, name);
-  auto segment2 =
-      std::make_shared<managed_shared_memory>(open_only, name.c_str());
+  using namespace folly::f14::detail;
 
-  auto m1 = segment1->construct<M>("m")(
-      typename M::allocator_type{segment1->get_segment_manager()});
-  auto m2 = segment2->find<M>("m").first;
+  // fallback std::unordered_map on libstdc++ doesn't pass this test
+  if (getF14IntrinsicsMode() != F14IntrinsicsMode::None) {
+    auto name = makeRandomName();
+    auto segment1 = makeShmSegment(8192, name);
+    auto segment2 =
+        std::make_shared<managed_shared_memory>(open_only, name.c_str());
 
-  std::cout << "m in segment1 @ " << (uintptr_t)m1 << "\n";
-  std::cout << "m in segment2 @ " << (uintptr_t)m2 << "\n";
+    auto m1 = segment1->construct<M>("m")(
+        typename M::allocator_type{segment1->get_segment_manager()});
+    auto m2 = segment2->find<M>("m").first;
 
-  EXPECT_NE(&*m1, &*m2);
+    std::cout << "m in segment1 @ " << (uintptr_t)m1 << "\n";
+    std::cout << "m in segment2 @ " << (uintptr_t)m2 << "\n";
 
-  (*m1)[1] = 10;
-  EXPECT_EQ(m2->count(0), 0);
-  EXPECT_EQ((*m2)[1], 10);
-  (*m2)[2] = 20;
-  EXPECT_EQ(m1->size(), 2);
-  EXPECT_EQ(m1->find(2)->second, 20);
-  (*m1)[3] = 30;
-  EXPECT_EQ(m2->size(), 3);
-  EXPECT_FALSE(m2->try_emplace(3, 33).second);
+    EXPECT_NE(&*m1, &*m2);
+
+    (*m1)[1] = 10;
+    EXPECT_EQ(m2->count(0), 0);
+    EXPECT_EQ((*m2)[1], 10);
+    (*m2)[2] = 20;
+    EXPECT_EQ(m1->size(), 2);
+    EXPECT_EQ(m1->find(2)->second, 20);
+    (*m1)[3] = 30;
+    EXPECT_EQ(m2->size(), 3);
+    EXPECT_FALSE(m2->emplace(std::make_pair(3, 33)).second);
+  }
 }
 
 TEST(ShmF14ValueMap, simultaneous) {

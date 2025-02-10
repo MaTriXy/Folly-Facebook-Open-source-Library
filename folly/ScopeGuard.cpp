@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,12 +16,14 @@
 
 #include <folly/ScopeGuard.h>
 
+#include <exception>
 #include <iostream>
 
-/*static*/ void folly::detail::ScopeGuardImplBase::warnAboutToCrash() noexcept {
+/*static*/ void folly::detail::ScopeGuardImplBase::terminate() noexcept {
   // Ensure the availability of std::cerr
   std::ios_base::Init ioInit;
   std::cerr
       << "This program will now terminate because a folly::ScopeGuard callback "
          "threw an \nexception.\n";
+  std::rethrow_exception(current_exception());
 }

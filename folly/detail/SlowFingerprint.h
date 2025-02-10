@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,10 +32,9 @@ namespace detail {
 template <int BITS>
 class SlowFingerprint {
  public:
-  SlowFingerprint()
-    : poly_(FingerprintTable<BITS>::poly) {
+  SlowFingerprint() : poly_(FingerprintTable<BITS>::poly) {
     // Use the same starting value as Fingerprint, (1 << (BITS-1))
-    fp_.addXk(BITS-1);
+    fp_.addXk(BITS - 1);
   }
 
   SlowFingerprint& update8(uint8_t v) {
@@ -62,7 +61,9 @@ class SlowFingerprint {
   }
 
   void write(uint64_t* out) const {
-    fp_.write(out);
+    for (int i = 0; i < fp_.size(); ++i) {
+      out[i] = fp_.get(i);
+    }
   }
 
  private:
@@ -74,15 +75,15 @@ class SlowFingerprint {
   }
 
   void updateLSB(uint64_t val, int bits) {
-    val <<= (64-bits);
+    val <<= (64 - bits);
     for (; bits != 0; --bits) {
       updateBit(val & (1ULL << 63));
       val <<= 1;
     }
   }
 
-  const FingerprintPolynomial<BITS-1> poly_;
-  FingerprintPolynomial<BITS-1> fp_;
+  const FingerprintPolynomial<BITS - 1> poly_;
+  FingerprintPolynomial<BITS - 1> fp_;
 };
 
 } // namespace detail

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,7 +32,7 @@ static void run(
     EventBase* eb,
     folly::Baton<>* stop,
     const StringPiece& name) {
-  if (name.size()) {
+  if (!name.empty()) {
     folly::setThreadName(name);
   }
 
@@ -40,27 +40,31 @@ static void run(
   eb->loopForever();
 
   // must destruct in io thread for on-destruction callbacks
-  EventBase::StackFunctionLoopCallback cb([=] { ebm->clearEventBase(); });
-  eb->runOnDestruction(&cb);
+  eb->runOnDestruction([=] { ebm->clearEventBase(); });
   // wait until terminateLoopSoon() is complete
-  stop->wait();
+  stop->wait(folly::Baton<>::wait_options().logging_enabled(false));
   eb->~EventBase();
 }
 
 ScopedEventBaseThread::ScopedEventBaseThread()
     : ScopedEventBaseThread(nullptr, "") {}
 
-ScopedEventBaseThread::ScopedEventBaseThread(const StringPiece& name)
+ScopedEventBaseThread::ScopedEventBaseThread(StringPiece name)
     : ScopedEventBaseThread(nullptr, name) {}
 
 ScopedEventBaseThread::ScopedEventBaseThread(EventBaseManager* ebm)
     : ScopedEventBaseThread(ebm, "") {}
 
 ScopedEventBaseThread::ScopedEventBaseThread(
+    EventBaseManager* ebm, StringPiece name)
+    : ScopedEventBaseThread(EventBase::Options(), ebm, name) {}
+
+ScopedEventBaseThread::ScopedEventBaseThread(
+    EventBase::Options eventBaseOptions,
     EventBaseManager* ebm,
-    const StringPiece& name)
+    StringPiece name)
     : ebm_(ebm ? ebm : EventBaseManager::get()) {
-  new (&eb_) EventBase();
+  new (&eb_) EventBase(std::move(eventBaseOptions));
   th_ = thread(run, ebm_, &eb_, &stop_, name);
   eb_.waitUntilRunning();
 }

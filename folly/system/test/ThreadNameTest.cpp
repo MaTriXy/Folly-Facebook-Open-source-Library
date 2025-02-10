@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
+#include <folly/system/ThreadName.h>
+
 #include <thread>
 
 #include <folly/ScopeGuard.h>
 #include <folly/portability/GTest.h>
 #include <folly/synchronization/Baton.h>
-#include <folly/system/ThreadName.h>
 
 using namespace std;
 using namespace folly;
@@ -39,32 +40,42 @@ TEST(ThreadName, getCurrentThreadName) {
       EXPECT_EQ(kThreadName.toString(), *getCurrentThreadName());
     }
   });
-  SCOPE_EXIT { th.join(); };
+  SCOPE_EXIT {
+    th.join();
+  };
 }
 
-TEST(ThreadName, setThreadName_other_pthread) {
+#if FOLLY_HAVE_PTHREAD
+TEST(ThreadName, setThreadNameOtherPthread) {
   Baton<> handle_set;
   Baton<> let_thread_end;
   pthread_t handle;
   thread th([&] {
-      handle = pthread_self();
-      handle_set.post();
-      let_thread_end.wait();
+    handle = pthread_self();
+    handle_set.post();
+    let_thread_end.wait();
   });
-  SCOPE_EXIT { th.join(); };
+  SCOPE_EXIT {
+    th.join();
+  };
   handle_set.wait();
-  SCOPE_EXIT { let_thread_end.post(); };
+  SCOPE_EXIT {
+    let_thread_end.post();
+  };
   EXPECT_EQ(
       expectedSetOtherThreadNameResult, setThreadName(handle, kThreadName));
 }
+#endif
 
-TEST(ThreadName, setThreadName_other_id) {
+TEST(ThreadName, setThreadNameOtherId) {
   Baton<> let_thread_end;
-  thread th([&] {
-      let_thread_end.wait();
-  });
-  SCOPE_EXIT { th.join(); };
-  SCOPE_EXIT { let_thread_end.post(); };
+  thread th([&] { let_thread_end.wait(); });
+  SCOPE_EXIT {
+    th.join();
+  };
+  SCOPE_EXIT {
+    let_thread_end.post();
+  };
   EXPECT_EQ(
       expectedSetOtherThreadNameResult,
       setThreadName(th.get_id(), kThreadName));

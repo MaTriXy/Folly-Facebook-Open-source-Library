@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,24 +16,20 @@
 
 #pragma once
 
+#include <chrono>
 #include <memory>
 
+#include <folly/Optional.h>
 #include <folly/io/IOBuf.h>
+#include <folly/io/IOBufIovecBuilder.h>
 #include <folly/io/async/AsyncSocketBase.h>
 #include <folly/io/async/AsyncTransportCertificate.h>
 #include <folly/io/async/DelayedDestruction.h>
 #include <folly/io/async/EventBase.h>
+#include <folly/io/async/WriteFlags.h>
 #include <folly/portability/OpenSSL.h>
 #include <folly/portability/SysUio.h>
 #include <folly/ssl/OpenSSLPtrTypes.h>
-
-constexpr bool kOpenSslModeMoveBufferOwnership =
-#ifdef SSL_MODE_MOVE_BUFFER_OWNERSHIP
-    true
-#else
-    false
-#endif
-    ;
 
 namespace folly {
 
@@ -41,87 +37,377 @@ class AsyncSocketException;
 class EventBase;
 class SocketAddress;
 
-/*
- * flags given by the application for write* calls
- */
-enum class WriteFlags : uint32_t {
-  NONE = 0x00,
-  /*
-   * Whether to delay the output until a subsequent non-corked write.
-   * (Note: may not be supported in all subclasses or on all platforms.)
-   */
-  CORK = 0x01,
-  /*
-   * for a socket that has ACK latency enabled, it will cause the kernel
-   * to fire a TCP ESTATS event when the last byte of the given write call
-   * will be acknowledged.
-   */
-  EOR = 0x02,
-  /*
-   * this indicates that only the write side of socket should be shutdown
-   */
-  WRITE_SHUTDOWN = 0x04,
-  /*
-   * use msg zerocopy if allowed
-   */
-  WRITE_MSG_ZEROCOPY = 0x08,
+class AsyncReader {
+ public:
+  class ReadCallback {
+   public:
+    enum class ReadMode : uint8_t {
+      ReadBuffer = 0,
+      ReadVec = 1,
+    };
+
+    virtual ~ReadCallback() = default;
+
+    ReadMode getReadMode() const noexcept { return readMode_; }
+
+    void setReadMode(ReadMode readMode) noexcept { readMode_ = readMode; }
+
+    /**
+     * When data becomes available, getReadBuffer()/getReadBuffers() will be
+     * invoked to get the buffer/buffers into which data should be read.
+     *
+     * These methods allows the ReadCallback to delay buffer allocation until
+     * data becomes available.  This allows applications to manage large
+     * numbers of idle connections, without having to maintain a separate read
+     * buffer for each idle connection.
+     */
+
+    /**
+     * It is possible that in some cases, getReadBuffer() may be called
+     * multiple times before readDataAvailable() is invoked.  In this case, the
+     * data will be written to the buffer returned from the most recent call to
+     * readDataAvailable().  If the previous calls to readDataAvailable()
+     * returned different buffers, the ReadCallback is responsible for ensuring
+     * that they are not leaked.
+     *
+     * If getReadBuffer() throws an exception, returns a nullptr buffer, or
+     * returns a 0 length, the ReadCallback will be uninstalled and its
+     * readError() method will be invoked.
+     *
+     * getReadBuffer() is not allowed to change the transport state before it
+     * returns.  (For example, it should never uninstall the read callback, or
+     * set a different read callback.)
+     *
+     * @param bufReturn getReadBuffer() should update *bufReturn to contain the
+     *                  address of the read buffer.  This parameter will never
+     *                  be nullptr.
+     * @param lenReturn getReadBuffer() should update *lenReturn to contain the
+     *                  maximum number of bytes that may be written to the read
+     *                  buffer.  This parameter will never be nullptr.
+     */
+    virtual void getReadBuffer(void** bufReturn, size_t* lenReturn) = 0;
+
+    /**
+     * It is possible that in some cases, getReadBuffers() may be called
+     * multiple times before readDataAvailable() is invoked.  In this case, the
+     * data will be written to the buffer returned from the most recent call to
+     * readDataAvailable().  If the previous calls to readDataAvailable()
+     * returned different buffers, the ReadCallback is responsible for ensuring
+     * that they are not leaked.
+     *
+     * If getReadBuffers() throws an exception or returns a zero length array
+     * the ReadCallback will be uninstalled and its readError() method will be
+     * invoked.
+     *
+     * getReadBuffers() is not allowed to change the transport state before it
+     * returns.  (For example, it should never uninstall the read callback, or
+     * set a different read callback.)
+     *
+     * @param iovs      getReadBuffers() will copy up to num iovec entries into
+     *                  iovs
+     */
+    virtual void getReadBuffers(IOBufIovecBuilder::IoVecVec& iovs) {
+      iovs.clear();
+    }
+
+    /**
+     * readDataAvailable() will be invoked when data has been successfully read
+     * into the buffer(s) returned by the last call to
+     * getReadBuffer()/getReadBuffers()
+     *
+     * The read callback remains installed after readDataAvailable() returns.
+     * It must be explicitly uninstalled to stop receiving read events.
+     * getReadBuffer() will be called at least once before each call to
+     * readDataAvailable().  getReadBuffer() will also be called before any
+     * call to readEOF().
+     *
+     * @param len       The number of bytes placed in the buffer.
+     */
+
+    virtual void readDataAvailable(size_t len) noexcept = 0;
+
+    class ZeroCopyMemStore {
+     public:
+      struct Entry {
+        void* data{nullptr};
+        size_t len{0}; // in use
+        size_t capacity{0}; // capacity
+        ZeroCopyMemStore* store{nullptr};
+
+        void put() {
+          DCHECK(store);
+          store->put(this);
+        }
+      };
+
+      struct EntryDeleter {
+        void operator()(Entry* entry) { entry->put(); }
+      };
+
+      using EntryPtr = std::unique_ptr<Entry, EntryDeleter>;
+
+      virtual ~ZeroCopyMemStore() = default;
+
+      virtual EntryPtr get() = 0;
+      virtual void put(Entry*) = 0;
+    };
+
+    /* the next 4 methods can be used if the  callback wants to support zerocopy
+     * RX on Linux as described in https://lwn.net/Articles/754681/ If the
+     * current kernel version does not support zerocopy RX, the callback will
+     * revert to regular recv processing
+     * In case we support zerocopy RX, the callback might be notified of buffer
+     * chains composed of mmap memory and also memory allocated via the
+     * getZeroCopyReadBuffer method
+     */
+
+    /**
+     * Return a ZeroCopyMemStore to use if the callback would like to enable
+     * zero-copy reads.  Return nullptr to disable zero-copy reads.
+     *
+     * The caller must ensure that the ZeroCopyMemStore remains valid for as
+     * long as this callback is installed and reading data, and until put()
+     * has been called for every outstanding Entry allocated with get().
+     */
+    virtual ZeroCopyMemStore* readZeroCopyEnabled() noexcept { return nullptr; }
+
+    /**
+     * Get a buffer to read data into when using zero-copy reads if some data
+     * cannot be read using a zero-copy page.
+     *
+     * When data is available, some data may be returned in zero-copy pages,
+     * followed by some amount of data in this fallback buffer.
+     */
+    virtual void getZeroCopyFallbackBuffer(
+        void** /*bufReturn*/, size_t* /*lenReturn*/) noexcept {
+      CHECK(false);
+    }
+
+    /**
+     * readZeroCopyDataAvailable() will be called when data is available from a
+     * zero-copy read.
+     *
+     * The data returned may be in two separate parts: data that was actually
+     * read using zero copy pages will be in zeroCopyData.  Additionally, some
+     * number of bytes may have been placed in the fallback buffer returned by
+     * getZeroCopyFallbackBuffer().  additionalBytes indicates the number of
+     * bytes placed in getZeroCopyFallbackBuffer().
+     */
+    virtual void readZeroCopyDataAvailable(
+        std::unique_ptr<IOBuf>&& /*zeroCopyData*/,
+        size_t /*additionalBytes*/) noexcept {
+      CHECK(false);
+    }
+
+    /**
+     * When data becomes available, isBufferMovable() will be invoked to figure
+     * out which API will be used, readBufferAvailable() or
+     * readDataAvailable(). If isBufferMovable() returns true, that means
+     * ReadCallback supports the IOBuf ownership transfer and
+     * readBufferAvailable() will be used.  Otherwise, not.
+
+     * By default, isBufferMovable() always return false. If
+     * readBufferAvailable() is implemented and to be invoked, You should
+     * overwrite isBufferMovable() and return true in the inherited class.
+     *
+     * This method allows the AsyncSocket/AsyncSSLSocket do buffer allocation by
+     * itself until data becomes available.  Compared with the pre/post buffer
+     * allocation in getReadBuffer()/readDataAvailabe(), readBufferAvailable()
+     * has two advantages.  First, this can avoid memcpy. E.g., in
+     * AsyncSSLSocket, the decrypted data was copied from the openssl internal
+     * buffer to the readbuf buffer.  With the buffer ownership transfer, the
+     * internal buffer can be directly "moved" to ReadCallback. Second, the
+     * memory allocation can be more precise.  The reason is
+     * AsyncSocket/AsyncSSLSocket can allocate the memory of precise size
+     * because they have more context about the available data than
+     * ReadCallback.  Think about the getReadBuffer() pre-allocate 4072 bytes
+     * buffer, but the available data is always 16KB (max OpenSSL record size).
+     */
+
+    virtual bool isBufferMovable() noexcept { return false; }
+
+    /**
+     * Suggested buffer size, allocated for read operations,
+     * if callback is movable and supports folly::IOBuf
+     */
+
+    virtual size_t maxBufferSize() const {
+      return 64 * 1024; // 64K
+    }
+
+    /**
+     * readBufferAvailable() will be invoked when data has been successfully
+     * read.
+     *
+     * Note that only either readBufferAvailable() or readDataAvailable() will
+     * be invoked according to the return value of isBufferMovable(). The timing
+     * and aftereffect of readBufferAvailable() are the same as
+     * readDataAvailable()
+     *
+     * @param readBuf The unique pointer of read buffer.
+     */
+
+    virtual void readBufferAvailable(
+        std::unique_ptr<IOBuf> /*readBuf*/) noexcept {}
+
+    /**
+     * readEOF() will be invoked when the transport is closed.
+     *
+     * The read callback will be automatically uninstalled immediately before
+     * readEOF() is invoked.
+     */
+    virtual void readEOF() noexcept = 0;
+
+    /**
+     * readError() will be invoked if an error occurs reading from the
+     * transport.
+     *
+     * The read callback will be automatically uninstalled immediately before
+     * readError() is invoked.
+     *
+     * @param ex        An exception describing the error that occurred.
+     */
+    virtual void readErr(const AsyncSocketException& ex) noexcept = 0;
+
+   protected:
+    ReadMode readMode_{ReadMode::ReadBuffer};
+  };
+
+  // Read methods that aren't part of AsyncTransport.
+  virtual void setReadCB(ReadCallback* callback) = 0;
+  virtual ReadCallback* getReadCallback() const = 0;
+  virtual void setEventCallback(EventRecvmsgCallback* /*cb*/) {}
+  virtual std::unique_ptr<IOBuf> takePreReceivedData() { return {}; }
+
+ protected:
+  virtual ~AsyncReader() = default;
 };
 
-/*
- * union operator
- */
-inline WriteFlags operator|(WriteFlags a, WriteFlags b) {
-  return static_cast<WriteFlags>(
-      static_cast<uint32_t>(a) | static_cast<uint32_t>(b));
-}
+class AsyncWriter {
+ public:
+  class ReleaseIOBufCallback {
+   public:
+    virtual ~ReleaseIOBufCallback() = default;
 
-/*
- * compound assignment union operator
- */
-inline WriteFlags& operator|=(WriteFlags& a, WriteFlags b) {
-  a = a | b;
-  return a;
-}
+    virtual void releaseIOBuf(std::unique_ptr<folly::IOBuf>) noexcept = 0;
+  };
 
-/*
- * intersection operator
- */
-inline WriteFlags operator&(WriteFlags a, WriteFlags b) {
-  return static_cast<WriteFlags>(
-      static_cast<uint32_t>(a) & static_cast<uint32_t>(b));
-}
+  class WriteCallback {
+   public:
+    virtual ~WriteCallback() = default;
 
-/*
- * compound assignment intersection operator
- */
-inline WriteFlags& operator&=(WriteFlags& a, WriteFlags b) {
-  a = a & b;
-  return a;
-}
+    /**
+     * writeStarting() will be invoked right before bytes are written to the
+     * socket.
+     *
+     * This enables the callback implementation to determine the raw (socket)
+     * byte offset for the first byte in this write's buffer. This may be
+     * different than the number of bytes written at the application layer in
+     * the case of TLS and other transformations.
+     *
+     * Intermediary transport layers should forward this signal.
+     */
+    virtual void writeStarting() noexcept {}
 
-/*
- * exclusion parameter
- */
-inline WriteFlags operator~(WriteFlags a) {
-  return static_cast<WriteFlags>(~static_cast<uint32_t>(a));
-}
+    /**
+     * writeSuccess() will be invoked when all of the data has been
+     * successfully written.
+     *
+     * Note that this mainly signals that the buffer containing the data to
+     * write is no longer needed and may be freed or re-used.  It does not
+     * guarantee that the data has been fully transmitted to the remote
+     * endpoint.  For example, on socket-based transports, writeSuccess() only
+     * indicates that the data has been given to the kernel for eventual
+     * transmission.
+     */
+    virtual void writeSuccess() noexcept = 0;
 
-/*
- * unset operator
- */
-inline WriteFlags unSet(WriteFlags a, WriteFlags b) {
-  return a & ~b;
-}
+    /**
+     * writeError() will be invoked if an error occurs writing the data.
+     *
+     * @param bytesWritten      The number of bytes that were successfull
+     * @param ex                An exception describing the error that occurred.
+     */
+    virtual void writeErr(
+        size_t bytesWritten, const AsyncSocketException& ex) noexcept = 0;
 
-/*
- * inclusion operator
- */
-inline bool isSet(WriteFlags a, WriteFlags b) {
-  return (a & b) == b;
-}
+    virtual ReleaseIOBufCallback* getReleaseIOBufCallback() noexcept {
+      return nullptr;
+    }
+  };
+
+  /**
+   * If you supply a non-null WriteCallback, exactly one of writeSuccess()
+   * or writeErr() will be invoked when the write completes. If you supply
+   * the same WriteCallback object for multiple write() calls, it will be
+   * invoked exactly once per call. The only way to cancel outstanding
+   * write requests is to close the socket (e.g., with closeNow() or
+   * shutdownWriteNow()). When closing the socket this way, writeErr() will
+   * still be invoked once for each outstanding write operation.
+   */
+  virtual void write(
+      WriteCallback* callback,
+      const void* buf,
+      size_t bytes,
+      WriteFlags flags = WriteFlags::NONE) = 0;
+
+  /**
+   * If you supply a non-null WriteCallback, exactly one of writeSuccess()
+   * or writeErr() will be invoked when the write completes. If you supply
+   * the same WriteCallback object for multiple write() calls, it will be
+   * invoked exactly once per call. The only way to cancel outstanding
+   * write requests is to close the socket (e.g., with closeNow() or
+   * shutdownWriteNow()). When closing the socket this way, writeErr() will
+   * still be invoked once for each outstanding write operation.
+   */
+  virtual void writev(
+      WriteCallback* callback,
+      const iovec* vec,
+      size_t count,
+      WriteFlags flags = WriteFlags::NONE) = 0;
+
+  /**
+   * If you supply a non-null WriteCallback, exactly one of writeSuccess()
+   * or writeErr() will be invoked when the write completes. If you supply
+   * the same WriteCallback object for multiple write() calls, it will be
+   * invoked exactly once per call. The only way to cancel outstanding
+   * write requests is to close the socket (e.g., with closeNow() or
+   * shutdownWriteNow()). When closing the socket this way, writeErr() will
+   * still be invoked once for each outstanding write operation.
+   */
+  virtual void writeChain(
+      WriteCallback* callback,
+      std::unique_ptr<IOBuf>&& buf,
+      WriteFlags flags = WriteFlags::NONE) = 0;
+
+  /** zero copy related
+   * */
+  virtual bool setZeroCopy(bool /*enable*/) { return false; }
+
+  virtual bool getZeroCopy() const { return false; }
+
+  struct RXZerocopyParams {
+    bool enable{false};
+    size_t mapSize{0};
+  };
+
+  FOLLY_NODISCARD virtual bool setRXZeroCopy(RXZerocopyParams /*params*/) {
+    return false;
+  }
+
+  FOLLY_NODISCARD virtual bool getRXZeroCopy() const { return false; }
+
+  using ZeroCopyEnableFunc =
+      std::function<bool(const std::unique_ptr<folly::IOBuf>& buf)>;
+
+  virtual void setZeroCopyEnableFunc(ZeroCopyEnableFunc /*func*/) {}
+
+ protected:
+  virtual ~AsyncWriter() = default;
+};
 
 /**
- * AsyncTransport defines an asynchronous API for streaming I/O.
+ * AsyncTransport defines an asynchronous API for bidirectional streaming I/O.
  *
  * This class provides an API to for asynchronously waiting for data
  * on a streaming transport, and for asynchronously sending data.
@@ -147,7 +433,11 @@ inline bool isSet(WriteFlags a, WriteFlags b) {
  * timeout, since most callers want to give up if the remote end stops
  * responding and no further progress can be made sending the data.
  */
-class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
+class AsyncTransport
+    : public DelayedDestruction,
+      public AsyncSocketBase,
+      public AsyncReader,
+      public AsyncWriter {
  public:
   typedef std::unique_ptr<AsyncTransport, Destructor> UniquePtr;
 
@@ -187,9 +477,7 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
    * subclasses may treat reset() the same as closeNow().  Subclasses that use
    * TCP transports should terminate the connection with a TCP reset.
    */
-  virtual void closeWithReset() {
-    closeNow();
-  }
+  virtual void closeWithReset() { closeNow(); }
 
   /**
    * Perform a half-shutdown of the write side of the transport.
@@ -257,9 +545,7 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
    *
    * @return  true iff the if the there is pending data, false otherwise.
    */
-  virtual bool isPending() const {
-    return readable();
-  }
+  virtual bool isPending() const { return readable(); }
 
   /**
    * Determine if transport is connected to the endpoint
@@ -379,25 +665,31 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
   }
 
   /**
-   * Get the certificate used to authenticate the peer.
-   */
-  virtual ssl::X509UniquePtr getPeerCert() const {
-    return nullptr;
-  }
-
-  /**
-   * The local certificate used for this connection. May be null
-   */
-  virtual const X509* getSelfCert() const {
-    return nullptr;
-  }
-
-  /**
    * Get the peer certificate information if any
    */
   virtual const AsyncTransportCertificate* getPeerCertificate() const {
     return nullptr;
   }
+
+  /**
+   * Hints to transport implementations that the associated certificate is no
+   * longer required by the application. The transport implementation may
+   * choose to free up resources associated with the peer certificate.
+   *
+   * After this call, `getPeerCertificate()` may return nullptr, even if it
+   * previously returned non-null
+   */
+  virtual void dropPeerCertificate() noexcept {}
+
+  /**
+   * Hints to transport implementations that the associated certificate is no
+   * longer required by the application. The transport implementation may
+   * choose to free up resources associated with the self certificate.
+   *
+   * After this call, `getPeerCertificate()` may return nullptr, even if it
+   * previously returned non-null
+   */
+  virtual void dropSelfCertificate() noexcept {}
 
   /**
    * Get the certificate information of this transport, if any
@@ -411,15 +703,25 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
    * protocol. This is useful for transports which are used to tunnel other
    * protocols.
    */
-  virtual std::string getApplicationProtocol() noexcept {
-    return "";
-  }
+  virtual std::string getApplicationProtocol() const noexcept { return ""; }
 
   /**
    * Returns the name of the security protocol being used.
    */
-  virtual std::string getSecurityProtocol() const {
-    return "";
+  virtual std::string getSecurityProtocol() const { return ""; }
+
+  /*
+   * A transport may be able to produce exported keying material (ekm, per
+   * rfc5705), that can be used to bind some arbitrary data to it. This can be
+   * useful in contexts where you may want a token to only be used on the
+   * transport it was created for. If the transport is incapable of producing
+   * the ekm, this should return nullptr.
+   */
+  virtual std::unique_ptr<IOBuf> getExportedKeyingMaterial(
+      folly::StringPiece /* label */,
+      std::unique_ptr<IOBuf> /* context */,
+      uint16_t /* length */) const {
+    return nullptr;
   }
 
   /**
@@ -434,10 +736,31 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
   virtual size_t getAppBytesReceived() const = 0;
   virtual size_t getRawBytesReceived() const = 0;
 
+  /**
+   * Calculates the total number of bytes that are currently buffered in the
+   * transport to be written later.
+   */
+  virtual size_t getAppBytesBuffered() const { return 0; }
+  virtual size_t getRawBytesBuffered() const { return 0; }
+  virtual size_t getAllocatedBytesBuffered() const { return 0; }
+
+  /**
+   * Callback class to signal changes in the transport's internal buffers.
+   */
   class BufferCallback {
    public:
-    virtual ~BufferCallback() {}
+    virtual ~BufferCallback() = default;
+
+    /**
+     * onEgressBuffered() will be invoked when there's a partial write and it
+     * is necessary to buffer the remaining data.
+     */
     virtual void onEgressBuffered() = 0;
+
+    /**
+     * onEgressBufferCleared() will be invoked when whatever was buffered is
+     * written, or when it errors out.
+     */
     virtual void onEgressBufferCleared() = 0;
   };
 
@@ -460,9 +783,7 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
    * False if the transport does not have replay protection, but will in the
    * future.
    */
-  virtual bool isReplaySafe() const {
-    return true;
-  }
+  virtual bool isReplaySafe() const { return true; }
 
   /**
    * Set the ReplaySafeCallback on this transport.
@@ -475,231 +796,13 @@ class AsyncTransport : public DelayedDestruction, public AsyncSocketBase {
     }
   }
 
- protected:
-  ~AsyncTransport() override = default;
-};
-
-class AsyncReader {
  public:
-  class ReadCallback {
-   public:
-    virtual ~ReadCallback() = default;
-
-    /**
-     * When data becomes available, getReadBuffer() will be invoked to get the
-     * buffer into which data should be read.
-     *
-     * This method allows the ReadCallback to delay buffer allocation until
-     * data becomes available.  This allows applications to manage large
-     * numbers of idle connections, without having to maintain a separate read
-     * buffer for each idle connection.
-     *
-     * It is possible that in some cases, getReadBuffer() may be called
-     * multiple times before readDataAvailable() is invoked.  In this case, the
-     * data will be written to the buffer returned from the most recent call to
-     * readDataAvailable().  If the previous calls to readDataAvailable()
-     * returned different buffers, the ReadCallback is responsible for ensuring
-     * that they are not leaked.
-     *
-     * If getReadBuffer() throws an exception, returns a nullptr buffer, or
-     * returns a 0 length, the ReadCallback will be uninstalled and its
-     * readError() method will be invoked.
-     *
-     * getReadBuffer() is not allowed to change the transport state before it
-     * returns.  (For example, it should never uninstall the read callback, or
-     * set a different read callback.)
-     *
-     * @param bufReturn getReadBuffer() should update *bufReturn to contain the
-     *                  address of the read buffer.  This parameter will never
-     *                  be nullptr.
-     * @param lenReturn getReadBuffer() should update *lenReturn to contain the
-     *                  maximum number of bytes that may be written to the read
-     *                  buffer.  This parameter will never be nullptr.
-     */
-    virtual void getReadBuffer(void** bufReturn, size_t* lenReturn) = 0;
-
-    /**
-     * readDataAvailable() will be invoked when data has been successfully read
-     * into the buffer returned by the last call to getReadBuffer().
-     *
-     * The read callback remains installed after readDataAvailable() returns.
-     * It must be explicitly uninstalled to stop receiving read events.
-     * getReadBuffer() will be called at least once before each call to
-     * readDataAvailable().  getReadBuffer() will also be called before any
-     * call to readEOF().
-     *
-     * @param len       The number of bytes placed in the buffer.
-     */
-
-    virtual void readDataAvailable(size_t len) noexcept = 0;
-
-    /**
-     * When data becomes available, isBufferMovable() will be invoked to figure
-     * out which API will be used, readBufferAvailable() or
-     * readDataAvailable(). If isBufferMovable() returns true, that means
-     * ReadCallback supports the IOBuf ownership transfer and
-     * readBufferAvailable() will be used.  Otherwise, not.
-
-     * By default, isBufferMovable() always return false. If
-     * readBufferAvailable() is implemented and to be invoked, You should
-     * overwrite isBufferMovable() and return true in the inherited class.
-     *
-     * This method allows the AsyncSocket/AsyncSSLSocket do buffer allocation by
-     * itself until data becomes available.  Compared with the pre/post buffer
-     * allocation in getReadBuffer()/readDataAvailabe(), readBufferAvailable()
-     * has two advantages.  First, this can avoid memcpy. E.g., in
-     * AsyncSSLSocket, the decrypted data was copied from the openssl internal
-     * buffer to the readbuf buffer.  With the buffer ownership transfer, the
-     * internal buffer can be directly "moved" to ReadCallback. Second, the
-     * memory allocation can be more precise.  The reason is
-     * AsyncSocket/AsyncSSLSocket can allocate the memory of precise size
-     * because they have more context about the available data than
-     * ReadCallback.  Think about the getReadBuffer() pre-allocate 4072 bytes
-     * buffer, but the available data is always 16KB (max OpenSSL record size).
-     */
-
-    virtual bool isBufferMovable() noexcept {
-      return false;
-    }
-
-    /**
-     * Suggested buffer size, allocated for read operations,
-     * if callback is movable and supports folly::IOBuf
-     */
-
-    virtual size_t maxBufferSize() const {
-      return 64 * 1024; // 64K
-    }
-
-    /**
-     * readBufferAvailable() will be invoked when data has been successfully
-     * read.
-     *
-     * Note that only either readBufferAvailable() or readDataAvailable() will
-     * be invoked according to the return value of isBufferMovable(). The timing
-     * and aftereffect of readBufferAvailable() are the same as
-     * readDataAvailable()
-     *
-     * @param readBuf The unique pointer of read buffer.
-     */
-
-    virtual void readBufferAvailable(
-        std::unique_ptr<IOBuf> /*readBuf*/) noexcept {}
-
-    /**
-     * readEOF() will be invoked when the transport is closed.
-     *
-     * The read callback will be automatically uninstalled immediately before
-     * readEOF() is invoked.
-     */
-    virtual void readEOF() noexcept = 0;
-
-    /**
-     * readError() will be invoked if an error occurs reading from the
-     * transport.
-     *
-     * The read callback will be automatically uninstalled immediately before
-     * readError() is invoked.
-     *
-     * @param ex        An exception describing the error that occurred.
-     */
-    virtual void readErr(const AsyncSocketException& ex) noexcept = 0;
-  };
-
-  // Read methods that aren't part of AsyncTransport.
-  virtual void setReadCB(ReadCallback* callback) = 0;
-  virtual ReadCallback* getReadCallback() const = 0;
-
- protected:
-  virtual ~AsyncReader() = default;
-};
-
-class AsyncWriter {
- public:
-  class WriteCallback {
-   public:
-    virtual ~WriteCallback() = default;
-
-    /**
-     * writeSuccess() will be invoked when all of the data has been
-     * successfully written.
-     *
-     * Note that this mainly signals that the buffer containing the data to
-     * write is no longer needed and may be freed or re-used.  It does not
-     * guarantee that the data has been fully transmitted to the remote
-     * endpoint.  For example, on socket-based transports, writeSuccess() only
-     * indicates that the data has been given to the kernel for eventual
-     * transmission.
-     */
-    virtual void writeSuccess() noexcept = 0;
-
-    /**
-     * writeError() will be invoked if an error occurs writing the data.
-     *
-     * @param bytesWritten      The number of bytes that were successfull
-     * @param ex                An exception describing the error that occurred.
-     */
-    virtual void writeErr(
-        size_t bytesWritten,
-        const AsyncSocketException& ex) noexcept = 0;
-  };
-
-  // Write methods that aren't part of AsyncTransport
-  virtual void write(
-      WriteCallback* callback,
-      const void* buf,
-      size_t bytes,
-      WriteFlags flags = WriteFlags::NONE) = 0;
-  virtual void writev(
-      WriteCallback* callback,
-      const iovec* vec,
-      size_t count,
-      WriteFlags flags = WriteFlags::NONE) = 0;
-  virtual void writeChain(
-      WriteCallback* callback,
-      std::unique_ptr<IOBuf>&& buf,
-      WriteFlags flags = WriteFlags::NONE) = 0;
-
- protected:
-  virtual ~AsyncWriter() = default;
-};
-
-// Transitional intermediate interface. This is deprecated.
-// Wrapper around folly::AsyncTransport, that includes read/write callbacks
-class AsyncTransportWrapper : virtual public AsyncTransport,
-                              virtual public AsyncReader,
-                              virtual public AsyncWriter {
- public:
-  using UniquePtr = std::unique_ptr<AsyncTransportWrapper, Destructor>;
-
-  // Alias for inherited members from AsyncReader and AsyncWriter
-  // to keep compatibility.
-  using ReadCallback = AsyncReader::ReadCallback;
-  using WriteCallback = AsyncWriter::WriteCallback;
-  void setReadCB(ReadCallback* callback) override = 0;
-  ReadCallback* getReadCallback() const override = 0;
-  void write(
-      WriteCallback* callback,
-      const void* buf,
-      size_t bytes,
-      WriteFlags flags = WriteFlags::NONE) override = 0;
-  void writev(
-      WriteCallback* callback,
-      const iovec* vec,
-      size_t count,
-      WriteFlags flags = WriteFlags::NONE) override = 0;
-  void writeChain(
-      WriteCallback* callback,
-      std::unique_ptr<IOBuf>&& buf,
-      WriteFlags flags = WriteFlags::NONE) override = 0;
   /**
-   * The transport wrapper may wrap another transport. This returns the
+   * AsyncTransports may wrap other AsyncTransport. This returns the
    * transport that is wrapped. It returns nullptr if there is no wrapped
    * transport.
    */
-  virtual const AsyncTransportWrapper* getWrappedTransport() const {
-    return nullptr;
-  }
+  virtual const AsyncTransport* getWrappedTransport() const { return nullptr; }
 
   /**
    * In many cases when we need to set socket properties or otherwise access the
@@ -708,7 +811,7 @@ class AsyncTransportWrapper : virtual public AsyncTransport,
    */
   template <class T>
   const T* getUnderlyingTransport() const {
-    const AsyncTransportWrapper* current = this;
+    const AsyncTransport* current = this;
     while (current) {
       auto sock = dynamic_cast<const T*>(current);
       if (sock) {
@@ -721,9 +824,82 @@ class AsyncTransportWrapper : virtual public AsyncTransport,
 
   template <class T>
   T* getUnderlyingTransport() {
-    return const_cast<T*>(static_cast<const AsyncTransportWrapper*>(this)
-                              ->getUnderlyingTransport<T>());
+    return const_cast<T*>(
+        static_cast<const AsyncTransport*>(this)->getUnderlyingTransport<T>());
   }
+
+  virtual AsyncTransport::UniquePtr tryExchangeWrappedTransport(
+      AsyncTransport::UniquePtr& /* transport */) {
+    return AsyncTransport::UniquePtr{};
+  }
+
+  template <class T>
+  typename T::UniquePtr tryExchangeUnderlyingTransport(
+      AsyncTransport::UniquePtr& p) {
+    AsyncTransport const* current = getWrappedTransport();
+    AsyncTransport const* last = this;
+    while (current) {
+      if (dynamic_cast<T const*>(current)) {
+        AsyncTransport::UniquePtr ret =
+            const_cast<AsyncTransport*>(last)->tryExchangeWrappedTransport(p);
+        ret->setReadCB(nullptr);
+        DCHECK_NOTNULL(dynamic_cast<T*>(ret.get()));
+        return typename T::UniquePtr(static_cast<T*>(ret.release()));
+      }
+      last = current;
+      current = current->getWrappedTransport();
+    }
+    return nullptr;
+  }
+
+  /**
+   * Returns a const pointer to wrapping or decorating transport of type T.
+   *
+   * If this transport object is not wrapped or decorated by a transport of type
+   * T, returns nullptr. If this transport is wrapped or decorated multiple
+   * times by such a type, returns the first occurrence.
+   */
+  template <class T>
+  const T* getWrappingTransport() const {
+    const AsyncTransport* current = this;
+    while (current) {
+      auto wrapped = dynamic_cast<const T*>(current);
+      if (wrapped) {
+        return wrapped;
+      }
+      current = current->decoratingTransport_;
+    }
+    return nullptr;
+  }
+
+  /**
+   * Returns a pointer to wrapping or decorating transport of type T.
+   *
+   * If this transport object is not wrapped or decorated by a transport of type
+   * T, returns nullptr. If this transport is wrapped or decorated multiple
+   * times by such a type, returns the first occurrence.
+   */
+  template <class T>
+  T* getWrappingTransport() {
+    return const_cast<T*>(
+        static_cast<const AsyncTransport*>(this)->getWrappingTransport<T>());
+  }
+
+ protected:
+  ~AsyncTransport() override = default;
+
+ private:
+  template <class T>
+  friend class DecoratedAsyncTransportWrapper;
+
+  // Transports can be wrapped through inheritence or through a decorator such
+  // as DecoratedAsyncTransportWrapper, in which case the wrapped transport is
+  // a member field of the decorating transport.
+  //
+  // When wrapped by a decorator, this field holds a pointer to the decorating
+  // transport. When not supported, this field is nullptr.
+  AsyncTransport* decoratingTransport_{nullptr};
 };
 
+using AsyncTransportWrapper = AsyncTransport;
 } // namespace folly

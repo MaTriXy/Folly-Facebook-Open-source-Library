@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,11 +17,22 @@
 #pragma once
 
 #include <folly/FBString.h>
+#include <folly/portability/Config.h>
 
 namespace folly {
 
+inline constexpr size_t demangle_max_symbol_size =
+#if defined(FOLLY_DEMANGLE_MAX_SYMBOL_SIZE)
+    FOLLY_DEMANGLE_MAX_SYMBOL_SIZE;
+#else
+    0;
+#endif
+
+extern bool const demangle_build_has_cxxabi;
+extern bool const demangle_build_has_liberty;
+
 /**
- * Return the demangled (prettyfied) version of a C++ type.
+ * Return the demangled (prettified) version of a C++ type.
  *
  * This function tries to produce a human-readable type, but the type name will
  * be returned unchanged in case of error or if demangling isn't supported on
@@ -37,7 +48,7 @@ inline fbstring demangle(const std::type_info& type) {
 }
 
 /**
- * Return the demangled (prettyfied) version of a C++ type in a user-provided
+ * Return the demangled (prettified) version of a C++ type in a user-provided
  * buffer.
  *
  * The semantics are the same as for snprintf or strlcpy: bufSize is the size
@@ -54,12 +65,9 @@ inline fbstring demangle(const std::type_info& type) {
  * libiberty), so it is possible for the fbstring version to work, while this
  * version returns the original, mangled name.
  */
-size_t demangle(const char* name, char* buf, size_t bufSize);
+size_t demangle(const char* name, char* out, size_t outSize);
 inline size_t demangle(const std::type_info& type, char* buf, size_t bufSize) {
   return demangle(type.name(), buf, bufSize);
 }
-
-// glibc doesn't have strlcpy
-size_t strlcpy(char* dest, const char* const src, size_t size);
 
 } // namespace folly

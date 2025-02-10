@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,57 +19,27 @@
 namespace folly {
 
 template <class T>
-SharedPromise<T>::SharedPromise(SharedPromise<T>&& other) noexcept {
-  *this = std::move(other);
-}
-
-template <class T>
-SharedPromise<T>& SharedPromise<T>::operator=(
-    SharedPromise<T>&& other) noexcept {
-  if (this == &other) {
-    return *this;
-  }
-
-  // std::lock will perform deadlock avoidance, in case
-  // Thread A: p1 = std::move(p2)
-  // Thread B: p2 = std::move(p1)
-  // race each other
-  std::lock(mutex_, other.mutex_);
-  std::lock_guard<std::mutex> g1(mutex_, std::adopt_lock);
-  std::lock_guard<std::mutex> g2(other.mutex_, std::adopt_lock);
-
-  std::swap(size_, other.size_);
-  std::swap(hasValue_, other.hasValue_);
-  std::swap(try_, other.try_);
-  std::swap(interruptHandler_, other.interruptHandler_);
-  std::swap(promises_, other.promises_);
-
-  return *this;
-}
-
-template <class T>
-size_t SharedPromise<T>::size() {
+size_t SharedPromise<T>::size() const {
   std::lock_guard<std::mutex> g(mutex_);
-  return size_;
+  return size_.value;
 }
 
 template <class T>
-SemiFuture<T> SharedPromise<T>::getSemiFuture() {
+SemiFuture<T> SharedPromise<T>::getSemiFuture() const {
   std::lock_guard<std::mutex> g(mutex_);
-  size_++;
-  if (hasValue_) {
-    return makeFuture<T>(Try<T>(try_));
-  } else {
-    promises_.emplace_back();
-    if (interruptHandler_) {
-      promises_.back().setInterruptHandler(interruptHandler_);
-    }
-    return promises_.back().getSemiFuture();
+  size_.value++;
+  if (hasResult()) {
+    return makeFuture<T>(Try<T>(try_.value));
   }
+  auto& promise = promises_.emplace_back();
+  if (interruptHandler_) {
+    promise.setInterruptHandler(interruptHandler_);
+  }
+  return promise.getSemiFuture();
 }
 
 template <class T>
-Future<T> SharedPromise<T>::getFuture() {
+Future<T> SharedPromise<T>::getFuture() const {
   return getSemiFuture().via(&InlineExecutor::instance());
 }
 
@@ -89,7 +59,7 @@ template <class T>
 void SharedPromise<T>::setInterruptHandler(
     std::function<void(exception_wrapper const&)> fn) {
   std::lock_guard<std::mutex> g(mutex_);
-  if (hasValue_) {
+  if (hasResult()) {
     return;
   }
   interruptHandler_ = fn;
@@ -101,13 +71,13 @@ void SharedPromise<T>::setInterruptHandler(
 template <class T>
 template <class M>
 void SharedPromise<T>::setValue(M&& v) {
-  setTry(Try<T>(std::forward<M>(v)));
+  setTry(Try<T>(static_cast<M&&>(v)));
 }
 
 template <class T>
 template <class F>
 void SharedPromise<T>::setWith(F&& func) {
-  setTry(makeTryWith(std::forward<F>(func)));
+  setTry(makeTryWith(static_cast<F&&>(func)));
 }
 
 template <class T>
@@ -116,23 +86,27 @@ void SharedPromise<T>::setTry(Try<T>&& t) {
 
   {
     std::lock_guard<std::mutex> g(mutex_);
-    if (hasValue_) {
+    if (hasResult()) {
       throw_exception<PromiseAlreadySatisfied>();
     }
-    hasValue_ = true;
-    try_ = std::move(t);
+    try_.value = std::move(t);
     promises.swap(promises_);
   }
 
   for (auto& p : promises) {
-    p.setTry(Try<T>(try_));
+    p.setTry(Try<T>(try_.value));
   }
 }
 
 template <class T>
-bool SharedPromise<T>::isFulfilled() {
+bool SharedPromise<T>::isFulfilled() const {
   std::lock_guard<std::mutex> g(mutex_);
-  return hasValue_;
+  return hasResult();
 }
+
+#if FOLLY_USE_EXTERN_FUTURE_UNIT
+// limited to the instances unconditionally forced by the futures library
+extern template class SharedPromise<Unit>;
+#endif
 
 } // namespace folly

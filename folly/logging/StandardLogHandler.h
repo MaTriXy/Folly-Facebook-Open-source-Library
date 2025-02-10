@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <memory>
@@ -43,8 +44,9 @@ class StandardLogHandler : public LogHandler {
   StandardLogHandler(
       LogHandlerConfig config,
       std::shared_ptr<LogFormatter> formatter,
-      std::shared_ptr<LogWriter> writer);
-  ~StandardLogHandler();
+      std::shared_ptr<LogWriter> writer,
+      LogLevel syncLevel = LogLevel::MAX_LEVEL);
+  ~StandardLogHandler() override;
 
   /**
    * Get the LogFormatter used by this handler.
@@ -56,9 +58,7 @@ class StandardLogHandler : public LogHandler {
   /**
    * Get the LogWriter used by this handler.
    */
-  const std::shared_ptr<LogWriter>& getWriter() const {
-    return writer_;
-  }
+  const std::shared_ptr<LogWriter>& getWriter() const { return writer_; }
 
   /**
    * Get the handler's current LogLevel.
@@ -66,9 +66,7 @@ class StandardLogHandler : public LogHandler {
    * Messages less than this LogLevel will be ignored.  This defaults to
    * LogLevel::NONE when the handler is constructed.
    */
-  LogLevel getLevel() const {
-    return level_.load(std::memory_order_acquire);
-  }
+  LogLevel getLevel() const { return level_.load(std::memory_order_acquire); }
 
   /**
    * Set the handler's current LogLevel.
@@ -80,8 +78,7 @@ class StandardLogHandler : public LogHandler {
   }
 
   void handleMessage(
-      const LogMessage& message,
-      const LogCategory* handlerCategory) override;
+      const LogMessage& message, const LogCategory* handlerCategory) override;
 
   void flush() override;
 
@@ -89,6 +86,7 @@ class StandardLogHandler : public LogHandler {
 
  private:
   std::atomic<LogLevel> level_{LogLevel::NONE};
+  std::atomic<LogLevel> syncLevel_{LogLevel::MAX_LEVEL};
 
   // The following variables are const, and cannot be modified after the
   // log handler is constructed.  This allows us to access them without

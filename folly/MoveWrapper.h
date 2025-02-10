@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -39,8 +39,7 @@ class MoveWrapper {
   MoveWrapper() = default;
 
   /// Move a value in.
-  explicit
-  MoveWrapper(T&& t) : value(std::move(t)) {}
+  explicit MoveWrapper(T&& t) : value(std::move(t)) {}
 
   /// copy is move
   MoveWrapper(const MoveWrapper& other) : value(std::move(other.value)) {}
@@ -49,10 +48,10 @@ class MoveWrapper {
   MoveWrapper(MoveWrapper&& other) : value(std::move(other.value)) {}
 
   const T& operator*() const { return value; }
-        T& operator*()       { return value; }
+  T& operator*() { return value; }
 
   const T* operator->() const { return &value; }
-        T* operator->()       { return &value; }
+  T* operator->() { return &value; }
 
   /// move the value out (sugar for std::move(*moveWrapper))
   T&& move() { return std::move(value); }

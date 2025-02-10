@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,15 +15,16 @@
  */
 
 #ifndef FOLLY_GEN_PARALLEL_H_
-#error This file may only be included from folly/gen/ParallelGen.h
+#error This file may only be included from folly/gen/Parallel.h
 #endif
 
-#include <folly/MPMCQueue.h>
-#include <folly/ScopeGuard.h>
-#include <folly/experimental/EventCount.h>
 #include <atomic>
 #include <thread>
 #include <vector>
+
+#include <folly/MPMCQueue.h>
+#include <folly/ScopeGuard.h>
+#include <folly/synchronization/EventCount.h>
 
 namespace folly {
 namespace gen {
@@ -85,15 +86,21 @@ class ClosableMPMCQueue {
   template <typename... Args>
   bool writeUnlessClosed(Args&&... args) {
     // write if there's room
-    while (!queue_.writeIfNotFull(std::forward<Args>(args)...)) {
-      // if write fails, check if there are still consumers listening
-      auto key = wakeProducer_.prepareWait();
-      if (!consumers()) {
-        // no consumers left; bail out
-        wakeProducer_.cancelWait();
-        return false;
+    if (!queue_.writeIfNotFull(std::forward<Args>(args)...)) {
+      while (true) {
+        auto key = wakeProducer_.prepareWait();
+        // if write fails, check if there are still consumers listening
+        if (!consumers()) {
+          // no consumers left; bail out
+          wakeProducer_.cancelWait();
+          return false;
+        }
+        if (queue_.writeIfNotFull(std::forward<Args>(args)...)) {
+          wakeProducer_.cancelWait();
+          break;
+        }
+        wakeProducer_.wait(key);
       }
-      wakeProducer_.wait(key);
     }
     // wake consumers to pick up new value
     wakeConsumer_.notify();
@@ -110,14 +117,21 @@ class ClosableMPMCQueue {
   }
 
   bool readUnlessClosed(T& out) {
-    while (!queue_.readIfNotEmpty(out)) {
-      auto key = wakeConsumer_.prepareWait();
-      if (!producers()) {
-        // wake producers to fill empty space
-        wakeProducer_.notify();
-        return false;
+    if (!queue_.readIfNotEmpty(out)) {
+      while (true) {
+        auto key = wakeConsumer_.prepareWait();
+        if (queue_.readIfNotEmpty(out)) {
+          wakeConsumer_.cancelWait();
+          break;
+        }
+        if (!producers()) {
+          wakeConsumer_.cancelWait();
+          // wake producers to fill empty space
+          wakeProducer_.notify();
+          return false;
+        }
+        wakeConsumer_.wait(key);
       }
-      wakeConsumer_.wait(key);
     }
     // wake writers blocked by full queue
     wakeProducer_.notify();
@@ -159,18 +173,22 @@ class Parallel : public Operator<Parallel<Ops>> {
           decltype(std::declval<Ops>().compose(Empty<InputDecayed&&>())),
       class Output = typename Composed::ValueType,
       class OutputDecayed = typename std::decay<Output>::type>
-  class Generator : public GenImpl<OutputDecayed&&,
-                                   Generator<Input,
-                                             Source,
-                                             InputDecayed,
-                                             Composed,
-                                             Output,
-                                             OutputDecayed>> {
-    const Source source_;
-    const Ops ops_;
-    const size_t threads_;
-    typedef ClosableMPMCQueue<InputDecayed> InQueue;
-    typedef ClosableMPMCQueue<OutputDecayed> OutQueue;
+  class Generator
+      : public GenImpl<
+            OutputDecayed&&,
+            Generator<
+                Input,
+                Source,
+                InputDecayed,
+                Composed,
+                Output,
+                OutputDecayed>> {
+    Source source_;
+    Ops ops_;
+    size_t threads_;
+
+    using InQueue = ClosableMPMCQueue<InputDecayed>;
+    using OutQueue = ClosableMPMCQueue<OutputDecayed>;
 
     class Puller : public GenImpl<InputDecayed&&, Puller> {
       InQueue* queue_;
@@ -228,9 +246,7 @@ class Parallel : public Operator<Parallel<Ops>> {
       std::vector<std::thread> workers_;
       const Ops* ops_;
 
-      void work() {
-        puller_ | *ops_ | pusher_;
-      }
+      void work() { puller_ | *ops_ | pusher_; }
 
      public:
       Executor(size_t threads, const Ops* ops)

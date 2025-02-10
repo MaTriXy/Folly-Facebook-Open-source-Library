@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -41,6 +41,8 @@ bool canSetOtherThreadName();
 /**
  * Get the name of the given thread, or nothing if an error occurs
  * or the functionality is not available.
+ *
+ * @param tid Thread id
  */
 Optional<std::string> getThreadName(std::thread::id tid);
 
@@ -51,16 +53,20 @@ Optional<std::string> getCurrentThreadName();
 
 /**
  * Set the name of the given thread.
+ *
  * Returns false on failure, if an error occurs or the functionality
  * is not available.
+ *
+ * @param tid Thread id
+ * @param name Name to set
  */
 bool setThreadName(std::thread::id tid, StringPiece name);
-#if FOLLY_HAVE_PTHREAD
 bool setThreadName(pthread_t pid, StringPiece name);
-#endif
 
 /**
  * Equivalent to setThreadName(std::this_thread::get_id(), name);
+ *
+ * @param name Name to set
  */
 bool setThreadName(StringPiece name);
 } // namespace folly

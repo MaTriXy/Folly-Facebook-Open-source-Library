@@ -1,11 +1,11 @@
 /*
- * Copyright 2016-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,7 +26,9 @@
 #include <folly/portability/SysStat.h>
 #include <folly/portability/Windows.h>
 
-extern "C" {
+namespace folly {
+namespace portability {
+namespace stdlib {
 char* mktemp(char* tn) {
   return _mktemp(tn);
 }
@@ -62,7 +64,7 @@ int mkstemp(char* tn) {
     if (ptr == nullptr || *ptr == '\0') {
       return -1;
     }
-    ret = open(ptr, O_RDWR | O_EXCL | O_CREAT, S_IRUSR | S_IWUSR);
+    ret = fileops::open(ptr, O_RDWR | O_EXCL | O_CREAT, S_IRUSR | S_IWUSR);
     if (ret == -1 && errno != EEXIST) {
       return -1;
     }
@@ -138,16 +140,18 @@ int unsetenv(const char* name) {
   }
   return 0;
 }
-}
+} // namespace stdlib
+} // namespace portability
+} // namespace folly
 
 #endif
 
-#if !__linux__ && !FOLLY_MOBILE
+#if !__linux__ && !defined(__FreeBSD__) && !FOLLY_MOBILE && !defined(__wasm32__)
 
 #include <string>
 #include <vector>
 
-extern "C" int clearenv() {
+int folly::portability::stdlib::clearenv() {
   std::vector<std::string> data;
   for (auto it = environ; it && *it; ++it) {
     std::string entry(*it);

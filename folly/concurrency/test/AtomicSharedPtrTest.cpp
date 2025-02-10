@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,14 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#include <folly/concurrency/AtomicSharedPtr.h>
+
 #include <atomic>
 #include <memory>
 #include <thread>
 
-#include <folly/concurrency/AtomicSharedPtr.h>
+#include <folly/Portability.h>
 #include <folly/concurrency/test/AtomicSharedPtrCounted.h>
+#include <folly/portability/Config.h>
+#include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
-
 #include <folly/test/DeterministicSchedule.h>
 
 using namespace folly;
@@ -35,17 +39,15 @@ DEFINE_int64(seed, 0, "Seed for random number generators");
 DEFINE_int32(num_threads, 32, "Number of threads");
 
 struct foo {
-  foo() {
-    c_count++;
-  }
-  ~foo() {
-    d_count++;
-  }
+  foo() { c_count++; }
+  ~foo() { d_count++; }
 };
 
 TEST(AtomicSharedPtr, operators) {
   atomic_shared_ptr<int> fooptr;
+#if FOLLY_HAS_ATOMIC_SHARED_PTR_HOOKED
   EXPECT_TRUE(fooptr.is_lock_free());
+#endif
   auto i = new int(5);
   std::shared_ptr<int> s(i);
   fooptr.store(s);
@@ -83,6 +85,8 @@ TEST(AtomicSharedPtr, foo) {
   EXPECT_EQ(1, d_count);
 }
 
+#if FOLLY_HAS_ATOMIC_SHARED_PTR_HOOKED
+
 TEST(AtomicSharedPtr, counted) {
   c_count = 0;
   d_count = 0;
@@ -112,6 +116,8 @@ TEST(AtomicSharedPtr, counted2) {
   fooptr.load();
 }
 
+#endif
+
 TEST(AtomicSharedPtr, ConstTest) {
   const auto a(std::make_shared<foo>());
   atomic_shared_ptr<foo> atom;
@@ -119,6 +125,7 @@ TEST(AtomicSharedPtr, ConstTest) {
 
   atomic_shared_ptr<const foo> catom;
 }
+
 TEST(AtomicSharedPtr, AliasingConstructorTest) {
   c_count = 0;
   d_count = 0;
@@ -144,6 +151,23 @@ TEST(AtomicSharedPtr, AliasingConstructorTest) {
   EXPECT_EQ(2, c_count);
   EXPECT_EQ(2, d_count);
 }
+
+TEST(AtomicSharedPtr, AliasingWithNoControlBlockConstructorTest) {
+  long value = 0;
+  atomic_shared_ptr<long> ptr{shared_ptr<long>{shared_ptr<long>{}, &value}};
+  EXPECT_EQ(ptr.load().get(), &value);
+}
+
+TEST(AtomicSharedPtr, AliasingWithNullptrConstructorTest) {
+  atomic_shared_ptr<foo> ptr{shared_ptr<foo>{std::make_shared<foo>(), nullptr}};
+  EXPECT_EQ(ptr.load().get(), nullptr);
+  // Verify that atomic_shared_ptr is holding the underlying object.
+  EXPECT_EQ(d_count, 0);
+  ptr.store({});
+  EXPECT_EQ(d_count, 1);
+}
+
+#if FOLLY_HAS_ATOMIC_SHARED_PTR_HOOKED
 
 TEST(AtomicSharedPtr, MaxPtrs) {
   shared_ptr<long> p(new long);
@@ -181,4 +205,54 @@ TEST(AtomicSharedPtr, DeterministicTest) {
   for (auto& t : threads) {
     DSched::join(t);
   }
+}
+
+#endif
+
+TEST(AtomicSharedPtr, StressTest) {
+  constexpr size_t kExternalOffset = 0x2000;
+
+  atomic_shared_ptr<bool> ptr;
+  std::atomic<size_t> num_loads = 0;
+  std::atomic<size_t> num_stores = 0;
+
+  // DeterministicSchedule is too slow for the number of iterations required
+  // here, and we need a test that exercises the native atomics.
+  std::vector<std::thread> threads;
+  for (int tid = 0; tid < FLAGS_num_threads; ++tid) {
+    threads.emplace_back([&] {
+      shared_ptr<bool> v;
+      for (size_t i = 0; i < 16 * kExternalOffset; ++i) {
+        // Each time we've gone through a few local -> global batches, replace
+        // the pointer to contend with other load()s. This also does the first
+        // initialization, and a few threads may see nullptr for a while.
+        if (num_loads++ % (kExternalOffset * 2) == 0) {
+          auto newv = std::make_shared<bool>();
+          // Alternate between store and CAS.
+          if (num_stores++ % 2 == 0) {
+            ptr.store(std::move(newv), std::memory_order_release);
+          } else {
+            v = ptr.load(std::memory_order_relaxed);
+            ptr.compare_exchange_strong(
+                v,
+                std::move(newv),
+                std::memory_order_acq_rel,
+                std::memory_order_relaxed);
+          }
+        }
+        // Increments the local count and decrements the external one,
+        // eventually forcing a batch transfer.
+        v = ptr.load(std::memory_order_acquire);
+      }
+    });
+  }
+  for (auto& t : threads) {
+    t.join();
+  }
+}
+
+TEST(AtomicSharedPtr, Leak) {
+  static auto& ptr = *new atomic_shared_ptr<int>();
+  ptr.store(std::make_shared<int>(3), std::memory_order_relaxed);
+  EXPECT_EQ(3, *ptr.load(std::memory_order_relaxed));
 }

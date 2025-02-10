@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,7 +31,7 @@ template class folly::propagate_const<std::shared_ptr<int>>;
 
 template <typename T>
 static bool is_const(T&&) {
-  return std::is_const<_t<std::remove_reference<T>>>::value;
+  return std::is_const<std::remove_reference_t<T>>::value;
 }
 
 template <typename T>
@@ -82,9 +82,9 @@ TEST_F(PropagateConstTest, get) {
   auto pc_a = pc<int*>(a);
 
   EXPECT_EQ(a, pc_a.get());
-  EXPECT_EQ(a, as_const(pc_a).get());
+  EXPECT_EQ(a, std::as_const(pc_a).get());
   EXPECT_FALSE(is_const(*pc_a.get()));
-  EXPECT_TRUE(is_const(*as_const(pc_a).get()));
+  EXPECT_TRUE(is_const(*std::as_const(pc_a).get()));
 }
 
 TEST_F(PropagateConstTest, op_indirect) {
@@ -93,9 +93,9 @@ TEST_F(PropagateConstTest, op_indirect) {
   auto pc_a = pc<int*>(a);
 
   EXPECT_EQ(a, &*pc_a);
-  EXPECT_EQ(a, &*as_const(pc_a));
+  EXPECT_EQ(a, &*std::as_const(pc_a));
   EXPECT_FALSE(is_const(*pc_a));
-  EXPECT_TRUE(is_const(*as_const(pc_a)));
+  EXPECT_TRUE(is_const(*std::as_const(pc_a)));
 }
 
 TEST_F(PropagateConstTest, op_element_type_ptr) {
@@ -104,7 +104,7 @@ TEST_F(PropagateConstTest, op_element_type_ptr) {
   auto pc_a = pc<int*>(a);
 
   EXPECT_EQ(a, static_cast<int*>(pc_a));
-  EXPECT_EQ(a, static_cast<int const*>(as_const(pc_a)));
+  EXPECT_EQ(a, static_cast<int const*>(std::as_const(pc_a)));
 }
 
 TEST_F(PropagateConstTest, op_bool) {
@@ -123,10 +123,10 @@ TEST_F(PropagateConstTest, get_underlying) {
   auto pc_a = pc<int*>(a);
 
   EXPECT_EQ(a, get_underlying(pc_a));
-  EXPECT_EQ(a, get_underlying(as_const(pc_a)));
+  EXPECT_EQ(a, get_underlying(std::as_const(pc_a)));
   EXPECT_FALSE(is_const(get_underlying(pc_a)));
-  EXPECT_TRUE(is_const(get_underlying(as_const(pc_a))));
-  EXPECT_TRUE(&get_underlying(pc_a) == &get_underlying(as_const(pc_a)));
+  EXPECT_TRUE(is_const(get_underlying(std::as_const(pc_a))));
+  EXPECT_TRUE(&get_underlying(pc_a) == &get_underlying(std::as_const(pc_a)));
 }
 
 TEST_F(PropagateConstTest, swap) {

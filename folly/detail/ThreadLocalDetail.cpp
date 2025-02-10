@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,101 +13,139 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-#include <folly/detail/ThreadLocalDetail.h>
-#include <folly/synchronization/CallOnce.h>
 
+#include <folly/detail/ThreadLocalDetail.h>
+
+#include <algorithm>
 #include <list>
 #include <mutex>
+#include <random>
+
+#include <folly/ConstexprMath.h>
+#include <folly/Utility.h>
+#include <folly/detail/thread_local_globals.h>
+#include <folly/lang/Hint.h>
+#include <folly/memory/SanitizeLeak.h>
+#include <folly/synchronization/CallOnce.h>
 
 constexpr auto kSmallGrowthFactor = 1.1;
 constexpr auto kBigGrowthFactor = 1.7;
 
-namespace folly { namespace threadlocal_detail {
+namespace folly {
+namespace threadlocal_detail {
 
-void ThreadEntryNode::initIfZero(bool locked) {
-  if (UNLIKELY(!next)) {
-    if (LIKELY(locked)) {
-      parent->meta->pushBackLocked(parent, id);
-    } else {
-      parent->meta->pushBackUnlocked(parent, id);
-    }
-  }
+struct rand_engine {
+  using result_type = unsigned int;
+  result_type operator()() { return to_unsigned(std::rand()); }
+  static constexpr result_type min() { return 0; }
+  static constexpr result_type max() { return RAND_MAX; }
+};
+
+SharedPtrDeleter::SharedPtrDeleter(std::shared_ptr<void> const& ts) noexcept
+    : ts_{ts} {}
+SharedPtrDeleter::SharedPtrDeleter(SharedPtrDeleter const& that) noexcept
+    : ts_{that.ts_} {}
+SharedPtrDeleter::~SharedPtrDeleter() = default;
+void SharedPtrDeleter::operator()(
+    void* /* ptr */, folly::TLPDestructionMode) const {
+  ts_.reset();
 }
 
-void ThreadEntryNode::push_back(ThreadEntry* head) {
-  // get the head prev and next nodes
-  ThreadEntryNode* hnode = &head->elements[id].node;
-
-  // update current
-  next = head;
-  prev = hnode->prev;
-
-  // hprev
-  ThreadEntryNode* hprev = &hnode->prev->elements[id].node;
-  hprev->next = parent;
-  hnode->prev = parent;
+uintptr_t ElementWrapper::castForgetAlign(DeleterFunType* f) noexcept {
+  auto const p = reinterpret_cast<char const*>(f);
+  auto const q = std::launder(p);
+  return reinterpret_cast<uintptr_t>(q);
 }
 
-void ThreadEntryNode::eraseZero() {
-  if (LIKELY(prev != nullptr)) {
-    // get the prev and next nodes
-    ThreadEntryNode* nprev = &prev->elements[id].node;
-    ThreadEntryNode* nnext = &next->elements[id].node;
-
-    // update the prev and next
-    nnext->prev = prev;
-    nprev->next = next;
-
-    // set the prev and next to nullptr
-    next = prev = nullptr;
+bool ThreadEntrySet::basicSanity() const {
+  if constexpr (!kIsDebug) {
+    return true;
   }
+  if (threadEntries.empty() && entryToVectorSlot.empty()) {
+    return true;
+  }
+  if (threadEntries.size() != entryToVectorSlot.size()) {
+    return false;
+  }
+  auto const size = threadEntries.size();
+  rand_engine rng;
+  std::uniform_int_distribution<size_t> dist{0, size - 1};
+  if (dist(rng) < constexpr_log2(size)) {
+    return true;
+  }
+  return //
+      std::all_of(
+          entryToVectorSlot.begin(),
+          entryToVectorSlot.end(),
+          [&](auto const& kvp) {
+            return kvp.second < threadEntries.size() &&
+                threadEntries[kvp.second] == kvp.first;
+          });
+}
+
+void ThreadEntrySet::compress() {
+  assert(compressible());
+  // compress the vector
+  threadEntries.shrink_to_fit();
+  // compress the index
+  EntryIndex newIndex;
+  newIndex.reserve(entryToVectorSlot.size());
+  while (!entryToVectorSlot.empty()) {
+    newIndex.insert(entryToVectorSlot.extract(entryToVectorSlot.begin()));
+  }
+  entryToVectorSlot = std::move(newIndex);
 }
 
 StaticMetaBase::StaticMetaBase(ThreadEntry* (*threadEntry)(), bool strict)
     : nextId_(1), threadEntry_(threadEntry), strict_(strict) {
-  head_.next = head_.prev = &head_;
   int ret = pthread_key_create(&pthreadKey_, &onThreadExit);
   checkPosixError(ret, "pthread_key_create failed");
   PthreadKeyUnregister::registerKey(pthreadKey_);
 }
 
 ThreadEntryList* StaticMetaBase::getThreadEntryList() {
-#ifdef FOLLY_TLD_USE_FOLLY_TLS
-  static FOLLY_TLS ThreadEntryList threadEntryListSingleton;
-  return &threadEntryListSingleton;
-#else
   class PthreadKey {
    public:
+    static void onThreadExit(void* ptr) {
+      ThreadEntryList* list = static_cast<ThreadEntryList*>(ptr);
+      StaticMetaBase::cleanupThreadEntriesAndList(list);
+    }
+
     PthreadKey() {
-      int ret = pthread_key_create(&pthreadKey_, nullptr);
+      int ret = pthread_key_create(&pthreadKey_, &onThreadExit);
       checkPosixError(ret, "pthread_key_create failed");
       PthreadKeyUnregister::registerKey(pthreadKey_);
     }
 
-    FOLLY_ALWAYS_INLINE pthread_key_t get() const {
-      return pthreadKey_;
-    }
+    FOLLY_ALWAYS_INLINE pthread_key_t get() const { return pthreadKey_; }
 
    private:
     pthread_key_t pthreadKey_;
   };
 
-  static auto instance = detail::createGlobal<PthreadKey, void>();
+  auto& instance = detail::createGlobal<PthreadKey, void>();
 
   ThreadEntryList* threadEntryList =
-      static_cast<ThreadEntryList*>(pthread_getspecific(instance->get()));
+      static_cast<ThreadEntryList*>(pthread_getspecific(instance.get()));
 
-  if (UNLIKELY(!threadEntryList)) {
-    threadEntryList = new ThreadEntryList();
-    int ret = pthread_setspecific(instance->get(), threadEntryList);
+  if (FOLLY_UNLIKELY(!threadEntryList)) {
+    auto uptr = std::make_unique<ThreadEntryList>();
+    int ret = pthread_setspecific(instance.get(), uptr.get());
     checkPosixError(ret, "pthread_setspecific failed");
+    threadEntryList = uptr.release();
+    threadEntryList->count = 1; // Pin once for own onThreadExit callback.
+    lsan_ignore_object(threadEntryList);
   }
 
   return threadEntryList;
-#endif
+}
+
+bool StaticMetaBase::dying() {
+  return folly::detail::thread_is_dying();
 }
 
 void StaticMetaBase::onThreadExit(void* ptr) {
+  folly::detail::thread_is_dying_mark();
   auto threadEntry = static_cast<ThreadEntry*>(ptr);
 
   {
@@ -116,18 +154,21 @@ void StaticMetaBase::onThreadExit(void* ptr) {
     // Make sure this ThreadEntry is available if ThreadLocal A is accessed in
     // ThreadLocal B destructor.
     pthread_setspecific(meta.pthreadKey_, threadEntry);
-    SharedMutex::ReadHolder rlock(nullptr);
+
+    std::shared_lock forkRlock(meta.forkHandlerLock_);
+    std::shared_lock rlock(meta.accessAllThreadsLock_, std::defer_lock);
     if (meta.strict_) {
-      rlock = SharedMutex::ReadHolder(meta.accessAllThreadsLock_);
+      rlock.lock();
     }
+    meta.removeThreadEntryFromAllInMap(threadEntry);
+    forkRlock.unlock();
     {
       std::lock_guard<std::mutex> g(meta.lock_);
       // mark it as removed
       threadEntry->removed_ = true;
-      meta.erase(&(*threadEntry));
-      for (size_t i = 0u; i < threadEntry->elementsCapacity; ++i) {
-        threadEntry->elements[i].node.eraseZero();
-      }
+      auto elementsCapacity = threadEntry->getElementsCapacity();
+      auto beforeCount = meta.totalElementWrappers_.fetch_sub(elementsCapacity);
+      DCHECK_GE(beforeCount, elementsCapacity);
       // No need to hold the lock any longer; the ThreadEntry is private to this
       // thread now that it's been removed from meta.
     }
@@ -137,11 +178,14 @@ void StaticMetaBase::onThreadExit(void* ptr) {
     // may be required.
     for (bool shouldRun = true; shouldRun;) {
       shouldRun = false;
-      FOR_EACH_RANGE (i, 0, threadEntry->elementsCapacity) {
+      auto elementsCapacity = threadEntry->getElementsCapacity();
+      FOR_EACH_RANGE (i, 0, elementsCapacity) {
         if (threadEntry->elements[i].dispose(TLPDestructionMode::THIS_THREAD)) {
+          threadEntry->elements[i].cleanup();
           shouldRun = true;
         }
       }
+      DCHECK(meta.isThreadEntryRemovedFromAllInMap(threadEntry, !meta.strict_));
     }
     pthread_setspecific(meta.pthreadKey_, nullptr);
   }
@@ -149,8 +193,13 @@ void StaticMetaBase::onThreadExit(void* ptr) {
   auto threadEntryList = threadEntry->list;
   DCHECK_GT(threadEntryList->count, 0u);
 
-  --threadEntryList->count;
+  cleanupThreadEntriesAndList(threadEntryList);
+}
 
+/* static */
+void StaticMetaBase::cleanupThreadEntriesAndList(
+    ThreadEntryList* threadEntryList) {
+  --threadEntryList->count;
   if (threadEntryList->count) {
     return;
   }
@@ -162,14 +211,17 @@ void StaticMetaBase::onThreadExit(void* ptr) {
     while (tmp) {
       auto& meta = *tmp->meta;
       pthread_setspecific(meta.pthreadKey_, tmp);
-      SharedMutex::ReadHolder rlock(nullptr);
+      std::shared_lock rlock(meta.accessAllThreadsLock_, std::defer_lock);
       if (meta.strict_) {
-        rlock = SharedMutex::ReadHolder(meta.accessAllThreadsLock_);
+        rlock.lock();
       }
+
       for (bool shouldRunInner = true; shouldRunInner;) {
         shouldRunInner = false;
-        FOR_EACH_RANGE (i, 0, tmp->elementsCapacity) {
+        auto elementsCapacity = tmp->getElementsCapacity();
+        FOR_EACH_RANGE (i, 0, elementsCapacity) {
           if (tmp->elements[i].dispose(TLPDestructionMode::THIS_THREAD)) {
+            tmp->elements[i].cleanup();
             shouldRunInner = true;
             shouldRunOuter = true;
           }
@@ -189,17 +241,23 @@ void StaticMetaBase::onThreadExit(void* ptr) {
     if (tmp->elements) {
       free(tmp->elements);
       tmp->elements = nullptr;
-      tmp->elementsCapacity = 0;
+      tmp->setElementsCapacity(0);
     }
 
-#ifndef FOLLY_TLD_USE_FOLLY_TLS
+    // Fail safe check to make sure that the ThreadEntry is not present
+    // before issuing a delete.
+    DCHECK(tmp->meta->isThreadEntryRemovedFromAllInMap(tmp, true));
+
     delete tmp;
-#endif
   }
 
-#ifndef FOLLY_TLD_USE_FOLLY_TLS
   delete threadEntryList;
-#endif
+}
+
+uint32_t StaticMetaBase::elementsCapacity() const {
+  ThreadEntry* threadEntry = (*threadEntry_)();
+
+  return FOLLY_LIKELY(!!threadEntry) ? threadEntry->getElementsCapacity() : 0;
 }
 
 uint32_t StaticMetaBase::allocate(EntryID* ent) {
@@ -207,23 +265,18 @@ uint32_t StaticMetaBase::allocate(EntryID* ent) {
   auto& meta = *this;
   std::lock_guard<std::mutex> g(meta.lock_);
 
-  id = ent->value.load();
-  if (id != kEntryIDInvalid) {
-    return id;
+  id = ent->value.load(std::memory_order_relaxed);
+
+  if (id == kEntryIDInvalid) {
+    if (!meta.freeIds_.empty()) {
+      id = meta.freeIds_.back();
+      meta.freeIds_.pop_back();
+    } else {
+      id = meta.nextId_++;
+    }
+    uint32_t old_id = ent->value.exchange(id, std::memory_order_release);
+    DCHECK_EQ(old_id, kEntryIDInvalid);
   }
-
-  if (!meta.freeIds_.empty()) {
-    id = meta.freeIds_.back();
-    meta.freeIds_.pop_back();
-  } else {
-    id = meta.nextId_++;
-  }
-
-  uint32_t old_id = ent->value.exchange(id);
-  DCHECK_EQ(old_id, kEntryIDInvalid);
-
-  reserveHeadUnlocked(id);
-
   return id;
 }
 
@@ -233,9 +286,11 @@ void StaticMetaBase::destroy(EntryID* ent) {
 
     // Elements in other threads that use this id.
     std::vector<ElementWrapper> elements;
+    ThreadEntrySet tmpEntrySet;
 
     {
-      SharedMutex::WriteHolder wlock(nullptr);
+      std::shared_lock forkRlock(meta.forkHandlerLock_);
+      std::unique_lock wlock(meta.accessAllThreadsLock_, std::defer_lock);
       if (meta.strict_) {
         /*
          * In strict mode, the logic guarantees per-thread instances are
@@ -244,40 +299,38 @@ void StaticMetaBase::destroy(EntryID* ent) {
          * onThreadExit() calls (that might acquire ownership over per-thread
          * instances in order to destroy them) are finished.
          */
-        wlock = SharedMutex::WriteHolder(meta.accessAllThreadsLock_);
+        wlock.lock();
       }
+
+      uint32_t id =
+          ent->value.exchange(kEntryIDInvalid, std::memory_order_acquire);
+      if (id == kEntryIDInvalid) {
+        return;
+      }
+      meta.allId2ThreadEntrySets_[id].swap(tmpEntrySet);
+      forkRlock.unlock();
 
       {
         std::lock_guard<std::mutex> g(meta.lock_);
-        uint32_t id = ent->value.exchange(kEntryIDInvalid);
-        if (id == kEntryIDInvalid) {
-          return;
-        }
-
-        auto& node = meta.head_.elements[id].node;
-        while (!node.empty()) {
-          auto* next = node.getNext();
-          next->eraseZero();
-
-          ThreadEntry* e = next->parent;
-
-          if (id < e->elementsCapacity && e->elements[id].ptr) {
-            elements.push_back(e->elements[id]);
-
-            /*
-             * Writing another thread's ThreadEntry from here is fine;
-             * the only other potential reader is the owning thread --
-             * from onThreadExit (which grabs the lock, so is properly
-             * synchronized with us) or from get(), which also grabs
-             * the lock if it needs to resize the elements vector.
-             *
-             * We can't conflict with reads for a get(id), because
-             * it's illegal to call get on a thread local that's
-             * destructing.
-             */
-            e->elements[id].ptr = nullptr;
-            e->elements[id].deleter1 = nullptr;
-            e->elements[id].ownsDeleter = false;
+        for (auto& e : tmpEntrySet.threadEntries) {
+          auto elementsCapacity = e->getElementsCapacity();
+          if (id < elementsCapacity) {
+            if (e->elements[id].ptr) {
+              elements.push_back(e->elements[id]);
+              /*
+               * Writing another thread's ThreadEntry from here is fine;
+               * the only other potential reader is the owning thread --
+               * from onThreadExit (which grabs the lock, so is properly
+               * synchronized with us) or from get(), which also grabs
+               * the lock if it needs to resize the elements vector.
+               *
+               * We can't conflict with reads for a get(id), because
+               * it's illegal to call get on a thread local that's
+               * destructing.
+               */
+              e->elements[id].ptr = nullptr;
+              e->elements[id].deleter = 0;
+            }
           }
         }
         meta.freeIds_.push_back(id);
@@ -285,7 +338,9 @@ void StaticMetaBase::destroy(EntryID* ent) {
     }
     // Delete elements outside the locks.
     for (ElementWrapper& elem : elements) {
-      elem.dispose(TLPDestructionMode::ALL_THREADS);
+      if (elem.dispose(TLPDestructionMode::ALL_THREADS)) {
+        elem.cleanup();
+      }
     }
   } catch (...) { // Just in case we get a lock error or something anyway...
     LOG(WARNING) << "Destructor discarding an exception that was thrown.";
@@ -293,18 +348,16 @@ void StaticMetaBase::destroy(EntryID* ent) {
 }
 
 ElementWrapper* StaticMetaBase::reallocate(
-    ThreadEntry* threadEntry,
-    uint32_t idval,
-    size_t& newCapacity) {
-  size_t prevCapacity = threadEntry->elementsCapacity;
+    ThreadEntry* threadEntry, uint32_t idval, size_t& newCapacity) {
+  size_t prevCapacity = threadEntry->getElementsCapacity();
 
   // Growth factor < 2, see folly/docs/FBVector.md; + 5 to prevent
   // very slow start.
   auto smallCapacity = static_cast<size_t>((idval + 5) * kSmallGrowthFactor);
   auto bigCapacity = static_cast<size_t>((idval + 5) * kBigGrowthFactor);
 
-  newCapacity = (threadEntry->meta &&
-                 (bigCapacity <= threadEntry->meta->head_.elementsCapacity))
+  newCapacity =
+      (threadEntry->meta && (bigCapacity <= threadEntry->meta->nextId_))
       ? bigCapacity
       : smallCapacity;
 
@@ -343,7 +396,7 @@ ElementWrapper* StaticMetaBase::reallocate(
       assert(newByteSize / sizeof(ElementWrapper) >= newCapacity);
       newCapacity = newByteSize / sizeof(ElementWrapper);
     } else {
-      throw std::bad_alloc();
+      throw_exception<std::bad_alloc>();
     }
   } else { // no jemalloc
     // calloc() is simpler than malloc() followed by memset(), and
@@ -352,10 +405,16 @@ ElementWrapper* StaticMetaBase::reallocate(
     reallocated = static_cast<ElementWrapper*>(
         calloc(newCapacity, sizeof(ElementWrapper)));
     if (!reallocated) {
-      throw std::bad_alloc();
+      throw_exception<std::bad_alloc>();
     }
-  }
 
+    // When the main thread exits, it will call functions registered with
+    // 'atexit' and then call 'exit()'. However, It will NOT call any functions
+    // registered via the 'TLS' feature of pthread_key_create.
+    // Reference:
+    // https://pubs.opengroup.org/onlinepubs/9699919799/functions/pthread_create.html
+    folly::lsan_ignore_object(reallocated);
+  }
   return reallocated;
 }
 
@@ -367,7 +426,7 @@ ElementWrapper* StaticMetaBase::reallocate(
 void StaticMetaBase::reserve(EntryID* id) {
   auto& meta = *this;
   ThreadEntry* threadEntry = (*threadEntry_)();
-  size_t prevCapacity = threadEntry->elementsCapacity;
+  size_t prevCapacity = threadEntry->getElementsCapacity();
 
   uint32_t idval = id->getOrAllocate(meta);
   if (prevCapacity > idval) {
@@ -380,10 +439,6 @@ void StaticMetaBase::reserve(EntryID* id) {
   // Success, update the entry
   {
     std::lock_guard<std::mutex> g(meta.lock_);
-
-    if (prevCapacity == 0) {
-      meta.push_back(threadEntry);
-    }
 
     if (reallocated) {
       /*
@@ -401,55 +456,61 @@ void StaticMetaBase::reserve(EntryID* id) {
       std::swap(reallocated, threadEntry->elements);
     }
 
-    for (size_t i = prevCapacity; i < newCapacity; i++) {
-      threadEntry->elements[i].node.initZero(threadEntry, i);
-    }
-
-    threadEntry->elementsCapacity = newCapacity;
+    threadEntry->setElementsCapacity(newCapacity);
   }
 
+  meta.totalElementWrappers_ += (newCapacity - prevCapacity);
   free(reallocated);
 }
 
-void StaticMetaBase::reserveHeadUnlocked(uint32_t id) {
-  if (head_.elementsCapacity <= id) {
-    size_t prevCapacity = head_.elementsCapacity;
-    size_t newCapacity;
-    ElementWrapper* reallocated = reallocate(&head_, id, newCapacity);
-
-    if (reallocated) {
-      if (prevCapacity != 0) {
-        memcpy(
-            reallocated, head_.elements, sizeof(*reallocated) * prevCapacity);
-      }
-      std::swap(reallocated, head_.elements);
-    }
-
-    for (size_t i = prevCapacity; i < newCapacity; i++) {
-      head_.elements[i].node.init(&head_, i);
-    }
-
-    head_.elementsCapacity = newCapacity;
-    free(reallocated);
-  }
+FOLLY_NOINLINE void StaticMetaBase::ensureThreadEntryIsInSet(
+    ThreadEntry* te,
+    SynchronizedThreadEntrySet& set,
+    SynchronizedThreadEntrySet::RLockedPtr& rlock) {
+  rlock.unlock();
+  auto wlock = set.wlock();
+  wlock->insert(te);
+  rlock = wlock.moveFromWriteToRead();
 }
 
-void StaticMetaBase::pushBackLocked(ThreadEntry* t, uint32_t id) {
-  if (LIKELY(!t->removed_)) {
-    std::lock_guard<std::mutex> g(lock_);
-    auto* node = &t->elements[id].node;
-    node->push_back(&head_);
-  }
+/*
+ * release the element @id.
+ */
+void* ThreadEntry::releaseElement(uint32_t id) {
+  auto rlocked = meta->allId2ThreadEntrySets_[id].rlock();
+  return elements[id].release();
 }
 
-void StaticMetaBase::pushBackUnlocked(ThreadEntry* t, uint32_t id) {
-  if (LIKELY(!t->removed_)) {
-    auto* node = &t->elements[id].node;
-    node->push_back(&head_);
-  }
+/*
+ * Cleanup the element. Caller is holding rlock on the ThreadEntrySet
+ * corresponding to the id. Running destructors of user objects isn't ideal
+ * under lock but this is the historical behavior. It should be possible to
+ * restructure this if a need for it arises.
+ */
+void ThreadEntry::cleanupElement(uint32_t id) {
+  elements[id].dispose(TLPDestructionMode::THIS_THREAD);
+  // Cleanup
+  elements[id].cleanup();
 }
 
 FOLLY_STATIC_CTOR_PRIORITY_MAX
 PthreadKeyUnregister PthreadKeyUnregister::instance_;
+#if defined(__GLIBC__)
+// Invoking thread_local dtor register early to fix issue
+// https://github.com/facebook/folly/issues/1252
+struct GlibcThreadLocalInit {
+  struct GlibcThreadLocalInitHelper {
+    FOLLY_NOINLINE ~GlibcThreadLocalInitHelper() {
+      compiler_must_not_elide(this);
+    }
+  };
+  GlibcThreadLocalInit() {
+    static thread_local GlibcThreadLocalInitHelper glibcThreadLocalInit;
+    compiler_must_not_elide(glibcThreadLocalInit);
+  }
+};
+__attribute__((
+    __init_priority__(101))) GlibcThreadLocalInit glibcThreadLocalInit;
+#endif
 } // namespace threadlocal_detail
 } // namespace folly

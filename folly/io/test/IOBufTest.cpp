@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,19 +15,17 @@
  */
 
 #include <folly/io/IOBuf.h>
-#include <folly/io/TypedIOBuf.h>
 
 #include <cstddef>
-
-#include <boost/random.hpp>
+#include <random>
 
 #include <folly/Range.h>
+#include <folly/io/TypedIOBuf.h>
 #include <folly/memory/Malloc.h>
 #include <folly/portability/GTest.h>
 
 using folly::ByteRange;
 using folly::fbstring;
-using folly::fbvector;
 using folly::IOBuf;
 using folly::ordering;
 using folly::StringPiece;
@@ -48,7 +46,7 @@ void prepend(std::unique_ptr<IOBuf>& buf, StringPiece str) {
 
 TEST(IOBuf, Simple) {
   unique_ptr<IOBuf> buf(IOBuf::create(100));
-  uint32_t cap = buf->capacity();
+  const auto cap = buf->capacity();
   EXPECT_LE(100, cap);
   EXPECT_EQ(0, buf->headroom());
   EXPECT_EQ(0, buf->length());
@@ -80,19 +78,16 @@ void testAllocSize(uint32_t requestedCapacity) {
 }
 
 TEST(IOBuf, AllocSizes) {
-  // Try with a small allocation size that should fit in the internal buffer
-  testAllocSize(28);
+  // Cover small evil values exhaustively.
+  for (uint32_t i = 0; i < 1234; i++) {
+    testAllocSize(i);
+  }
 
-  // Try with a large allocation size that will require an external buffer.
+  // Try with large allocation sizes that will require an external buffer.
   testAllocSize(9000);
-
-  // 220 bytes is currently the cutoff
-  // (It would be nice to use the IOBuf::kMaxInternalDataSize constant,
-  // but it's private and it doesn't seem worth making it public just for this
-  // test code.)
-  testAllocSize(220);
-  testAllocSize(219);
-  testAllocSize(221);
+  testAllocSize(1048575);
+  testAllocSize(1048576);
+  testAllocSize(1048577);
 }
 
 void deleteArrayBuffer(void* buf, void* arg) {
@@ -163,11 +158,100 @@ TEST(IOBuf, TakeOwnership) {
     EXPECT_EQ(0, deleteCount);
   }
   EXPECT_EQ(1, deleteCount);
+  {
+    uint32_t size = 2;
+    uint8_t* buf = static_cast<uint8_t*>(malloc(size));
+    buf[0] = 'A';
+    unique_ptr<IOBuf> iobuf(IOBuf::takeOwnership(buf, size, 1));
+    fbstring str = iobuf->moveToFbString();
+    EXPECT_EQ(str, "A");
+  }
+
+  deleteCount = 0;
+  uint32_t size6 = 100;
+  uint8_t* buf6 = new uint8_t[size6];
+  uint32_t offset6 = 48;
+  uint32_t length6 = 48;
+  unique_ptr<IOBuf> iobuf6(IOBuf::takeOwnership(
+      buf6, size6, offset6, length6, deleteArrayBuffer, &deleteCount));
+  EXPECT_EQ(buf6 + offset6, iobuf6->data());
+  EXPECT_EQ(length6, iobuf6->length());
+  EXPECT_EQ(buf6, iobuf6->buffer());
+  EXPECT_EQ(size6, iobuf6->capacity());
+  EXPECT_EQ(0, deleteCount);
+  iobuf6.reset();
+  EXPECT_EQ(1, deleteCount);
+}
+
+TEST(IOBuf, TakeOwnershipFreeOnErrorBugfix) {
+  static void* freedBuf = nullptr;
+  static void* freedUserData = nullptr;
+
+  folly::IOBuf::FreeFunction freeFn =
+      [](void* calledBuf, void* calledUserData) {
+        freedBuf = calledBuf;
+        freedUserData = calledUserData;
+      };
+
+  int userData = 0;
+  char buf[1024];
+
+  EXPECT_THROW(
+      IOBuf::takeOwnership(
+          buf, std::numeric_limits<size_t>::max(), freeFn, &userData, true),
+      std::bad_alloc);
+
+  EXPECT_EQ(freedBuf, buf);
+  EXPECT_EQ(freedUserData, &userData);
+}
+
+TEST(IOBuf, GetUserData) {
+  {
+    const uint32_t size = 1234;
+    uint8_t data[size] = {};
+    unique_ptr<IOBuf> buf1(IOBuf::wrapBuffer(data, size));
+    EXPECT_EQ(buf1->getUserData(), nullptr);
+  }
+
+  {
+    size_t val = 0;
+    uint32_t size = 4321;
+    uint8_t* data = static_cast<uint8_t*>(malloc(size));
+    unique_ptr<IOBuf> buf2(IOBuf::takeOwnership(
+        data,
+        size,
+        [](void* buf, void* userData) {
+          EXPECT_EQ(*static_cast<size_t*>(userData), 400);
+          free(buf);
+        },
+        &val));
+    EXPECT_EQ(buf2->getUserData(), &val);
+    val = 200;
+    EXPECT_EQ(*static_cast<size_t*>(buf2->getUserData()), 200);
+    val = 400;
+  }
+}
+
+TEST(IOBuf, GetFreeFn) {
+  const uint32_t size = 4576;
+  uint8_t* data = static_cast<uint8_t*>(malloc(size));
+  std::memset(data, 0, size);
+  folly::IOBuf::FreeFunction someFreeFn = [](void* buf, void* userData) {
+    EXPECT_EQ(buf, userData);
+    free(userData);
+  };
+
+  unique_ptr<IOBuf> someBuf(IOBuf::wrapBuffer(data, size));
+  unique_ptr<IOBuf> someOtherBuf(
+      IOBuf::takeOwnership(data, size, someFreeFn, data));
+
+  EXPECT_EQ(someBuf->getFreeFn(), nullptr);
+  EXPECT_EQ(someOtherBuf->getFreeFn(), someFreeFn);
 }
 
 TEST(IOBuf, WrapBuffer) {
   const uint32_t size1 = 1234;
-  uint8_t buf1[size1];
+  uint8_t buf1[size1] = {};
   unique_ptr<IOBuf> iobuf1(IOBuf::wrapBuffer(buf1, size1));
   EXPECT_EQ(buf1, iobuf1->data());
   EXPECT_EQ(size1, iobuf1->length());
@@ -197,6 +281,17 @@ TEST(IOBuf, WrapBuffer) {
   EXPECT_EQ(size4, iobuf4.length());
   EXPECT_EQ(buf4.get(), iobuf4.buffer());
   EXPECT_EQ(size4, iobuf4.capacity());
+
+  if (folly::kIsSanitizeAddress) {
+    const uint32_t size5 = 100;
+    uint8_t buf5[size5];
+    EXPECT_DEATH(IOBuf::wrapBuffer(buf5, size5 + 1), "stack-buffer-overflow");
+
+    const uint32_t size6 = 100;
+    std::vector<uint8_t> buf6(size6);
+    EXPECT_DEATH(
+        IOBuf::wrapBuffer(buf6.data(), size6 + 1), "heap-buffer-overflow");
+  }
 }
 
 TEST(IOBuf, CreateCombined) {
@@ -254,18 +349,18 @@ TEST(IOBuf, CreateCombined) {
   testSwap(false);
 }
 
-void fillBuf(uint8_t* buf, uint32_t length, boost::mt19937& gen) {
+void fillBuf(uint8_t* buf, uint32_t length, std::mt19937& gen) {
   for (uint32_t n = 0; n < length; ++n) {
     buf[n] = static_cast<uint8_t>(gen() & 0xff);
   }
 }
 
-void fillBuf(IOBuf* buf, boost::mt19937& gen) {
+void fillBuf(IOBuf* buf, std::mt19937& gen) {
   buf->unshare();
   fillBuf(buf->writableData(), buf->length(), gen);
 }
 
-void checkBuf(const uint8_t* buf, uint32_t length, boost::mt19937& gen) {
+void checkBuf(const uint8_t* buf, uint32_t length, std::mt19937& gen) {
   // Rather than using EXPECT_EQ() to check each character,
   // count the number of differences and the first character that differs.
   // This way on error we'll report just that information, rather than tons of
@@ -296,15 +391,15 @@ void checkBuf(const uint8_t* buf, uint32_t length, boost::mt19937& gen) {
   }
 }
 
-void checkBuf(IOBuf* buf, boost::mt19937& gen) {
+void checkBuf(IOBuf* buf, std::mt19937& gen) {
   checkBuf(buf->data(), buf->length(), gen);
 }
 
-void checkBuf(ByteRange buf, boost::mt19937& gen) {
+void checkBuf(ByteRange buf, std::mt19937& gen) {
   checkBuf(buf.data(), buf.size(), gen);
 }
 
-void checkChain(IOBuf* buf, boost::mt19937& gen) {
+void checkChain(IOBuf* buf, std::mt19937& gen) {
   IOBuf* current = buf;
   do {
     checkBuf(current->data(), current->length(), gen);
@@ -314,7 +409,7 @@ void checkChain(IOBuf* buf, boost::mt19937& gen) {
 
 TEST(IOBuf, Chaining) {
   uint32_t fillSeed = 0x12345678;
-  boost::mt19937 gen(fillSeed);
+  std::mt19937 gen(fillSeed);
 
   // An IOBuf with external storage
   uint32_t headroom = 123;
@@ -370,7 +465,7 @@ TEST(IOBuf, Chaining) {
 
   iob1->prependChain(std::move(iob2));
   iob1->prependChain(std::move(iob4));
-  iob2ptr->appendChain(std::move(iob3));
+  iob2ptr->insertAfterThisOne(std::move(iob3));
   iob1->prependChain(std::move(iob5));
 
   EXPECT_EQ(iob2ptr, iob1->next());
@@ -481,6 +576,8 @@ TEST(IOBuf, Chaining) {
   EXPECT_TRUE(iob1->isShared());
 
   EXPECT_TRUE(iob1->isSharedOne());
+  // Also verify the share count is consistent:
+  EXPECT_LT(1, iob1->approximateShareCountOne());
   EXPECT_TRUE(iob2ptr->isSharedOne());
   EXPECT_TRUE(iob3ptr->isSharedOne());
   EXPECT_TRUE(iob4ptr->isSharedOne());
@@ -490,6 +587,8 @@ TEST(IOBuf, Chaining) {
   chainClone->unshare();
   EXPECT_FALSE(chainClone->isShared());
   EXPECT_FALSE(iob1->isShared());
+  // Also verify the share count is consistent:
+  EXPECT_EQ(1, iob1->approximateShareCountOne());
 
   // Make sure the unshared result still has the same data
   EXPECT_EQ(fullLength, chainClone->computeChainDataLength());
@@ -563,9 +662,9 @@ TEST(IOBuf, Chaining) {
   iob4 = IOBuf::create(7);
   iob4->append(7);
   iob4ptr = iob4.get();
-  iob1->appendChain(std::move(iob2));
-  iob1->prev()->appendChain(std::move(iob3));
-  iob1->prev()->appendChain(std::move(iob4));
+  iob1->insertAfterThisOne(std::move(iob2));
+  iob1->prev()->insertAfterThisOne(std::move(iob3));
+  iob1->prev()->insertAfterThisOne(std::move(iob4));
   EXPECT_EQ(4, iob1->countChainElements());
   EXPECT_EQ(16, iob1->computeChainDataLength());
 
@@ -603,7 +702,7 @@ void testFreeFn(void* buffer, void* ptr) {
 
 TEST(IOBuf, Reserve) {
   uint32_t fillSeed = 0x23456789;
-  boost::mt19937 gen(fillSeed);
+  std::mt19937 gen(fillSeed);
 
   // Reserve does nothing if empty and doesn't have to grow the buffer
   {
@@ -743,9 +842,7 @@ int customDeleterCount = 0;
 int destructorCount = 0;
 struct OwnershipTestClass {
   explicit OwnershipTestClass(int v = 0) : val(v) {}
-  ~OwnershipTestClass() {
-    ++destructorCount;
-  }
+  ~OwnershipTestClass() { ++destructorCount; }
   int val;
 };
 
@@ -818,7 +915,14 @@ TEST(IOBuf, takeOwnershipUniquePtr) {
 TEST(IOBuf, Alignment) {
   size_t alignment = alignof(std::max_align_t);
 
-  std::vector<size_t> sizes{0, 1, 64, 256, 1024, 1 << 10};
+  std::vector<size_t> sizes;
+  sizes.reserve(259);
+  for (size_t i = 0; i <= 256; i++) {
+    sizes.push_back(i);
+  }
+  sizes.push_back(1024);
+  sizes.push_back(1 << 10);
+
   for (size_t size : sizes) {
     auto buf = IOBuf::create(size);
     uintptr_t p = reinterpret_cast<uintptr_t>(buf->data());
@@ -930,7 +1034,7 @@ TEST_P(MoveToFbStringTest, Simple) {
   }
 }
 
-INSTANTIATE_TEST_CASE_P(
+INSTANTIATE_TEST_SUITE_P(
     MoveToFbString,
     MoveToFbStringTest,
     ::testing::Combine(
@@ -938,14 +1042,11 @@ INSTANTIATE_TEST_CASE_P(
         ::testing::Values(1, 2, 10), // element count
         ::testing::Bool(), // shared
         ::testing::Values(
-            CREATE,
-            TAKE_OWNERSHIP_MALLOC,
-            TAKE_OWNERSHIP_CUSTOM,
-            USER_OWNED)));
+            CREATE, TAKE_OWNERSHIP_MALLOC, TAKE_OWNERSHIP_CUSTOM, USER_OWNED)));
 
 TEST(IOBuf, getIov) {
   uint32_t fillSeed = 0xdeadbeef;
-  boost::mt19937 gen(fillSeed);
+  std::mt19937 gen(fillSeed);
 
   size_t len = 4096;
   size_t count = 32;
@@ -999,6 +1100,59 @@ TEST(IOBuf, getIov) {
   // The first two IOBufs were cleared, so the next iov entry
   // should be the third IOBuf in the chain.
   EXPECT_EQ(buf->next()->next()->data(), iov[2].iov_base);
+}
+
+TEST(IOBuf, wrapIov) {
+  // Test wrapping IOVs
+  constexpr folly::StringPiece hello = "hello";
+  constexpr folly::StringPiece world = "world!";
+  folly::fbvector<struct iovec> iov;
+  iov.push_back({nullptr, 0});
+  iov.push_back({(void*)hello.data(), hello.size()});
+  iov.push_back({(void*)world.data(), world.size()});
+  auto wrapped = IOBuf::wrapIov(iov.data(), iov.size());
+  EXPECT_EQ(iov.size() - 1, wrapped->countChainElements());
+  IOBuf const* w = wrapped.get();
+  // skip the first iovec, which is empty/null, as it is ignored by
+  // IOBuf::wrapIov
+  for (size_t i = 0; i < wrapped->countChainElements(); ++i, w = w->next()) {
+    EXPECT_EQ(w->data(), iov[i + 1].iov_base);
+    EXPECT_EQ(w->length(), iov[i + 1].iov_len);
+  }
+}
+
+TEST(IOBuf, takeOwnershipIov) {
+  // Test taking IOVs ownership
+  folly::fbvector<folly::StringPiece> words{"hello", "world!"};
+  folly::fbvector<struct iovec> iov;
+  iov.push_back({nullptr, 0});
+  for (size_t i = 0; i < words.size(); i++) {
+    iov.push_back({(void*)strdup(words[i].data()), words[i].size() + 1});
+  }
+  auto buf = IOBuf::takeOwnershipIov(iov.data(), iov.size());
+  EXPECT_EQ(iov.size() - 1, buf->countChainElements());
+
+  IOBuf const* b = buf.get();
+  // skip the first iovec, which is empty/null, as it is ignored by
+  // IOBuf::takeIovOwnership
+  for (size_t i = 0; i < buf->countChainElements(); ++i, b = b->next()) {
+    EXPECT_EQ(words[i], static_cast<const char*>(iov[i + 1].iov_base));
+  }
+}
+
+TEST(IOBuf, wrapZeroLenIov) {
+  folly::fbvector<struct iovec> iov;
+  iov.push_back({nullptr, 0});
+  iov.push_back({nullptr, 0});
+  auto wrapped = IOBuf::wrapIov(iov.data(), iov.size());
+  EXPECT_NE(nullptr, wrapped);
+  EXPECT_EQ(wrapped->countChainElements(), 1);
+  EXPECT_EQ(wrapped->length(), 0);
+
+  wrapped = IOBuf::wrapIov(nullptr, 0);
+  EXPECT_NE(nullptr, wrapped);
+  EXPECT_EQ(wrapped->countChainElements(), 1);
+  EXPECT_EQ(wrapped->length(), 0);
 }
 
 TEST(IOBuf, move) {
@@ -1067,40 +1221,54 @@ TEST(IOBuf, HashAndEqual) {
 
   EXPECT_TRUE(eq(*empty, *empty));
   EXPECT_TRUE(eq(empty, empty));
+  EXPECT_TRUE(eq(empty.get(), empty.get()));
 
   EXPECT_FALSE(eq(nullptr, empty));
   EXPECT_FALSE(eq(empty, nullptr));
+  EXPECT_FALSE(eq(empty.get(), nullptr));
 
   EXPECT_EQ(hash(*empty), hash(empty));
+  EXPECT_EQ(hash(*empty), hash(empty.get()));
   EXPECT_NE(0, hash(empty));
+  EXPECT_NE(0, hash(empty.get()));
 
   auto a = fromStr("hello");
 
   EXPECT_TRUE(eq(*a, *a));
   EXPECT_TRUE(eq(a, a));
+  EXPECT_TRUE(eq(a.get(), a.get()));
 
   EXPECT_FALSE(eq(nullptr, a));
   EXPECT_FALSE(eq(a, nullptr));
+  EXPECT_FALSE(eq(a.get(), nullptr));
 
   EXPECT_EQ(hash(*a), hash(a));
+  EXPECT_EQ(hash(*a), hash(a.get()));
   EXPECT_NE(0, hash(a));
+  EXPECT_NE(0, hash(a.get()));
 
   auto b = fromStr("hello");
 
   EXPECT_TRUE(eq(*a, *b));
   EXPECT_TRUE(eq(a, b));
+  EXPECT_TRUE(eq(a.get(), b.get()));
 
   EXPECT_EQ(hash(a), hash(b));
+  EXPECT_EQ(hash(a.get()), hash(b.get()));
 
   auto c = fromStr("hellow");
 
   EXPECT_FALSE(eq(a, c));
+  EXPECT_FALSE(eq(a.get(), c.get()));
   EXPECT_NE(hash(a), hash(c));
+  EXPECT_NE(hash(a.get()), hash(c.get()));
 
   auto d = fromStr("world");
 
   EXPECT_FALSE(eq(a, d));
+  EXPECT_FALSE(eq(a.get(), d.get()));
   EXPECT_NE(hash(a), hash(d));
+  EXPECT_NE(hash(a.get()), hash(d.get()));
 
   auto e = fromStr("helloworld");
   auto f = fromStr("hello");
@@ -1108,7 +1276,9 @@ TEST(IOBuf, HashAndEqual) {
   f->prependChain(fromStr("rld"));
 
   EXPECT_TRUE(eq(e, f));
+  EXPECT_TRUE(eq(e.get(), f.get()));
   EXPECT_EQ(hash(e), hash(f));
+  EXPECT_EQ(hash(e.get()), hash(f.get()));
 }
 
 TEST(IOBuf, IOBufCompare) {
@@ -1264,15 +1434,6 @@ std::unique_ptr<IOBuf> copy(const char* str) {
   return IOBuf::copyBuffer(str, strlen(str), 0, 1024);
 }
 
-std::string toString(const folly::IOBuf& buf) {
-  std::string result;
-  result.reserve(buf.computeChainDataLength());
-  for (auto& b : buf) {
-    result.append(reinterpret_cast<const char*>(b.data()), b.size());
-  }
-  return result;
-}
-
 char* writableStr(folly::IOBuf& buf) {
   return reinterpret_cast<char*>(buf.writableData());
 }
@@ -1349,7 +1510,7 @@ TEST(IOBuf, Managed) {
   buf1->prependChain(std::move(buf3UP));
   buf1->prependChain(std::move(buf4UP));
 
-  EXPECT_EQ("helloworldhelloworld", toString(*buf1));
+  EXPECT_EQ("helloworldhelloworld", buf1->to<std::string>());
   EXPECT_FALSE(buf1->isManaged());
 
   buf1->makeManaged();
@@ -1374,7 +1535,7 @@ TEST(IOBuf, Managed) {
   // change from buf2 is reflected in buf4.
   writableStr(*buf1)[0] = 'j';
   writableStr(*buf2)[0] = 'x';
-  EXPECT_EQ("jelloxorldhelloxorld", toString(*buf1));
+  EXPECT_EQ("jelloxorldhelloxorld", buf1->to<std::string>());
 }
 
 TEST(IOBuf, CoalesceEmptyBuffers) {
@@ -1382,8 +1543,8 @@ TEST(IOBuf, CoalesceEmptyBuffers) {
   auto b2 = fromStr("hello");
   auto b3 = IOBuf::takeOwnership(nullptr, 0);
 
-  b2->appendChain(std::move(b3));
-  b1->appendChain(std::move(b2));
+  b2->insertAfterThisOne(std::move(b3));
+  b1->insertAfterThisOne(std::move(b2));
 
   auto br = b1->coalesce();
 
@@ -1394,7 +1555,7 @@ TEST(IOBuf, CloneCoalescedChain) {
   auto b = IOBuf::createChain(1000, 100);
   b->advance(10);
   const uint32_t fillSeed = 0x12345678;
-  boost::mt19937 gen(fillSeed);
+  std::mt19937 gen(fillSeed);
   {
     auto c = b.get();
     std::size_t length = c->tailroom();
@@ -1413,6 +1574,24 @@ TEST(IOBuf, CloneCoalescedChain) {
   EXPECT_EQ(b->computeChainDataLength(), c.length()); // Same length
   gen.seed(fillSeed);
   checkBuf(&c, gen); // Same contents
+
+  auto newHeadroom = b->headroom() + 10;
+  auto newTailroom = b->tailroom();
+  c = b->cloneCoalescedAsValueWithHeadroomTailroom(newHeadroom, newTailroom);
+  EXPECT_FALSE(c.isChained()); // Not chained
+  EXPECT_GE(c.headroom(), newHeadroom);
+  EXPECT_GE(c.tailroom(), newTailroom);
+  gen.seed(fillSeed);
+  checkBuf(&c, gen); // Same contents
+
+  newHeadroom = b->headroom();
+  newTailroom = b->tailroom() + 10;
+  c = b->cloneCoalescedAsValueWithHeadroomTailroom(newHeadroom, newTailroom);
+  EXPECT_FALSE(c.isChained()); // Not chained
+  EXPECT_GE(c.headroom(), newHeadroom);
+  EXPECT_GE(c.tailroom(), newTailroom);
+  gen.seed(fillSeed);
+  checkBuf(&c, gen); // Same contents
 }
 
 TEST(IOBuf, CloneCoalescedSingle) {
@@ -1420,7 +1599,7 @@ TEST(IOBuf, CloneCoalescedSingle) {
   b->advance(10);
   b->append(900);
   const uint32_t fillSeed = 0x12345678;
-  boost::mt19937 gen(fillSeed);
+  std::mt19937 gen(fillSeed);
   fillBuf(b.get(), gen);
 
   auto c = b->cloneCoalesced();
@@ -1430,4 +1609,304 @@ TEST(IOBuf, CloneCoalescedSingle) {
   EXPECT_EQ(b->capacity(), c->capacity());
   EXPECT_EQ(b->data(), c->data());
   EXPECT_EQ(b->length(), c->length());
+
+  auto newHeadroom = b->headroom() + 10;
+  auto newTailroom = b->tailroom();
+  c = b->cloneCoalescedWithHeadroomTailroom(newHeadroom, newTailroom);
+  EXPECT_FALSE(c->isChained()); // Not chained
+  EXPECT_EQ(
+      ByteRange(c->data(), c->length()), ByteRange(b->data(), b->length()));
+  EXPECT_GE(c->headroom(), newHeadroom);
+  EXPECT_GE(c->tailroom(), newTailroom);
+
+  newHeadroom = b->headroom();
+  newTailroom = b->tailroom() + 10;
+  c = b->cloneCoalescedWithHeadroomTailroom(newHeadroom, newTailroom);
+  EXPECT_FALSE(c->isChained()); // Not chained
+  EXPECT_EQ(
+      ByteRange(c->data(), c->length()), ByteRange(b->data(), b->length()));
+  EXPECT_GE(c->headroom(), newHeadroom);
+  EXPECT_GE(c->tailroom(), newTailroom);
+}
+
+TEST(IOBuf, fillIov) {
+  auto buf = IOBuf::create(4096);
+  append(buf, "hello");
+  auto buf2 = IOBuf::create(4096);
+  append(buf2, "goodbye");
+  auto buf3 = IOBuf::create(4096);
+  append(buf3, "hello again");
+
+  buf2->insertAfterThisOne(std::move(buf3));
+  buf->insertAfterThisOne(std::move(buf2));
+
+  constexpr size_t iovCount = 3;
+  struct iovec vec[iovCount];
+  auto res = buf->fillIov(vec, iovCount);
+
+  EXPECT_EQ(iovCount, res.numIovecs);
+  EXPECT_EQ(23, res.totalLength);
+  EXPECT_EQ(
+      "hello",
+      std::string(
+          reinterpret_cast<const char*>(vec[0].iov_base), vec[0].iov_len));
+  EXPECT_EQ(
+      "goodbye",
+      std::string(
+          reinterpret_cast<const char*>(vec[1].iov_base), vec[1].iov_len));
+  EXPECT_EQ(
+      "hello again",
+      std::string(
+          reinterpret_cast<const char*>(vec[2].iov_base), vec[2].iov_len));
+}
+
+TEST(IOBuf, fillIov2) {
+  auto buf = IOBuf::create(4096);
+  append(buf, "hello");
+  auto buf2 = IOBuf::create(4096);
+  append(buf2, "goodbye");
+  auto buf3 = IOBuf::create(4096);
+  append(buf2, "hello again");
+
+  buf2->insertAfterThisOne(std::move(buf3));
+  buf->insertAfterThisOne(std::move(buf2));
+
+  constexpr size_t iovCount = 2;
+  struct iovec vec[iovCount];
+  auto res = buf->fillIov(vec, iovCount);
+
+  EXPECT_EQ(0, res.numIovecs);
+  EXPECT_EQ(0, res.totalLength);
+}
+
+TEST(IOBuf, FreeFn) {
+  class IOBufFreeObserver {
+   public:
+    using Func = std::function<void()>;
+    explicit IOBufFreeObserver(Func&& freeFunc, Func&& releaseFunc)
+        : freeFunc_(std::move(freeFunc)),
+          releaseFunc_(std::move(releaseFunc)) {}
+    void afterFreeExtBuffer() const noexcept { freeFunc_(); }
+    void afterReleaseExtBuffer() const noexcept { releaseFunc_(); }
+
+   private:
+    Func freeFunc_;
+    Func releaseFunc_;
+  };
+
+  int freeVal = 0;
+  int releaseVal = 0;
+  IOBufFreeObserver observer(
+      [&freeVal]() { freeVal += 1; }, [&releaseVal]() { releaseVal += 1; });
+
+  // no observers
+  { unique_ptr<IOBuf> iobuf(IOBuf::create(64)); }
+
+  // one observer
+  {
+    unique_ptr<IOBuf> iobuf(IOBuf::create(64));
+
+    EXPECT_TRUE(iobuf->appendSharedInfoObserver(observer));
+  }
+  EXPECT_EQ(freeVal, 1);
+  EXPECT_EQ(releaseVal, 0);
+
+  freeVal = 0;
+  releaseVal = 0;
+  // reserve
+  {
+    unique_ptr<IOBuf> iobuf(IOBuf::create(64));
+    EXPECT_TRUE(iobuf->appendSharedInfoObserver(observer));
+    iobuf->reserve(0, iobuf->capacity() + 1024);
+    EXPECT_EQ(freeVal, 1);
+    EXPECT_EQ(releaseVal, 0);
+  }
+
+  freeVal = 0;
+  releaseVal = 0;
+  // one observer - call moveToFbString
+  {
+    unique_ptr<IOBuf> iobuf(IOBuf::create(64 * 1024));
+
+    EXPECT_TRUE(iobuf->appendSharedInfoObserver(observer));
+    auto str = iobuf->moveToFbString();
+  }
+  EXPECT_EQ(freeVal, 0);
+  EXPECT_EQ(releaseVal, 1);
+
+  freeVal = 0;
+  releaseVal = 0;
+  // multiple observers
+  {
+    unique_ptr<IOBuf> iobuf(IOBuf::create(64));
+
+    for (size_t i = 0; i < 3; i++) {
+      EXPECT_TRUE(iobuf->appendSharedInfoObserver(observer));
+    }
+  }
+  EXPECT_EQ(freeVal, 3);
+  EXPECT_EQ(releaseVal, 0);
+}
+
+// Compute the chained capacity of a single non-chained IOBuf of capacity zero
+TEST(IOBuf, computeChainCapacityOfZeroSizeIOBuf) {
+  size_t size = 0;
+  uint8_t* data = nullptr;
+
+  // Create buffer of capacity 0
+  unique_ptr<IOBuf> buf(IOBuf::wrapBuffer(data, size));
+
+  EXPECT_EQ(buf->computeChainCapacity(), 0);
+}
+
+// Compute the chained capacity of a single non-chained IOBuf of capacity
+// non-zero
+TEST(IOBuf, computeChainCapacityOfNonZeroSizeIOBuf) {
+  const size_t size = 20;
+  uint8_t data[size] = {};
+
+  // Create buffer of capacity 20
+  unique_ptr<IOBuf> buf(IOBuf::wrapBuffer(data, size));
+
+  EXPECT_EQ(buf->computeChainCapacity(), 20);
+}
+
+// Compute the chained capacity of a chained IOBuf with chains having a variety
+// of zero and non-zero capacities.
+TEST(IOBuf, computeChainCapacityOfMixedCapacityChainedIOBuf) {
+  // Total capacity is 100
+  uint8_t data1[20] = {};
+  uint8_t data2[0] = {};
+  uint8_t data3[60] = {};
+  uint8_t data4[15] = {};
+  uint8_t data5[0] = {};
+  uint8_t data6[5] = {};
+
+  // Create IOBuf at head of chain
+  unique_ptr<IOBuf> buf(IOBuf::wrapBuffer(data1, sizeof(data1)));
+
+  // Create IOBuf chains
+  auto temp = buf.get();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data2, sizeof(data2)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data3, sizeof(data3)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data4, sizeof(data4)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data5, sizeof(data5)));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::wrapBuffer(data6, sizeof(data6)));
+
+  EXPECT_EQ(buf->computeChainCapacity(), 100);
+}
+
+TEST(IOBuf, AppendTo) {
+  using folly::range;
+
+  IOBuf buf;
+  EXPECT_EQ(buf.to<std::string>(), "");
+  EXPECT_EQ(buf.toString(), "");
+
+  auto temp = &buf;
+  temp->insertAfterThisOne(IOBuf::copyBuffer("Hello"));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::copyBuffer(" and"));
+  temp = temp->next();
+  temp->insertAfterThisOne(IOBuf::copyBuffer(" goodbye."));
+
+  auto testAppendTo = [&](auto c) {
+    const StringPiece kExpected = "Hello and goodbye.";
+    EXPECT_EQ(StringPiece(range(buf.to<decltype(c)>())), kExpected);
+
+    const StringPiece kPreviousData = "I was there before. ";
+    c.insert(c.end(), kPreviousData.begin(), kPreviousData.end());
+    buf.appendTo(c);
+    EXPECT_EQ(StringPiece(range(c)), kPreviousData.str() + kExpected.str());
+  };
+
+  testAppendTo(std::string{});
+  testAppendTo(fbstring{});
+  testAppendTo(std::vector<char>{});
+  testAppendTo(std::vector<unsigned char>{});
+}
+
+TEST(IOBuf, FromStringView) {
+  auto literalHelloBuffer = IOBuf::copyBuffer("Hello");
+  std::string hello("Hello");
+  auto fromStringHelloBuffer = IOBuf::copyBuffer(hello);
+  std::string_view hello2("Hello");
+  auto fromStringViewHelloBuffer = IOBuf::copyBuffer(hello2);
+
+  std::string fromLiteral;
+  literalHelloBuffer->appendTo(fromLiteral);
+  std::string fromString;
+  fromStringHelloBuffer->appendTo(fromString);
+  std::string fromStringView;
+  fromStringViewHelloBuffer->appendTo(fromStringView);
+
+  EXPECT_EQ(fromStringView, fromString);
+  EXPECT_EQ(fromLiteral, fromString);
+}
+
+TEST(IOBuf, bufferTooLarge) {
+  EXPECT_THROW(
+      IOBuf::copyBuffer(StringPiece("Hello"), (size_t)0xFFFF'FFFF'FFFF'FFFE),
+      std::length_error);
+}
+
+TEST(IOBuf, copyConstructBufferTooLarge) {
+  auto buf = StringPiece("Hello");
+  EXPECT_THROW(
+      IOBuf(
+          IOBuf::COPY_BUFFER,
+          buf.data(),
+          buf.size(),
+          57,
+          (size_t)0xFFFF'FFFF'FFFF'FFFE),
+      std::bad_alloc);
+}
+
+TEST(IOBuf, MaybeSplitTail) {
+  auto buf = IOBuf::create(256);
+  append(buf, "Hello ");
+
+  size_t tailroom1 = buf->tailroom();
+  auto buf1 = buf->maybeSplitTail();
+  EXPECT_EQ(buf->tailroom(), 0);
+  EXPECT_EQ(buf1->tailroom(), tailroom1);
+  EXPECT_EQ(
+      reinterpret_cast<const void*>(buf->bufferEnd()),
+      reinterpret_cast<const void*>(buf1->buffer()));
+  EXPECT_TRUE(buf->isSharedOne());
+  EXPECT_FALSE(buf1->isSharedOne());
+  append(buf1, "world");
+
+  size_t tailroom2 = buf1->tailroom();
+  auto buf2 = buf1->maybeSplitTail();
+  EXPECT_EQ(buf1->tailroom(), 0);
+  EXPECT_EQ(buf2->tailroom(), tailroom2);
+  EXPECT_EQ(
+      reinterpret_cast<const void*>(buf1->bufferEnd()),
+      reinterpret_cast<const void*>(buf2->buffer()));
+  // This maybeSplitTail() doesn't make buf1 shared because buf is the original
+  // owner, so buf2 refers to it as well.
+  EXPECT_FALSE(buf1->isSharedOne());
+  EXPECT_FALSE(buf2->isSharedOne());
+  append(buf2, "!");
+
+  buf = {};
+  EXPECT_EQ(buf1->to<std::string>(), "world");
+  buf1 = {};
+  EXPECT_EQ(buf2->to<std::string>(), "!");
+
+  // The original buffer is gone, but we can continue splitting its tail.
+  auto buf3 = buf2->maybeSplitTail();
+  append(buf3, "!!!1");
+}
+
+TEST(IOBuf, FromString) {
+  EXPECT_EQ(folly::IOBuf::fromString("")->toString(), "");
+  EXPECT_EQ(folly::IOBuf::fromString("test")->toString(), "test");
+  auto longStr = std::string(1000, '0');
+  EXPECT_EQ(folly::IOBuf::fromString(longStr)->toString(), longStr);
 }

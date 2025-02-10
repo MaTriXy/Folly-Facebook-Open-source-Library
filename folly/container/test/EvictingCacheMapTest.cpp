@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+#include <folly/container/EvictingCacheMap.h>
+
 #include <set>
 
-#include <folly/container/EvictingCacheMap.h>
 #include <folly/portability/GTest.h>
 
 using namespace folly;
@@ -76,7 +77,6 @@ TEST(EvictingCacheMap, SanityTest) {
   EXPECT_TRUE(map.empty());
   EXPECT_FALSE(map.exists(1));
 }
-
 
 TEST(EvictingCacheMap, PruneTest) {
   EvictingCacheMap<int, int> map(0);
@@ -174,7 +174,15 @@ TEST(EvictingCacheMap, PruneHookTest) {
     sum += k;
   };
 
+  EXPECT_FALSE(map.getPruneHook());
   map.setPruneHook(pruneCb);
+  EXPECT_TRUE(map.getPruneHook());
+  {
+    int v = 42;
+    map.getPruneHook()(42, std::move(v));
+  }
+  EXPECT_EQ(42, sum);
+  sum = 0;
 
   for (int i = 0; i < 100; i++) {
     map.set(i, i);
@@ -260,6 +268,33 @@ TEST(EvictingCacheMap, PruneHookTest) {
   }
   EXPECT_EQ((89 * 90) / 2, sum);
   sum = 0;
+
+  // Erase does not call prune hook (NOTE: possible source of usage bugs)
+  map.erase(99);
+
+  EXPECT_EQ(0, sum);
+
+  // But can provide your own hook
+  map.erase(98, pruneCb);
+
+  EXPECT_EQ(98, sum);
+  sum = 0;
+
+  // And with iterator
+  auto it1 = map.find(96);
+  auto it2 = map.find(97);
+
+  auto it3 = map.erase(it2, pruneCb);
+  EXPECT_EQ(it1, it3);
+  EXPECT_EQ(97, sum);
+  sum = 0;
+
+  // Destructor does not call prune hook (NOTE: possibly source of usage bugs)
+  map.~EvictingCacheMap<int, int>();
+  // Re-enter clean state
+  new (&map) EvictingCacheMap<int, int>(0);
+
+  EXPECT_EQ(0, sum);
 }
 
 TEST(EvictingCacheMap, SetMaxSize) {
@@ -309,10 +344,19 @@ TEST(EvictingCacheMap, SetClearSize) {
 
 TEST(EvictingCacheMap, DestructorInvocationTest) {
   struct SumInt {
-    SumInt(int val_, int* ref_) : val(val_), ref(ref_) { }
-    ~SumInt() {
-      *ref += val;
+    SumInt(int val_, int* ref_) : val(val_), ref(ref_) {}
+    ~SumInt() { *ref += val; }
+
+    SumInt(SumInt const&) = delete;
+    SumInt& operator=(SumInt const&) = delete;
+
+    SumInt(SumInt&& other) : val(std::exchange(other.val, 0)), ref(other.ref) {}
+    SumInt& operator=(SumInt&& other) {
+      std::swap(val, other.val);
+      std::swap(ref, other.ref);
+      return *this;
     }
+
     int val;
     int* ref;
   };
@@ -409,7 +453,37 @@ TEST(EvictingCacheMap, DestructorInvocationTest) {
     EXPECT_EQ(i, map.get(i).val);
   }
   EXPECT_EQ((89 * 90) / 2, sum);
+
   sum = 0;
+  for (int i = 0; i < 90; i++) {
+    auto pair = map.insert(i, SumInt(i + 1, &sum));
+    EXPECT_EQ(i + 1, pair.first->second.val);
+    EXPECT_TRUE(pair.second);
+    EXPECT_TRUE(map.exists(i));
+  }
+  EXPECT_EQ(0, sum);
+  for (int i = 90; i < 100; i++) {
+    auto pair = map.insert(i, SumInt(i + 1, &sum));
+    EXPECT_EQ(i, pair.first->second.val);
+    EXPECT_FALSE(pair.second);
+    EXPECT_TRUE(map.exists(i));
+  }
+  EXPECT_EQ((10 * 191) / 2, sum);
+  sum = 0;
+  map.prune(100);
+  EXPECT_EQ((90 * 91) / 2 + (10 * 189) / 2, sum);
+
+  sum = 0;
+  map.set(3, SumInt(3, &sum));
+  map.set(2, SumInt(2, &sum));
+  map.set(1, SumInt(1, &sum));
+  EXPECT_EQ(0, sum);
+  EXPECT_EQ(2, map.erase(map.find(1))->second.val);
+  EXPECT_EQ(1, sum);
+  EXPECT_EQ(map.end(), map.erase(map.findWithoutPromotion(3)));
+  EXPECT_EQ(4, sum);
+  map.prune(1);
+  EXPECT_EQ(6, sum);
 }
 
 TEST(EvictingCacheMap, LruSanityTest) {
@@ -535,7 +609,7 @@ TEST(EvictingCacheMap, FindTest) {
       EXPECT_EQ(i, it->first);
       EXPECT_EQ(i, it->second);
     } else {
-      EXPECT_TRUE( map.find(i) == map.end());
+      EXPECT_TRUE(map.find(i) == map.end());
     }
   }
   for (int i = nItems * 2 - 1; i >= 0; i--) {
@@ -626,12 +700,21 @@ TEST(EvictingCacheMap, MoveTest) {
     EXPECT_EQ(i, map.get(i));
   }
 
+  // Move to empty
   EvictingCacheMap<int, int> map2 = std::move(map);
   EXPECT_TRUE(map.empty());
   for (int i = 0; i < nItems; i++) {
     EXPECT_TRUE(map2.exists(i));
     EXPECT_EQ(i, map2.get(i));
   }
+
+  // Move to non-empty
+  EvictingCacheMap<int, int> map3(1);
+  map3.set(1, 1);
+  EXPECT_EQ(1, map3.size());
+  map3 = std::move(map2);
+  EXPECT_TRUE(map2.empty());
+  EXPECT_EQ(nItems, map3.size());
 }
 
 TEST(EvictingCacheMap, CustomKeyEqual) {
@@ -643,9 +726,7 @@ TEST(EvictingCacheMap, CustomKeyEqual) {
     int mod;
   };
   struct Hash {
-    size_t operator()(const int& a) const {
-      return std::hash<int>()(a % mod);
-    }
+    size_t operator()(const int& a) const { return std::hash<int>()(a % mod); }
     int mod;
   };
   EvictingCacheMap<int, int, Hash, Eq> map(
@@ -657,4 +738,105 @@ TEST(EvictingCacheMap, CustomKeyEqual) {
     EXPECT_TRUE(map.exists(i + nItems));
     EXPECT_EQ(i, map.get(i + nItems));
   }
+}
+
+TEST(EvictingCacheMap, InvalidHashPartlyUsable) {
+  // Some uses of EvictingCacheMap only use constructor+destructor in a header
+  // file where the hasher is invalid. (Only fully defined in cpp file.)
+  struct BadHash {};
+  struct BadEq {};
+  EvictingCacheMap<int, int, BadHash, BadEq> map{42};
+  // Also move ctor and operator
+  EvictingCacheMap<int, int, BadHash, BadEq> map2{std::move(map)};
+  map = std::move(map2);
+}
+
+TEST(EvictingCacheMap, IteratorConversion) {
+  using type = EvictingCacheMap<int, int>;
+  using i = type::iterator;
+  using ci = type::const_iterator;
+  using ri = type::reverse_iterator;
+  using cri = type::const_reverse_iterator;
+
+  EXPECT_TRUE((std::is_convertible<i, i>::value));
+  EXPECT_TRUE((std::is_convertible<i, ci>::value));
+  EXPECT_FALSE((std::is_convertible<ci, i>::value));
+  EXPECT_TRUE((std::is_convertible<ci, ci>::value));
+
+  EXPECT_TRUE((std::is_convertible<ri, ri>::value));
+  EXPECT_TRUE((std::is_convertible<ri, cri>::value));
+  EXPECT_FALSE((std::is_convertible<cri, ri>::value));
+  EXPECT_TRUE((std::is_convertible<cri, cri>::value));
+}
+
+TEST(EvictingCacheMap, HeterogeneousAccess) {
+  constexpr std::array pieces{
+      std::pair{"one"_sp, 1},
+      std::pair{"two"_sp, 2},
+      std::pair{"three"_sp, 3},
+  };
+  constexpr std::array charstars{
+      std::pair{"four", 4},
+      std::pair{"five", 5},
+      std::pair{"six", 6},
+      std::pair{"seven", 7},
+  };
+
+  EvictingCacheMap<std::string, int> map(0);
+  for (auto&& [key, value] : pieces) {
+    auto [_, inserted] = map.insert(key, value);
+    EXPECT_TRUE(inserted);
+  }
+  for (auto&& [key, value] : charstars) {
+    map.set(key, value);
+  }
+
+  for (auto&& [key, value] : pieces) {
+    auto exists = map.exists(key);
+    EXPECT_TRUE(exists);
+    auto iter = map.find(key);
+    EXPECT_TRUE(iter != map.end());
+    EXPECT_EQ(iter->second, value);
+    iter = map.findWithoutPromotion(key);
+    EXPECT_TRUE(iter != map.end());
+    EXPECT_EQ(iter->second, value);
+  }
+  for (auto&& [key, value] : charstars) {
+    auto result = map.get(key);
+    EXPECT_EQ(result, value);
+    result = map.getWithoutPromotion(key);
+    EXPECT_EQ(result, value);
+  }
+
+  for (auto&& [key, _] : pieces) {
+    auto erased = map.erase(key);
+    EXPECT_TRUE(erased);
+    erased = map.erase(key);
+    EXPECT_FALSE(erased);
+  }
+  for (auto&& [key, _] : charstars) {
+    map.erase(map.findWithoutPromotion(key));
+  }
+  EXPECT_TRUE(map.empty());
+}
+
+TEST(EvictingCacheMap, ApproximateEntryMemUsage) {
+  // Entry (without weight) should be
+  // * two pointers for LRU list
+  // * sizeof(key) and sizeof(value)
+  // * roughly 1.5 pointers for F14 index
+  // And sizeof(std::unique_ptr<char[]>) should usually be size of raw pointer
+  EXPECT_EQ(sizeof(std::unique_ptr<char[]>), sizeof(char*));
+  EXPECT_LE(
+      (EvictingCacheMap<uint64_t, std::unique_ptr<char[]>>::
+           kApproximateEntryMemUsage),
+      48U);
+}
+
+TEST(EvictingCacheMap, PiecewiseConstructTest) {
+  EvictingCacheMap<uint64_t, std::string> map(1);
+  uint64_t i = 1;
+  auto [iter, inserted] = map.try_emplace(i, "test");
+  EXPECT_TRUE(inserted);
+  EXPECT_EQ(iter->second, "test");
 }

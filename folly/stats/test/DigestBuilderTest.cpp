@@ -1,11 +1,11 @@
 /*
- * Copyright 2018-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include <folly/stats/detail/DigestBuilder-defs.h>
+#include <folly/stats/DigestBuilder.h>
 
 #include <chrono>
 #include <random>
@@ -24,7 +24,6 @@
 #include <folly/portability/GTest.h>
 
 using namespace folly;
-using namespace folly::detail;
 
 template <size_t MergeSize>
 class SimpleDigest {
@@ -36,7 +35,9 @@ class SimpleDigest {
     for (size_t i = 0; i < MergeSize; ++i) {
       EXPECT_GE(MergeSize, r[i]);
     }
-    return *this;
+    SimpleDigest ret(sz_);
+    ret.empty_ = empty_ && r.empty();
+    return ret;
   }
 
   static SimpleDigest merge(Range<const SimpleDigest*> r) {
@@ -44,12 +45,12 @@ class SimpleDigest {
     return *r.begin();
   }
 
-  int64_t getSize() const {
-    return sz_;
-  }
+  int64_t getSize() const { return sz_; }
+  bool empty() const { return empty_; }
 
  private:
   int64_t sz_;
+  bool empty_ = true;
 };
 
 TEST(DigestBuilder, SingleThreadUnfilledBuffer) {

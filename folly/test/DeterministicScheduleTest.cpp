@@ -1,11 +1,11 @@
 /*
- * Copyright 2013-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,8 +18,12 @@
 
 #include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
+#include <folly/synchronization/AtomicUtil.h>
 
 using namespace folly::test;
+
+static_assert(
+    std::is_same_v<int, folly::atomic_value_type_t<DeterministicAtomic<int>>>);
 
 TEST(DeterministicSchedule, uniform) {
   auto p = DeterministicSchedule::uniform(0);
@@ -91,9 +95,7 @@ TEST(DeterministicSchedule, buggyAdd) {
         } while (true);
       }); // thread lambda
     } // for t
-    for (auto& t : threads) {
-      DeterministicSchedule::join(t);
-    }
+    DeterministicSchedule::joinAll(threads);
     if (!bug) {
       EXPECT_EQ(test.load(), baseline.load());
     } else {
@@ -116,7 +118,7 @@ TEST(DeterministicSchedule, buggyAdd) {
  *      to maintain global knowledge of shared and private state.
  *   3. Define:
  *        static AuxData* aux_;
- *        static FOLLY_TLS uint32_t tid_;
+ *        static thread_local uint32_t tid_;
  *   4. (Optional) Define gflags for command line options. E.g.:
  *        DEFINE_int64(seed, 0, "Seed for random number generators");
  *   5. (Optionl) Define macros for mangement of auxiliary data. E.g.,
@@ -178,17 +180,11 @@ class AtomicCounter {
  public:
   explicit AtomicCounter(T val) : counter_(val) {}
 
-  void inc() {
-    this->counter_.fetch_add(1);
-  }
+  void inc() { this->counter_.fetch_add(1); }
 
-  void incBug() {
-    this->counter_.store(this->counter_.load() + 1);
-  }
+  void incBug() { this->counter_.store(this->counter_.load() + 1); }
 
-  T load() {
-    return this->counter_.load();
-  }
+  T load() { return this->counter_.load(); }
 
  private:
   Atom<T> counter_ = {0};
@@ -216,7 +212,7 @@ struct AuxData {
 };
 
 static AuxData* aux_;
-static FOLLY_TLS uint32_t tid_;
+static thread_local uint32_t tid_;
 
 /* Command line flags */
 DEFINE_int64(seed, 0, "Seed for random number generators");
@@ -235,17 +231,18 @@ DEFINE_bool(bug, false, "Introduce bug");
 #define AUX_UPDATE() (aux_->lastUpdate_ = aux_->step_ + 1)
 
 /** Macro for inline definition of auxiliary actions */
-#define AUX_ACT(act)                          \
-  do {                                        \
-    AUX_THR(func_) = __func__;                \
-    AUX_THR(line_) = __LINE__;                \
-    AuxAct auxfn(                             \
-      [&](bool success) {                     \
-        if (success) {}                       \
-        if (true) {act}                       \
-      }                                       \
-    );                                        \
-    DeterministicSchedule::setAuxAct(auxfn);  \
+#define AUX_ACT(act)                         \
+  do {                                       \
+    AUX_THR(func_) = __func__;               \
+    AUX_THR(line_) = __LINE__;               \
+    AuxAct auxfn([&](bool success) {         \
+      if (success) {                         \
+      }                                      \
+      if (true) {                            \
+        act                                  \
+      }                                      \
+    });                                      \
+    DeterministicSchedule::setAuxAct(auxfn); \
   } while (0)
 
 /** Alias for original class */
@@ -257,18 +254,14 @@ template <typename T>
 struct AnnotatedAtomicCounter : public Base<T> {
   /** Manage DSched auxChk */
   void setAuxChk() {
-    AuxChk auxfn(
-      [&](uint64_t step) {
-        auxLog(step);
-        auxCheck();
-      }
-    );
+    AuxChk auxfn([&](uint64_t step) {
+      auxLog(step);
+      auxCheck();
+    });
     DeterministicSchedule::setAuxChk(auxfn);
   }
 
-  void clearAuxChk() {
-    DeterministicSchedule::clearAuxChk();
-  }
+  void clearAuxChk() { DeterministicSchedule::clearAuxChk(); }
 
   /** Aux log function */
   void auxLog(uint64_t step) {
@@ -313,9 +306,7 @@ struct AnnotatedAtomicCounter : public Base<T> {
   }
 
   /* Direct access without going through DSched */
-  T loadDirect() {
-    return this->counter_.load_direct();
-  }
+  T loadDirect() { return this->counter_.load_direct(); }
 
   /* Constructor -- calls original constructor */
   explicit AnnotatedAtomicCounter(int val) : Base<T>(val) {}
@@ -337,7 +328,7 @@ struct AnnotatedAtomicCounter : public Base<T> {
 
 using Annotated = AnnotatedAtomicCounter<int>;
 
-TEST(DeterministicSchedule, global_invariants) {
+TEST(DeterministicSchedule, globalInvariants) {
   CHECK_GT(FLAGS_num_threads, 0);
 
   DSched sched(DSched::uniform(FLAGS_seed));
@@ -368,8 +359,55 @@ TEST(DeterministicSchedule, global_invariants) {
   }
 }
 
+struct DSchedTimestampTest : public DSchedTimestamp {
+  explicit DSchedTimestampTest(size_t v) : DSchedTimestamp(v) {}
+};
+
+TEST(DeterministicSchedule, threadTimestamps) {
+  ThreadTimestamps tss;
+  DSchedThreadId tid0(0);
+  DSchedThreadId tid1(1);
+
+  ASSERT_FALSE(tss.atLeastAsRecentAs(tid0, DSchedTimestampTest(1)));
+
+  tss.setIfNotPresent(tid0, DSchedTimestampTest(1));
+  ASSERT_TRUE(tss.atLeastAsRecentAs(tid0, DSchedTimestampTest(1)));
+  ASSERT_FALSE(tss.atLeastAsRecentAs(tid0, DSchedTimestampTest(2)));
+  ASSERT_FALSE(tss.atLeastAsRecentAs(tid1, DSchedTimestampTest(1)));
+
+  tss.setIfNotPresent(tid0, DSchedTimestampTest(2));
+  ASSERT_FALSE(tss.atLeastAsRecentAs(tid0, DSchedTimestampTest(2)));
+
+  auto ts = tss.advance(tid0);
+  ASSERT_TRUE(ts.atLeastAsRecentAs(DSchedTimestampTest(2)));
+  ASSERT_FALSE(ts.atLeastAsRecentAs(DSchedTimestampTest(3)));
+  ASSERT_TRUE(tss.atLeastAsRecentAs(tid0, DSchedTimestampTest(2)));
+  ASSERT_FALSE(tss.atLeastAsRecentAs(tid1, DSchedTimestampTest(1)));
+
+  ThreadTimestamps tss2;
+  tss2.setIfNotPresent(tid1, DSchedTimestampTest(3));
+  ASSERT_FALSE(tss2.atLeastAsRecentAs(tid1, DSchedTimestampTest(4)));
+  ASSERT_TRUE(tss2.atLeastAsRecentAs(tid1, DSchedTimestampTest(3)));
+
+  ASSERT_FALSE(tss.atLeastAsRecentAsAny(tss2));
+  tss.sync(tss2);
+  ASSERT_TRUE(tss.atLeastAsRecentAs(tid1, DSchedTimestampTest(3)));
+  ASSERT_FALSE(tss.atLeastAsRecentAs(tid1, DSchedTimestampTest(4)));
+
+  ThreadTimestamps tss3;
+  tss3.setIfNotPresent(tid1, DSchedTimestampTest(4));
+  ASSERT_TRUE(tss3.atLeastAsRecentAsAny(tss2));
+  ASSERT_FALSE(tss2.atLeastAsRecentAsAny(tss3));
+
+  ThreadTimestamps tss4, tss5;
+  tss4.setIfNotPresent(DSchedThreadId(10), DSchedTimestampTest(5));
+  tss5.setIfNotPresent(DSchedThreadId(11), DSchedTimestampTest(5));
+  ASSERT_FALSE(tss4.atLeastAsRecentAsAny(tss5));
+  ASSERT_FALSE(tss5.atLeastAsRecentAsAny(tss4));
+}
+
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   return RUN_ALL_TESTS();
 }

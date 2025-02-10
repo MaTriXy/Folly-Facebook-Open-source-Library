@@ -1,11 +1,11 @@
 /*
- * Copyright 2012-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-//
-// Author: andrei.alexandrescu@fb.com
+#pragma once
 
-#include <folly/Benchmark.h>
+#include <list>
+#include <random>
+
 #include <folly/FBString.h>
 #include <folly/Random.h>
 #include <folly/portability/GTest.h>
@@ -27,12 +28,12 @@ namespace test {
 namespace detail {
 
 auto static const seed = randomNumberSeed();
-typedef boost::mt19937 RandomT;
-static RandomT rng(seed);
+using RandomT = std::mt19937;
+extern RandomT rng;
 
 template <class Integral1, class Integral2>
 Integral2 random(Integral1 low, Integral2 up) {
-  boost::uniform_int<> range(low, up);
+  std::uniform_int_distribution<> range(low, up);
   return range(rng);
 }
 
@@ -52,36 +53,19 @@ void Num2String(String& str, Integral /* n */) {
   str.resize(strlen(str.c_str()));
 }
 
-std::list<char> RandomList(unsigned int maxSize) {
-  std::list<char> lst(random(0u, maxSize));
-  std::list<char>::iterator i = lst.begin();
-  for (; i != lst.end(); ++i) {
-    *i = random('a', 'z');
-  }
-  return lst;
-}
+std::list<char> RandomList(unsigned int maxSize);
 
 template <class T>
 T randomObject();
 
 template <>
-int randomObject<int>() {
-  return random(0, 1024);
-}
+int randomObject<int>();
 
 template <>
-std::string randomObject<std::string>() {
-  std::string result;
-  randomString(&result);
-  return result;
-}
+std::string randomObject<std::string>();
 
 template <>
-folly::fbstring randomObject<folly::fbstring>() {
-  folly::fbstring result;
-  randomString(&result);
-  return result;
-}
+folly::fbstring randomObject<folly::fbstring>();
 
 #define CONCAT(A, B) CONCAT_HELPER(A, B)
 #define CONCAT_HELPER(A, B) A##B

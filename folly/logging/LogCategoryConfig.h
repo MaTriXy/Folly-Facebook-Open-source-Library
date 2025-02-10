@@ -1,11 +1,11 @@
 /*
- * Copyright 2017-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
 #include <string>
@@ -29,8 +30,7 @@ namespace folly {
 class LogCategoryConfig {
  public:
   explicit LogCategoryConfig(
-      LogLevel level = LogLevel::WARNING,
-      bool inheritParentLevel = true);
+      LogLevel level = kDefaultLogLevel, bool inheritParentLevel = true);
   LogCategoryConfig(
       LogLevel level,
       bool inheritParentLevel,
@@ -42,13 +42,18 @@ class LogCategoryConfig {
   /**
    * The LogLevel for this category.
    */
-  LogLevel level{LogLevel::WARNING};
+  LogLevel level{kDefaultLogLevel};
 
   /**
    * Whether this category should inherit its effective log level from its
    * parent category, if the parent category has a more verbose log level.
    */
   bool inheritParentLevel{true};
+
+  /**
+   * Which messages at this category should propagate to its parent category.
+   */
+  LogLevel propagateLevelMessagesToParent{LogLevel::MIN_LEVEL};
 
   /**
    * An optional list of LogHandler names to use for this category.

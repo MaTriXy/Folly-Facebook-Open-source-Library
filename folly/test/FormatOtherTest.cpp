@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,47 +14,21 @@
  * limitations under the License.
  */
 
-#include <folly/Format.h>
-
 #include <glog/logging.h>
 
 #include <folly/FBVector.h>
 #include <folly/FileUtil.h>
+#include <folly/Format.h>
 #include <folly/Portability.h>
-#include <folly/dynamic.h>
-#include <folly/json.h>
+#include <folly/json/dynamic.h>
+#include <folly/json/json.h>
+#include <folly/portability/GFlags.h>
 #include <folly/portability/GTest.h>
 #include <folly/small_vector.h>
 
+FOLLY_GNU_DISABLE_WARNING("-Wdeprecated-declarations")
+
 using namespace folly;
-
-TEST(FormatOther, file) {
-  // Test writing to FILE. I'd use open_memstream but that's not available
-  // outside of Linux (even though it's in POSIX.1-2008).
-  {
-    int fds[2];
-    CHECK_ERR(pipe(fds));
-    SCOPE_EXIT {
-      // fclose on Windows automatically closes the underlying
-      // file descriptor.
-      if (!kIsWindows) {
-        closeNoInt(fds[1]);
-      }
-    };
-    {
-      FILE* fp = fdopen(fds[1], "wb");
-      PCHECK(fp);
-      SCOPE_EXIT { fclose(fp); };
-      writeTo(fp, format("{} {}", 42, 23));  // <= 512 bytes (PIPE_BUF)
-    }
-
-    char buf[512];
-    ssize_t n = readFull(fds[0], buf, sizeof(buf));
-    CHECK_GE(n, 0);
-
-    EXPECT_EQ("42 23", std::string(buf, n));
-  }
-}
 
 TEST(FormatOther, dynamic) {
   auto dyn = parseJson(
@@ -102,12 +76,12 @@ TEST(FormatOther, fbvector) {
   testFormatSeq<fbvector<int>>();
 }
 
-TEST(FormatOther, small_vector) {
+TEST(FormatOther, smallVector) {
   testFormatSeq<small_vector<int, 2>>();
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
   testing::InitGoogleTest(&argc, argv);
-  gflags::ParseCommandLineFlags(&argc, &argv, true);
+  folly::gflags::ParseCommandLineFlags(&argc, &argv, true);
   return RUN_ALL_TESTS();
 }

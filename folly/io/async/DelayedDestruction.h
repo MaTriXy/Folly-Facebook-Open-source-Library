@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-present Facebook, Inc.
+ * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *   http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,9 +16,9 @@
 
 #pragma once
 
-#include <folly/io/async/DelayedDestructionBase.h>
+#include <memory>
 
-#include <glog/logging.h>
+#include <folly/io/async/DelayedDestructionBase.h>
 
 namespace folly {
 
@@ -68,14 +68,10 @@ class DelayedDestruction : public DelayedDestructionBase {
    */
   class Destructor {
    public:
-    void operator()(DelayedDestruction* dd) const {
-      dd->destroy();
-    }
+    void operator()(DelayedDestruction* dd) const { dd->destroy(); }
   };
 
-  bool getDestroyPending() const {
-    return destroyPending_;
-  }
+  bool getDestroyPending() const { return destroyPending_; }
 
  protected:
   /**
@@ -94,7 +90,7 @@ class DelayedDestruction : public DelayedDestructionBase {
    * shared_ptr using a DelayedDestruction::Destructor as the second argument
    * to the shared_ptr constructor.
    */
-  ~DelayedDestruction() override = default;
+  ~DelayedDestruction() override;
 
   DelayedDestruction() : destroyPending_(false) {}
 
@@ -117,4 +113,14 @@ class DelayedDestruction : public DelayedDestructionBase {
     delete this;
   }
 };
+
+template <typename T>
+using DelayedDestructionUniquePtr =
+    std::unique_ptr<T, DelayedDestruction::Destructor>;
+
+template <typename T, typename... A>
+DelayedDestructionUniquePtr<T> makeDelayedDestructionUniquePtr(A&&... a) {
+  return DelayedDestructionUniquePtr<T>{new T(static_cast<A&&>(a)...)};
+}
+
 } // namespace folly
